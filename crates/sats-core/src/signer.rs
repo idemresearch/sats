@@ -54,8 +54,7 @@ mod tests {
     use crate::engine::build_plan;
     use crate::plan::PlanStatus;
 
-    const MNEMONIC: &str =
-        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     /// The full offline product loop: a watch-only wallet plans, the
     /// LocalSigner signs, and the result finalizes into a broadcastable tx.
@@ -69,13 +68,25 @@ mod tests {
             .unwrap();
 
         // Fund the watch-only wallet with a confirmed fake output.
-        let block_1000 = BlockId { height: 1000, hash: BlockHash::all_zeros() };
+        let block_1000 = BlockId {
+            height: 1000,
+            hash: BlockHash::all_zeros(),
+        };
         insert_checkpoint(&mut wallet, block_1000);
-        insert_checkpoint(&mut wallet, BlockId { height: 2000, hash: BlockHash::all_zeros() });
+        insert_checkpoint(
+            &mut wallet,
+            BlockId {
+                height: 2000,
+                hash: BlockHash::all_zeros(),
+            },
+        );
         receive_output(
             &mut wallet,
             Amount::from_sat(100_000),
-            ConfirmationBlockTime { block_id: block_1000, confirmation_time: 100 },
+            ConfirmationBlockTime {
+                block_id: block_1000,
+                confirmation_time: 100,
+            },
         );
 
         let recipient = wallet.reveal_next_address(KeychainKind::External).address;

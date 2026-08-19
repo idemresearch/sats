@@ -20,10 +20,11 @@ pub fn run(
     let mut ctx = walletd::open(store, config, network)?;
 
     if let Some(file) = tx_file {
-        let text = fs::read_to_string(file).with_context(|| format!("cannot read {}", file.display()))?;
+        let text =
+            fs::read_to_string(file).with_context(|| format!("cannot read {}", file.display()))?;
         let bytes = hex::decode(text.trim()).map_err(|e| anyhow!("not valid tx hex: {e}"))?;
-        let tx: Transaction =
-            consensus::encode::deserialize(&bytes).map_err(|e| anyhow!("not a valid transaction: {e}"))?;
+        let tx: Transaction = consensus::encode::deserialize(&bytes)
+            .map_err(|e| anyhow!("not a valid transaction: {e}"))?;
         let txid = ctx.broadcast(&tx)?;
         report(json, &txid.to_string());
         return Ok(());

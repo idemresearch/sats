@@ -45,7 +45,10 @@ pub fn run(
     store.save_plan(net_name, &plan)?;
 
     if json {
-        println!("{}", serde_json::json!({ "id": plan.id, "status": "signed" }));
+        println!(
+            "{}",
+            serde_json::json!({ "id": plan.id, "status": "signed" })
+        );
     } else {
         ui::ok(&format!("signed  {}", plan.id));
         ui::dim("next: sats broadcast");

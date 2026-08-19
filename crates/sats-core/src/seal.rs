@@ -59,7 +59,11 @@ pub fn seal(plaintext: &[u8], password: &[u8], aad: &[u8]) -> Result<SealedBlob,
 }
 
 /// Seal `plaintext` under a caller-provided random 32-byte key (no KDF).
-pub fn seal_with_key(plaintext: &[u8], key: &[u8; 32], aad: &[u8]) -> Result<SealedBlob, SealError> {
+pub fn seal_with_key(
+    plaintext: &[u8],
+    key: &[u8; 32],
+    aad: &[u8],
+) -> Result<SealedBlob, SealError> {
     let (nonce, ct) = encrypt(key, plaintext, aad)?;
     Ok(SealedBlob {
         v: VERSION,
@@ -74,7 +78,11 @@ pub fn seal_with_key(plaintext: &[u8], key: &[u8; 32], aad: &[u8]) -> Result<Sea
 }
 
 /// Open a password-sealed blob.
-pub fn open(blob: &SealedBlob, password: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealError> {
+pub fn open(
+    blob: &SealedBlob,
+    password: &[u8],
+    aad: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, SealError> {
     check_version(blob)?;
     if blob.kdf != KDF_ARGON2ID {
         return Err(SealError::UnsupportedKdf(blob.kdf.clone()));
@@ -85,7 +93,11 @@ pub fn open(blob: &SealedBlob, password: &[u8], aad: &[u8]) -> Result<Zeroizing<
 }
 
 /// Open a key-sealed blob.
-pub fn open_with_key(blob: &SealedBlob, key: &[u8; 32], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealError> {
+pub fn open_with_key(
+    blob: &SealedBlob,
+    key: &[u8; 32],
+    aad: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, SealError> {
     check_version(blob)?;
     if blob.kdf != KDF_NONE {
         return Err(SealError::UnsupportedKdf(blob.kdf.clone()));
@@ -138,7 +150,13 @@ fn encrypt(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> Result<([u8; 24], Ve
     getrandom::fill(&mut nonce).map_err(|_| SealError::Rng)?;
     let cipher = XChaCha20Poly1305::new(key.into());
     let ct = cipher
-        .encrypt(XNonce::from_slice(&nonce), Payload { msg: plaintext, aad })
+        .encrypt(
+            XNonce::from_slice(&nonce),
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|_| SealError::Encrypt)?;
     Ok((nonce, ct))
 }
@@ -148,10 +166,7 @@ fn decrypt(key: &[u8; 32], blob: &SealedBlob, aad: &[u8]) -> Result<Zeroizing<Ve
     let ct = b64_field(&blob.ct, "ct")?;
     let cipher = XChaCha20Poly1305::new(key.into());
     let pt = cipher
-        .decrypt(
-            XNonce::from_slice(&nonce),
-            Payload { msg: &ct, aad },
-        )
+        .decrypt(XNonce::from_slice(&nonce), Payload { msg: &ct, aad })
         .map_err(|_| SealError::Decrypt)?;
     Ok(Zeroizing::new(pt))
 }
@@ -178,13 +193,19 @@ mod tests {
     #[test]
     fn wrong_password_fails() {
         let blob = seal(b"secret", b"correct", AAD).unwrap();
-        assert!(matches!(open(&blob, b"wrong", AAD), Err(SealError::Decrypt)));
+        assert!(matches!(
+            open(&blob, b"wrong", AAD),
+            Err(SealError::Decrypt)
+        ));
     }
 
     #[test]
     fn wrong_aad_fails() {
         let blob = seal(b"secret", b"pw", AAD).unwrap();
-        assert!(matches!(open(&blob, b"pw", b"other-purpose"), Err(SealError::Decrypt)));
+        assert!(matches!(
+            open(&blob, b"pw", b"other-purpose"),
+            Err(SealError::Decrypt)
+        ));
     }
 
     #[test]
@@ -210,7 +231,10 @@ mod tests {
     fn mode_confusion_rejected() {
         let key = decode_key_b64(&generate_key_b64().unwrap()).unwrap();
         let blob = seal_with_key(b"x", &key, AAD).unwrap();
-        assert!(matches!(open(&blob, b"pw", AAD), Err(SealError::UnsupportedKdf(_))));
+        assert!(matches!(
+            open(&blob, b"pw", AAD),
+            Err(SealError::UnsupportedKdf(_))
+        ));
 
         let blob2 = seal(b"x", b"pw", AAD).unwrap();
         assert!(matches!(
@@ -223,7 +247,10 @@ mod tests {
     fn unknown_version_rejected() {
         let mut blob = seal(b"x", b"pw", AAD).unwrap();
         blob.v = 2;
-        assert!(matches!(open(&blob, b"pw", AAD), Err(SealError::UnsupportedVersion(2))));
+        assert!(matches!(
+            open(&blob, b"pw", AAD),
+            Err(SealError::UnsupportedVersion(2))
+        ));
     }
 
     #[test]

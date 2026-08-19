@@ -95,7 +95,9 @@ pub fn run(
         } else {
             ui::ok(&format!("authorized  {agent}"));
         }
-        ui::dim(&format!("add to Claude Code:  claude mcp add sats -- sats mcp --agent {agent}"));
+        ui::dim(&format!(
+            "add to Claude Code:  claude mcp add sats -- sats mcp --agent {agent}"
+        ));
         ui::dim(&format!("revoke any time:     sats revoke {agent}"));
     }
     Ok(())
@@ -104,7 +106,9 @@ pub fn run(
 fn validate_agent_name(agent: &str) -> Result<()> {
     let ok = !agent.is_empty()
         && agent.len() <= 32
-        && agent.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+        && agent
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
     if !ok {
         bail!("agent name must be 1-32 chars of a-z, 0-9, - or _");
     }

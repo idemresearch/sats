@@ -19,9 +19,9 @@ pub fn run(store: &Store, config: &Config, network: Network, agent: &str) -> Res
     let net_name = network_name(network);
 
     // Fail loudly at startup — `claude mcp add` time — not mid-conversation.
-    let grant = store
-        .load_grant(net_name, agent)?
-        .with_context(|| format!("no grant for {agent:?} — run: sats authorize {agent} --budget <sats>"))?;
+    let grant = store.load_grant(net_name, agent)?.with_context(|| {
+        format!("no grant for {agent:?} — run: sats authorize {agent} --budget <sats>")
+    })?;
     if grant.is_expired(unix_now()) {
         store.delete_grant(net_name, agent)?;
         bail!("grant for {agent:?} has expired — run: sats authorize {agent} --budget <sats>");
@@ -36,7 +36,11 @@ pub fn run(store: &Store, config: &Config, network: Network, agent: &str) -> Res
         ui::human_duration(grant.expires_at.saturating_sub(unix_now())),
     );
 
-    let service = server::SatsMcp::new(store.dir_override().map(|p| p.to_path_buf()), network, agent.to_string());
+    let service = server::SatsMcp::new(
+        store.dir_override().map(|p| p.to_path_buf()),
+        network,
+        agent.to_string(),
+    );
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

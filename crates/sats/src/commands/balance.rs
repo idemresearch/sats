@@ -5,7 +5,13 @@ use crate::config::Config;
 use crate::store::Store;
 use crate::{ui, walletd};
 
-pub fn run(store: &Store, config: &Config, network: Network, offline: bool, json: bool) -> Result<()> {
+pub fn run(
+    store: &Store,
+    config: &Config,
+    network: Network,
+    offline: bool,
+    json: bool,
+) -> Result<()> {
     let mut ctx = walletd::open(store, config, network)?;
     let mut synced = false;
     if !offline {

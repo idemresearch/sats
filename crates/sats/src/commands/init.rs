@@ -21,9 +21,8 @@ pub fn run(store: &Store, mut config: Config, network: Network, words: u8) -> Re
         let pw = password::get(false)?;
         let blob = store.read_seed()?;
         let mnemonic_bytes = seal::open(&blob, pw.as_bytes(), AAD_SEED)?;
-        let mnemonic = seed::parse_mnemonic(
-            std::str::from_utf8(&mnemonic_bytes).context("corrupt seed")?,
-        )?;
+        let mnemonic =
+            seed::parse_mnemonic(std::str::from_utf8(&mnemonic_bytes).context("corrupt seed")?)?;
         let (ext, int) = seed::public_descriptors(&mnemonic, network)?;
         walletd::create(store, network, ext, int)?;
         ui::ok(&format!("wallet extended to {net_name}"));

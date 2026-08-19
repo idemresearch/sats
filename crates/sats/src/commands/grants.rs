@@ -37,7 +37,16 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let header = ["Agent", "Budget", "Spent", "Remaining", "Max-tx", "Max-fee", "Txs", "Expires"];
+    let header = [
+        "Agent",
+        "Budget",
+        "Spent",
+        "Remaining",
+        "Max-tx",
+        "Max-fee",
+        "Txs",
+        "Expires",
+    ];
     let rows: Vec<[String; 8]> = grants
         .iter()
         .map(|g| {
@@ -49,7 +58,10 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
                 g.max_tx_sat.map(format_sats).unwrap_or_else(|| "—".into()),
                 g.max_fee_sat.map(format_sats).unwrap_or_else(|| "—".into()),
                 g.tx_count.to_string(),
-                format!("in {}", ui::human_duration(g.expires_at.saturating_sub(now))),
+                format!(
+                    "in {}",
+                    ui::human_duration(g.expires_at.saturating_sub(now))
+                ),
             ]
         })
         .collect();

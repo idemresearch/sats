@@ -82,13 +82,15 @@ impl WalletCtx {
                 let request = self.wallet.start_full_scan();
                 let update = client
                     .full_scan(request, STOP_GAP, PARALLEL_REQUESTS)
-                    .map_err(|e| anyhow::anyhow!("esplora unreachable ({}): {e}", self.esplora_url))?;
+                    .map_err(|e| {
+                        anyhow::anyhow!("esplora unreachable ({}): {e}", self.esplora_url)
+                    })?;
                 self.wallet.apply_update(update)?;
             } else {
                 let request = self.wallet.start_sync_with_revealed_spks();
-                let update = client
-                    .sync(request, PARALLEL_REQUESTS)
-                    .map_err(|e| anyhow::anyhow!("esplora unreachable ({}): {e}", self.esplora_url))?;
+                let update = client.sync(request, PARALLEL_REQUESTS).map_err(|e| {
+                    anyhow::anyhow!("esplora unreachable ({}): {e}", self.esplora_url)
+                })?;
                 self.wallet.apply_update(update)?;
             }
             self.persist()
@@ -143,7 +145,10 @@ impl StatusLine {
             eprint!("{msg}");
             let _ = std::io::stderr().flush();
         }
-        StatusLine { active, len: msg.chars().count() }
+        StatusLine {
+            active,
+            len: msg.chars().count(),
+        }
     }
 
     fn finish(self) {

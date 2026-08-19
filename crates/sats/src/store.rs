@@ -41,10 +41,17 @@ impl Store {
             None => {
                 let dirs = directories::ProjectDirs::from("sh", "sats", "sats")
                     .context("cannot determine home directory")?;
-                (dirs.config_dir().to_path_buf(), dirs.data_dir().to_path_buf())
+                (
+                    dirs.config_dir().to_path_buf(),
+                    dirs.data_dir().to_path_buf(),
+                )
             }
         };
-        Ok(Store { config_dir, data_dir, override_dir: dir_override.map(Path::to_path_buf) })
+        Ok(Store {
+            config_dir,
+            data_dir,
+            override_dir: dir_override.map(Path::to_path_buf),
+        })
     }
 
     /// The `--dir`/`SATS_DIR` override this store was opened with, if any —
@@ -104,9 +111,13 @@ impl Store {
                 continue;
             }
             let Ok(bytes) = fs::read(&path) else { continue };
-            let Ok(plan) = serde_json::from_slice::<Plan>(&bytes) else { continue };
+            let Ok(plan) = serde_json::from_slice::<Plan>(&bytes) else {
+                continue;
+            };
             if plan.status == status
-                && newest.as_ref().is_none_or(|n| plan.created_at > n.created_at)
+                && newest
+                    .as_ref()
+                    .is_none_or(|n| plan.created_at > n.created_at)
             {
                 newest = Some(plan);
             }
@@ -115,7 +126,9 @@ impl Store {
     }
 
     pub fn save_grant(&self, network: &str, grant: &Grant) -> Result<()> {
-        let path = self.grants_dir(network).join(format!("{}.json", grant.agent));
+        let path = self
+            .grants_dir(network)
+            .join(format!("{}.json", grant.agent));
         write_atomic(&path, &serde_json::to_vec_pretty(grant)?, true)
     }
 
@@ -154,7 +167,9 @@ impl Store {
                 continue;
             }
             let Ok(bytes) = fs::read(&path) else { continue };
-            let Ok(grant) = serde_json::from_slice::<Grant>(&bytes) else { continue };
+            let Ok(grant) = serde_json::from_slice::<Grant>(&bytes) else {
+                continue;
+            };
             if grant.is_expired(now_unix) {
                 let _ = fs::remove_file(&path);
                 continue;
@@ -171,7 +186,8 @@ impl Store {
             bail!("no wallet — run: sats init");
         }
         let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
-        serde_json::from_slice(&bytes).with_context(|| format!("corrupt seed file {}", path.display()))
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("corrupt seed file {}", path.display()))
     }
 
     pub fn write_seed(&self, blob: &SealedBlob) -> Result<()> {
@@ -187,7 +203,8 @@ pub fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let tmp = path.with_extension("tmp");
     {
-        let mut file = fs::File::create(&tmp).with_context(|| format!("cannot write {}", tmp.display()))?;
+        let mut file =
+            fs::File::create(&tmp).with_context(|| format!("cannot write {}", tmp.display()))?;
         set_secret_perms(&file, secret)?;
         file.write_all(bytes)?;
         file.sync_all()?;

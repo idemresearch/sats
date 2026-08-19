@@ -49,10 +49,21 @@ impl SpendRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum DenyReason {
-    Expired { expired_at: u64 },
-    OverMaxTx { requested_sat: u64, max_tx_sat: u64 },
-    OverMaxFee { fee_sat: u64, max_fee_sat: u64 },
-    OverBudget { requested_sat: u64, remaining_sat: u64 },
+    Expired {
+        expired_at: u64,
+    },
+    OverMaxTx {
+        requested_sat: u64,
+        max_tx_sat: u64,
+    },
+    OverMaxFee {
+        fee_sat: u64,
+        max_fee_sat: u64,
+    },
+    OverBudget {
+        requested_sat: u64,
+        remaining_sat: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,21 +76,32 @@ pub enum Decision {
 /// expiry → per-tx amount cap → per-tx fee cap → budget.
 pub fn authorize_spend(grant: &Grant, req: &SpendRequest, now_unix: u64) -> Decision {
     if grant.is_expired(now_unix) {
-        return Decision::Deny(DenyReason::Expired { expired_at: grant.expires_at });
+        return Decision::Deny(DenyReason::Expired {
+            expired_at: grant.expires_at,
+        });
     }
     if let Some(max_tx_sat) = grant.max_tx_sat
         && req.amount_sat > max_tx_sat
     {
-        return Decision::Deny(DenyReason::OverMaxTx { requested_sat: req.amount_sat, max_tx_sat });
+        return Decision::Deny(DenyReason::OverMaxTx {
+            requested_sat: req.amount_sat,
+            max_tx_sat,
+        });
     }
     if let Some(max_fee_sat) = grant.max_fee_sat
         && req.fee_sat > max_fee_sat
     {
-        return Decision::Deny(DenyReason::OverMaxFee { fee_sat: req.fee_sat, max_fee_sat });
+        return Decision::Deny(DenyReason::OverMaxFee {
+            fee_sat: req.fee_sat,
+            max_fee_sat,
+        });
     }
     let remaining_sat = grant.remaining_sat();
     if req.total_sat() > remaining_sat {
-        return Decision::Deny(DenyReason::OverBudget { requested_sat: req.total_sat(), remaining_sat });
+        return Decision::Deny(DenyReason::OverBudget {
+            requested_sat: req.total_sat(),
+            remaining_sat,
+        });
     }
     Decision::Allow
 }
@@ -130,17 +152,26 @@ impl DenyReason {
     pub fn human(&self) -> String {
         match self {
             DenyReason::Expired { .. } => "grant expired".to_string(),
-            DenyReason::OverMaxTx { requested_sat, max_tx_sat } => format!(
+            DenyReason::OverMaxTx {
+                requested_sat,
+                max_tx_sat,
+            } => format!(
                 "requested  {} sats\nmax tx     {} sats",
                 format_sats(*requested_sat),
                 format_sats(*max_tx_sat)
             ),
-            DenyReason::OverMaxFee { fee_sat, max_fee_sat } => format!(
+            DenyReason::OverMaxFee {
+                fee_sat,
+                max_fee_sat,
+            } => format!(
                 "fee      {} sats\nmax fee  {} sats",
                 format_sats(*fee_sat),
                 format_sats(*max_fee_sat)
             ),
-            DenyReason::OverBudget { requested_sat, remaining_sat } => format!(
+            DenyReason::OverBudget {
+                requested_sat,
+                remaining_sat,
+            } => format!(
                 "requested  {} sats (amount + fee)\nremaining  {} sats",
                 format_sats(*requested_sat),
                 format_sats(*remaining_sat)
@@ -174,7 +205,10 @@ mod tests {
     const NOW: u64 = 1_500;
 
     fn req(amount: u64, fee: u64) -> SpendRequest {
-        SpendRequest { amount_sat: amount, fee_sat: fee }
+        SpendRequest {
+            amount_sat: amount,
+            fee_sat: fee,
+        }
     }
 
     #[test]
@@ -211,17 +245,26 @@ mod tests {
         assert_eq!(authorize_spend(&g, &req(10_000, 500), NOW), Decision::Allow);
         assert_eq!(
             authorize_spend(&g, &req(10_001, 0), NOW),
-            Decision::Deny(DenyReason::OverMaxTx { requested_sat: 10_001, max_tx_sat: 10_000 })
+            Decision::Deny(DenyReason::OverMaxTx {
+                requested_sat: 10_001,
+                max_tx_sat: 10_000
+            })
         );
     }
 
     #[test]
     fn max_fee_is_fee_only() {
         let g = grant(50_000, 0, None, Some(1_000));
-        assert_eq!(authorize_spend(&g, &req(20_000, 1_000), NOW), Decision::Allow);
+        assert_eq!(
+            authorize_spend(&g, &req(20_000, 1_000), NOW),
+            Decision::Allow
+        );
         assert_eq!(
             authorize_spend(&g, &req(20_000, 1_001), NOW),
-            Decision::Deny(DenyReason::OverMaxFee { fee_sat: 1_001, max_fee_sat: 1_000 })
+            Decision::Deny(DenyReason::OverMaxFee {
+                fee_sat: 1_001,
+                max_fee_sat: 1_000
+            })
         );
     }
 
@@ -233,7 +276,10 @@ mod tests {
         // One sat over via the fee: denied.
         assert_eq!(
             authorize_spend(&g, &req(9_500, 501), NOW),
-            Decision::Deny(DenyReason::OverBudget { requested_sat: 10_001, remaining_sat: 10_000 })
+            Decision::Deny(DenyReason::OverBudget {
+                requested_sat: 10_001,
+                remaining_sat: 10_000
+            })
         );
     }
 
@@ -243,7 +289,10 @@ mod tests {
         assert_eq!(authorize_spend(&g, &req(4_500, 88), NOW), Decision::Allow);
         assert_eq!(
             authorize_spend(&g, &req(4_500, 89), NOW),
-            Decision::Deny(DenyReason::OverBudget { requested_sat: 4_589, remaining_sat: 4_588 })
+            Decision::Deny(DenyReason::OverBudget {
+                requested_sat: 4_589,
+                remaining_sat: 4_588
+            })
         );
     }
 
@@ -273,7 +322,13 @@ mod tests {
         assert_eq!(g.tx_count, 1);
         // Second spend that no longer fits.
         let err = g.reserve(&req(4_000, 100), NOW).unwrap_err();
-        assert_eq!(err, DenyReason::OverBudget { requested_sat: 4_100, remaining_sat: 3_900 });
+        assert_eq!(
+            err,
+            DenyReason::OverBudget {
+                requested_sat: 4_100,
+                remaining_sat: 3_900
+            }
+        );
         assert_eq!(g.spent_sat, 6_100, "failed reserve must not draw down");
     }
 
@@ -298,7 +353,10 @@ mod tests {
 
     #[test]
     fn deny_reason_serializes_with_tag() {
-        let reason = DenyReason::OverBudget { requested_sat: 20_000, remaining_sat: 4_588 };
+        let reason = DenyReason::OverBudget {
+            requested_sat: 20_000,
+            remaining_sat: 4_588,
+        };
         let json = serde_json::to_value(&reason).unwrap();
         assert_eq!(json["reason"], "over_budget");
         assert_eq!(json["requested_sat"], 20_000);

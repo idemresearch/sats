@@ -68,7 +68,10 @@ pub fn run(
         }
         Err(err) => {
             store.save_plan(ctx.net_name, &plan)?;
-            bail!("{err:#} — plan {} saved as signed, retry: sats broadcast", plan.id);
+            bail!(
+                "{err:#} — plan {} saved as signed, retry: sats broadcast",
+                plan.id
+            );
         }
     }
 }

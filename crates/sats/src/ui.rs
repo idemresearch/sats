@@ -17,14 +17,6 @@ pub fn ok(msg: &str) {
     }
 }
 
-pub fn fail(msg: &str) {
-    if use_color() {
-        println!("{} {msg}", "✗".red());
-    } else {
-        println!("✗ {msg}");
-    }
-}
-
 pub fn warn(msg: &str) {
     if use_color() {
         println!("{} {msg}", "!".yellow());
@@ -70,9 +62,17 @@ pub fn human_duration(secs: u64) -> String {
     let hours = (secs % 86_400) / 3_600;
     let minutes = (secs % 3_600) / 60;
     if days > 0 {
-        if hours > 0 { format!("{days}d {hours}h") } else { format!("{days}d") }
+        if hours > 0 {
+            format!("{days}d {hours}h")
+        } else {
+            format!("{days}d")
+        }
     } else if hours > 0 {
-        if minutes > 0 { format!("{hours}h {minutes}m") } else { format!("{hours}h") }
+        if minutes > 0 {
+            format!("{hours}h {minutes}m")
+        } else {
+            format!("{hours}h")
+        }
     } else if minutes > 0 {
         format!("{minutes}m")
     } else {

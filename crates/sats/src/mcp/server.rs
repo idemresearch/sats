@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{ErrorData, ServerCapabilities, ServerInfo};
@@ -140,7 +140,12 @@ impl SendResult {
 
 impl SatsMcp {
     pub fn new(dir: Option<PathBuf>, network: Network, agent: String) -> Self {
-        SatsMcp { dir, network, agent, tool_router: Self::tool_router() }
+        SatsMcp {
+            dir,
+            network,
+            agent,
+            tool_router: Self::tool_router(),
+        }
     }
 
     /// Run a blocking wallet operation off the async thread.
@@ -159,8 +164,10 @@ impl SatsMcp {
 
 #[tool_router]
 impl SatsMcp {
-    #[tool(description = "Get the wallet balance in satoshis. synced=false means the \
-        chain could not be reached and the value is from cache.")]
+    #[tool(
+        description = "Get the wallet balance in satoshis. synced=false means the \
+        chain could not be reached and the value is from cache."
+    )]
     async fn get_balance(&self) -> Result<Json<BalanceResult>, ErrorData> {
         self.blocking(|dir, network, _agent| {
             let store = Store::open(dir.as_deref())?;
@@ -185,7 +192,9 @@ impl SatsMcp {
             let store = Store::open(dir.as_deref())?;
             let config = Config::load(&store)?;
             let mut ctx = walletd::open(&store, &config, network)?;
-            let info = ctx.wallet.reveal_next_address(bdk_wallet::KeychainKind::External);
+            let info = ctx
+                .wallet
+                .reveal_next_address(bdk_wallet::KeychainKind::External);
             ctx.persist()?;
             Ok(AddressResult {
                 address: info.address.to_string(),
@@ -197,8 +206,10 @@ impl SatsMcp {
         .map(Json)
     }
 
-    #[tool(description = "Get this agent's spending grant: budget, spent, remaining, \
-        per-tx caps, and expiry. Check this before sending.")]
+    #[tool(
+        description = "Get this agent's spending grant: budget, spent, remaining, \
+        per-tx caps, and expiry. Check this before sending."
+    )]
     async fn get_grant(&self) -> Result<Json<GrantResult>, ErrorData> {
         self.blocking(|dir, network, agent| {
             let store = Store::open(dir.as_deref())?;
@@ -244,7 +255,10 @@ impl SatsMcp {
         human-authorized grant (budget, per-tx cap, fee cap, expiry). Returns \
         status='sent' with the txid, or status='denied' with the reason — a denial \
         means human authorization is required, not that you should retry.")]
-    async fn send(&self, Parameters(params): Parameters<SendParams>) -> Result<Json<SendResult>, ErrorData> {
+    async fn send(
+        &self,
+        Parameters(params): Parameters<SendParams>,
+    ) -> Result<Json<SendResult>, ErrorData> {
         self.blocking(move |dir, network, agent| {
             let store = Store::open(dir.as_deref())?;
             let config = Config::load(&store)?;
@@ -284,11 +298,17 @@ fn execute_send(
 
     // Pre-check on the amount alone (fee 0): an obviously over-limit
     // request is denied deterministically, before any network access.
-    let precheck = SpendRequest { amount_sat: params.amount_sat, fee_sat: 0 };
+    let precheck = SpendRequest {
+        amount_sat: params.amount_sat,
+        fee_sat: 0,
+    };
     if let Decision::Deny(reason) = authorize_spend(&grant, &precheck, now) {
         return SendResult::denied(
             reason.code(),
-            format!("human authorization required: {}", reason.human().replace('\n', "; ")),
+            format!(
+                "human authorization required: {}",
+                reason.human().replace('\n', "; ")
+            ),
         );
     }
 
@@ -305,11 +325,17 @@ fn execute_send(
         Err(e) => return SendResult::error(format!("{e:#}")),
     };
 
-    let request = SpendRequest { amount_sat: spend_plan.amount_sat, fee_sat: spend_plan.fee_sat };
+    let request = SpendRequest {
+        amount_sat: spend_plan.amount_sat,
+        fee_sat: spend_plan.fee_sat,
+    };
     if let Decision::Deny(reason) = authorize_spend(&grant, &request, now) {
         return SendResult::denied(
             reason.code(),
-            format!("human authorization required: {}", reason.human().replace('\n', "; ")),
+            format!(
+                "human authorization required: {}",
+                reason.human().replace('\n', "; ")
+            ),
         );
     }
 
@@ -318,7 +344,10 @@ fn execute_send(
     if let Err(reason) = grant.reserve(&request, now) {
         return SendResult::denied(
             reason.code(),
-            format!("human authorization required: {}", reason.human().replace('\n', "; ")),
+            format!(
+                "human authorization required: {}",
+                reason.human().replace('\n', "; ")
+            ),
         );
     }
     if let Err(e) = store.save_grant(net_name, &grant) {
@@ -360,7 +389,12 @@ fn execute_send(
         Ok(txid) => {
             spend_plan.status = PlanStatus::Broadcast;
             let _ = store.save_plan(net_name, &spend_plan);
-            SendResult::sent(txid.to_string(), request.amount_sat, request.fee_sat, grant.remaining_sat())
+            SendResult::sent(
+                txid.to_string(),
+                request.amount_sat,
+                request.fee_sat,
+                grant.remaining_sat(),
+            )
         }
         // Signed but not broadcast: budget stays reserved (the signed tx
         // is out of our hands), and a human can retry the saved plan.
@@ -370,7 +404,7 @@ fn execute_send(
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for SatsMcp {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());

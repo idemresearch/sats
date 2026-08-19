@@ -42,7 +42,10 @@ pub fn signing_wallet(mnemonic: &Mnemonic, network: Network) -> Result<Wallet, S
 }
 
 /// Public (watch-only) descriptor strings: `(external, internal)`.
-pub fn public_descriptors(mnemonic: &Mnemonic, network: Network) -> Result<(String, String), SeedError> {
+pub fn public_descriptors(
+    mnemonic: &Mnemonic,
+    network: Network,
+) -> Result<(String, String), SeedError> {
     let wallet = signing_wallet(mnemonic, network)?;
     Ok((
         wallet.public_descriptor(KeychainKind::External).to_string(),
@@ -55,23 +58,28 @@ mod tests {
     use super::*;
 
     /// The BIP-86 reference vectors.
-    const VECTOR_MNEMONIC: &str =
-        "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const VECTOR_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
     #[test]
     fn bip86_mainnet_vectors() {
         let mnemonic = parse_mnemonic(VECTOR_MNEMONIC).unwrap();
         let mut wallet = signing_wallet(&mnemonic, Network::Bitcoin).unwrap();
         assert_eq!(
-            wallet.reveal_next_address(KeychainKind::External).to_string(),
+            wallet
+                .reveal_next_address(KeychainKind::External)
+                .to_string(),
             "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"
         );
         assert_eq!(
-            wallet.reveal_next_address(KeychainKind::External).to_string(),
+            wallet
+                .reveal_next_address(KeychainKind::External)
+                .to_string(),
             "bc1p4qhjn9zdvkux4e44uhx8tc55attvtyu358kutcqkudyccelu0was9fqzwh"
         );
         assert_eq!(
-            wallet.reveal_next_address(KeychainKind::Internal).to_string(),
+            wallet
+                .reveal_next_address(KeychainKind::Internal)
+                .to_string(),
             "bc1p3qkhfews2uk44qtvauqyr2ttdsw7svhkl9nkm9s9c3x4ax5h60wqwruhk7"
         );
     }
@@ -81,9 +89,18 @@ mod tests {
         let mnemonic = parse_mnemonic(VECTOR_MNEMONIC).unwrap();
         let (ext, int) = public_descriptors(&mnemonic, Network::Signet).unwrap();
         for desc in [&ext, &int] {
-            assert!(desc.starts_with("tr("), "expected taproot descriptor: {desc}");
-            assert!(desc.contains("/86'/1'/0'"), "expected signet BIP-86 path: {desc}");
-            assert!(!desc.contains("prv"), "public descriptor leaked a private key");
+            assert!(
+                desc.starts_with("tr("),
+                "expected taproot descriptor: {desc}"
+            );
+            assert!(
+                desc.contains("/86'/1'/0'"),
+                "expected signet BIP-86 path: {desc}"
+            );
+            assert!(
+                !desc.contains("prv"),
+                "public descriptor leaked a private key"
+            );
         }
         assert!(ext.contains("/0/*"));
         assert!(int.contains("/1/*"));
@@ -98,7 +115,9 @@ mod tests {
             .create_wallet_no_persist()
             .unwrap();
         assert_eq!(
-            watch.reveal_next_address(KeychainKind::External).to_string(),
+            watch
+                .reveal_next_address(KeychainKind::External)
+                .to_string(),
             "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"
         );
     }
@@ -107,7 +126,10 @@ mod tests {
     fn generate_word_counts() {
         assert_eq!(generate_mnemonic(12).unwrap().word_count(), 12);
         assert_eq!(generate_mnemonic(24).unwrap().word_count(), 24);
-        assert!(matches!(generate_mnemonic(15), Err(SeedError::BadWordCount)));
+        assert!(matches!(
+            generate_mnemonic(15),
+            Err(SeedError::BadWordCount)
+        ));
         // Two generations must differ (entropy actually used).
         assert_ne!(
             generate_mnemonic(12).unwrap().to_string(),

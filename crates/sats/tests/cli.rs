@@ -16,7 +16,11 @@ fn sats(dir: &TempDir) -> Command {
 }
 
 fn init_wallet(dir: &TempDir) {
-    sats(dir).arg("init").assert().success().stdout(predicate::str::contains("wallet created"));
+    sats(dir)
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wallet created"));
 }
 
 #[test]
@@ -37,7 +41,10 @@ fn init_receive_balance_flow() {
     assert_eq!(json["index"], 1);
     assert!(json["address"].as_str().unwrap().starts_with("tb1p"));
 
-    let out = sats(&dir).args(["balance", "--offline", "--json"]).assert().success();
+    let out = sats(&dir)
+        .args(["balance", "--offline", "--json"])
+        .assert()
+        .success();
     let json: serde_json::Value =
         serde_json::from_slice(&out.get_output().stdout).expect("json output");
     assert_eq!(json["balance_sat"], 0);
@@ -124,7 +131,9 @@ fn sign_and_broadcast_without_plans_point_to_next_step() {
         .arg("sign")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no unsigned plans — run: sats plan"));
+        .stderr(predicate::str::contains(
+            "no unsigned plans — run: sats plan",
+        ));
     sats(&dir)
         .arg("broadcast")
         .assert()
@@ -138,7 +147,16 @@ fn authorize_grants_revoke_lifecycle() {
     init_wallet(&dir);
 
     sats(&dir)
-        .args(["authorize", "claude", "--budget", "50000", "--max-tx", "10000", "--max-fee", "1000"])
+        .args([
+            "authorize",
+            "claude",
+            "--budget",
+            "50000",
+            "--max-tx",
+            "10000",
+            "--max-fee",
+            "1000",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("authorized  claude"));
@@ -168,7 +186,10 @@ fn authorize_grants_revoke_lifecycle() {
         .assert()
         .success()
         .stdout(predicate::str::contains("revoked  claude"));
-    assert!(!grant_path.exists(), "revocation must delete the grant file");
+    assert!(
+        !grant_path.exists(),
+        "revocation must delete the grant file"
+    );
 
     sats(&dir)
         .args(["revoke", "claude"])
@@ -204,7 +225,14 @@ fn authorize_rejects_bad_inputs() {
         .failure()
         .stderr(predicate::str::contains("budget"));
     sats(&dir)
-        .args(["authorize", "claude", "--budget", "1000", "--expires", "soon"])
+        .args([
+            "authorize",
+            "claude",
+            "--budget",
+            "1000",
+            "--expires",
+            "soon",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("invalid --expires"));

@@ -48,7 +48,12 @@ pub fn run(
 }
 
 /// Parse, estimate, and build — shared by `plan` and `send`.
-pub fn build(ctx: &mut WalletCtx, address: &str, amount: u64, fee_rate: Option<u64>) -> Result<Plan> {
+pub fn build(
+    ctx: &mut WalletCtx,
+    address: &str,
+    amount: u64,
+    fee_rate: Option<u64>,
+) -> Result<Plan> {
     let addr = Address::from_str(address)
         .map_err(|e| anyhow!("invalid address: {e}"))?
         .require_network(ctx.network)

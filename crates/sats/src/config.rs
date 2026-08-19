@@ -16,7 +16,10 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { network: "signet".into(), esplora: default_esplora() }
+        Config {
+            network: "signet".into(),
+            esplora: default_esplora(),
+        }
     }
 }
 
@@ -24,7 +27,10 @@ fn default_esplora() -> BTreeMap<String, String> {
     BTreeMap::from([
         ("mainnet".into(), "https://mempool.space/api".into()),
         ("signet".into(), "https://mempool.space/signet/api".into()),
-        ("testnet4".into(), "https://mempool.space/testnet4/api".into()),
+        (
+            "testnet4".into(),
+            "https://mempool.space/testnet4/api".into(),
+        ),
         ("regtest".into(), "http://localhost:3002".into()),
     ])
 }
@@ -35,7 +41,8 @@ impl Config {
         if !path.exists() {
             return Ok(Config::default());
         }
-        let text = fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))
     }
 

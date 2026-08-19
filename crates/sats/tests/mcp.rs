@@ -63,7 +63,12 @@ impl McpSession {
         }
     }
 
-    fn call_tool(&mut self, id: u64, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+    fn call_tool(
+        &mut self,
+        id: u64,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
         self.send(serde_json::json!({
             "jsonrpc": "2.0", "id": id, "method": "tools/call",
             "params": { "name": name, "arguments": arguments },
@@ -85,7 +90,17 @@ impl Drop for McpSession {
 fn mcp_serves_tools_and_enforces_the_grant() {
     let dir = TempDir::new().unwrap();
     run_sats(&dir, &["init"]);
-    run_sats(&dir, &["authorize", "claude", "--budget", "50000", "--max-tx", "10000"]);
+    run_sats(
+        &dir,
+        &[
+            "authorize",
+            "claude",
+            "--budget",
+            "50000",
+            "--max-tx",
+            "10000",
+        ],
+    );
 
     let mut mcp = McpSession::start(&dir, "claude");
 
@@ -112,7 +127,10 @@ fn mcp_serves_tools_and_enforces_the_grant() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, ["get_balance", "get_grant", "get_receive_address", "send"]);
+    assert_eq!(
+        names,
+        ["get_balance", "get_grant", "get_receive_address", "send"]
+    );
 
     // The grant snapshot lets the agent plan.
     let grant = mcp.call_tool(3, "get_grant", serde_json::json!({}));
@@ -131,7 +149,10 @@ fn mcp_serves_tools_and_enforces_the_grant() {
     assert_eq!(denial["status"], "denied");
     assert_eq!(denial["reason"], "over_max_tx");
     let message = denial["message"].as_str().unwrap();
-    assert!(message.contains("human authorization required"), "got: {message}");
+    assert!(
+        message.contains("human authorization required"),
+        "got: {message}"
+    );
     assert!(message.contains("20,000"), "got: {message}");
     assert!(message.contains("10,000"), "got: {message}");
 
