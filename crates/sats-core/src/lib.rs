@@ -5,7 +5,10 @@
 //! `now_unix: u64`. Persistence and chain sync are the caller's job; the
 //! engine operates on a [`bdk_wallet::Wallet`] the caller owns.
 
+pub mod error;
 pub mod fmt;
+pub mod seal;
+pub mod seed;
 
 pub use bdk_wallet;
 pub use bdk_wallet::bitcoin;
