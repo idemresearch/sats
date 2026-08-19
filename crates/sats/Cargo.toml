@@ -17,6 +17,7 @@ bdk_wallet = { workspace = true, features = ["rusqlite"] }
 bdk_esplora = { workspace = true }
 clap = { workspace = true }
 rmcp = { workspace = true }
+schemars = { workspace = true }
 tokio = { workspace = true }
 owo-colors = { workspace = true }
 rpassword = { workspace = true }

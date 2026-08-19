@@ -1355,6 +1355,7 @@ dependencies = [
  "rmcp",
  "rpassword",
  "sats-core",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",

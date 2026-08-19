@@ -31,6 +31,7 @@ pub fn unix_now() -> u64 {
 pub struct Store {
     config_dir: PathBuf,
     data_dir: PathBuf,
+    override_dir: Option<PathBuf>,
 }
 
 impl Store {
@@ -43,7 +44,13 @@ impl Store {
                 (dirs.config_dir().to_path_buf(), dirs.data_dir().to_path_buf())
             }
         };
-        Ok(Store { config_dir, data_dir })
+        Ok(Store { config_dir, data_dir, override_dir: dir_override.map(Path::to_path_buf) })
+    }
+
+    /// The `--dir`/`SATS_DIR` override this store was opened with, if any —
+    /// lets long-running components reconstruct an identical store.
+    pub fn dir_override(&self) -> Option<&Path> {
+        self.override_dir.as_deref()
     }
 
     pub fn config_path(&self) -> PathBuf {

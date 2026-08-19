@@ -2,12 +2,12 @@ mod cli;
 mod commands;
 mod config;
 mod keys;
+mod mcp;
 mod password;
 mod store;
 mod ui;
 mod walletd;
 
-use anyhow::bail;
 use clap::Parser;
 
 use crate::cli::{Cli, Command};
@@ -50,6 +50,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Command::Revoke { agent } => commands::revoke::run(&store, network, &agent, json),
         Command::Grants => commands::grants::run(&store, network, json),
-        _ => bail!("not implemented yet"),
+        Command::Mcp { agent } => mcp::run(&store, &config, network, &agent),
     }
 }
