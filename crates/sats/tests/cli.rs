@@ -82,6 +82,57 @@ fn wrong_password_is_rejected() {
 }
 
 #[test]
+fn plan_with_no_funds_fails_cleanly() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    // Explicit --fee-rate keeps this fully offline (no esplora estimate).
+    sats(&dir)
+        .args([
+            "plan",
+            "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
+            "25000",
+            "--fee-rate",
+            "2",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Insufficient funds"));
+}
+
+#[test]
+fn plan_rejects_wrong_network_address() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args([
+            "plan",
+            "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+            "1000",
+            "--fee-rate",
+            "2",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not valid for signet"));
+}
+
+#[test]
+fn sign_and_broadcast_without_plans_point_to_next_step() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .arg("sign")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no unsigned plans — run: sats plan"));
+    sats(&dir)
+        .arg("broadcast")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no signed plans — run: sats sign"));
+}
+
+#[test]
 fn missing_wallet_points_to_init() {
     let dir = TempDir::new().unwrap();
     sats(&dir)

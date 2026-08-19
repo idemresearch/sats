@@ -112,7 +112,7 @@ impl WalletCtx {
             .or_else(|| estimates.iter().min_by_key(|(k, _)| **k))
             .map(|(_, rate)| *rate)
             .unwrap_or(1.0);
-        Ok(FeeRate::from_sat_per_vb_unchecked((sat_vb.ceil() as u64).max(1)))
+        Ok(FeeRate::from_sat_per_vb_u32((sat_vb.ceil() as u32).max(1)))
     }
 
     pub fn broadcast(&mut self, tx: &Transaction) -> Result<Txid> {

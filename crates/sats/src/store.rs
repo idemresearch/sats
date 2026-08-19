@@ -9,10 +9,18 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use sats_core::plan::{Plan, PlanStatus};
 use sats_core::seal::SealedBlob;
 
 /// AAD binding the master seed blob to its purpose.
 pub const AAD_SEED: &[u8] = b"sats-seed-v1";
+
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 pub struct Store {
     config_dir: PathBuf,
@@ -54,6 +62,43 @@ impl Store {
 
     pub fn seed_exists(&self) -> bool {
         self.seed_path().exists()
+    }
+
+    pub fn save_plan(&self, network: &str, plan: &Plan) -> Result<()> {
+        let path = self.plans_dir(network).join(format!("{}.json", plan.id));
+        write_atomic(&path, &serde_json::to_vec_pretty(plan)?, false)
+    }
+
+    pub fn load_plan(&self, network: &str, id: &str) -> Result<Plan> {
+        let path = self.plans_dir(network).join(format!("{id}.json"));
+        if !path.exists() {
+            bail!("no plan {id}");
+        }
+        let bytes = fs::read(&path)?;
+        serde_json::from_slice(&bytes).with_context(|| format!("corrupt plan {}", path.display()))
+    }
+
+    /// The newest plan in the given status, if any.
+    pub fn latest_plan(&self, network: &str, status: PlanStatus) -> Result<Option<Plan>> {
+        let dir = self.plans_dir(network);
+        if !dir.exists() {
+            return Ok(None);
+        }
+        let mut newest: Option<Plan> = None;
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else { continue };
+            let Ok(plan) = serde_json::from_slice::<Plan>(&bytes) else { continue };
+            if plan.status == status
+                && newest.as_ref().is_none_or(|n| plan.created_at > n.created_at)
+            {
+                newest = Some(plan);
+            }
+        }
+        Ok(newest)
     }
 
     pub fn read_seed(&self) -> Result<SealedBlob> {
