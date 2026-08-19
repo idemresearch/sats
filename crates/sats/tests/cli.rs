@@ -1,0 +1,249 @@
+//! End-to-end CLI tests. Fully offline and deterministic: every test gets
+//! its own SATS_DIR and uses SATS_PASSWORD instead of a prompt.
+
+use assert_cmd::Command;
+use predicates::prelude::*;
+use tempfile::TempDir;
+
+const PASSWORD: &str = "integration-test-pw";
+
+fn sats(dir: &TempDir) -> Command {
+    let mut cmd = Command::cargo_bin("sats").unwrap();
+    cmd.env("SATS_DIR", dir.path())
+        .env("SATS_PASSWORD", PASSWORD)
+        .env("NO_COLOR", "1");
+    cmd
+}
+
+fn init_wallet(dir: &TempDir) {
+    sats(dir)
+        .arg("init")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wallet created"));
+}
+
+#[test]
+fn init_receive_balance_flow() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+
+    // Fresh signet taproot address, then the next index.
+    sats(&dir)
+        .arg("receive")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("tb1p"))
+        .stdout(predicate::str::contains("index 0"));
+    let out = sats(&dir).args(["receive", "--json"]).assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("json output");
+    assert_eq!(json["index"], 1);
+    assert!(json["address"].as_str().unwrap().starts_with("tb1p"));
+
+    let out = sats(&dir)
+        .args(["balance", "--offline", "--json"])
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("json output");
+    assert_eq!(json["balance_sat"], 0);
+    assert_eq!(json["synced"], false);
+}
+
+#[test]
+fn init_refuses_existing_wallet() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .arg("init")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}
+
+#[test]
+fn init_extends_seed_to_second_network() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args(["init", "--network", "testnet4"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wallet extended to testnet4"));
+    // Signet stays the configured default network.
+    let config = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+    assert!(config.contains("network = \"signet\""));
+}
+
+#[test]
+fn wrong_password_is_rejected() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args(["init", "--network", "mainnet"])
+        .env("SATS_PASSWORD", "wrong-password")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("wrong password"));
+}
+
+#[test]
+fn plan_with_no_funds_fails_cleanly() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    // Explicit --fee-rate keeps this fully offline (no esplora estimate).
+    sats(&dir)
+        .args([
+            "plan",
+            "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
+            "25000",
+            "--fee-rate",
+            "2",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Insufficient funds"));
+}
+
+#[test]
+fn plan_rejects_wrong_network_address() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args([
+            "plan",
+            "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+            "1000",
+            "--fee-rate",
+            "2",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not valid for signet"));
+}
+
+#[test]
+fn sign_and_broadcast_without_plans_point_to_next_step() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .arg("sign")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no unsigned plans — run: sats plan",
+        ));
+    sats(&dir)
+        .arg("broadcast")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no signed plans — run: sats sign"));
+}
+
+#[test]
+fn authorize_grants_revoke_lifecycle() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+
+    sats(&dir)
+        .args([
+            "authorize",
+            "claude",
+            "--budget",
+            "50000",
+            "--max-tx",
+            "10000",
+            "--max-fee",
+            "1000",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("authorized  claude"));
+
+    // Grant file is a 0600 secret holding the wrapped seed.
+    let grant_path = dir.path().join("signet/grants/claude.json");
+    assert!(grant_path.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&grant_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    let out = sats(&dir).args(["grants", "--json"]).assert().success();
+    let json: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(json[0]["agent"], "claude");
+    assert_eq!(json[0]["budget_sat"], 50000);
+    assert_eq!(json[0]["remaining_sat"], 50000);
+    assert_eq!(json[0]["max_tx_sat"], 10000);
+    // Key material must never appear on a read surface.
+    assert!(json[0].get("grant_key").is_none());
+    assert!(json[0].get("wrapped_seed").is_none());
+
+    sats(&dir)
+        .args(["revoke", "claude"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("revoked  claude"));
+    assert!(
+        !grant_path.exists(),
+        "revocation must delete the grant file"
+    );
+
+    sats(&dir)
+        .args(["revoke", "claude"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no grant"));
+}
+
+#[test]
+fn authorize_requires_correct_password() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args(["authorize", "claude", "--budget", "1000"])
+        .env("SATS_PASSWORD", "not-the-password")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("wrong password"));
+}
+
+#[test]
+fn authorize_rejects_bad_inputs() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args(["authorize", "Bad Name!", "--budget", "1000"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("agent name"));
+    sats(&dir)
+        .args(["authorize", "claude", "--budget", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("budget"));
+    sats(&dir)
+        .args([
+            "authorize",
+            "claude",
+            "--budget",
+            "1000",
+            "--expires",
+            "soon",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid --expires"));
+}
+
+#[test]
+fn missing_wallet_points_to_init() {
+    let dir = TempDir::new().unwrap();
+    sats(&dir)
+        .arg("receive")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("run: sats init"));
+}
