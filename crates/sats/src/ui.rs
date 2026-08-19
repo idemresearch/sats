@@ -56,6 +56,30 @@ pub fn sat_rows(rows: &[(&str, u64)]) {
     }
 }
 
+/// Aligned key-value rows with pre-formatted values (mixed content).
+pub fn kv_rows(rows: &[(&str, String)]) {
+    let key_w = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    for (key, value) in rows {
+        println!("{key:<key_w$}  {value}");
+    }
+}
+
+/// Compact duration: "18h", "3d 2h", "45m".
+pub fn human_duration(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let minutes = (secs % 3_600) / 60;
+    if days > 0 {
+        if hours > 0 { format!("{days}d {hours}h") } else { format!("{days}d") }
+    } else if hours > 0 {
+        if minutes > 0 { format!("{hours}h {minutes}m") } else { format!("{hours}h") }
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{secs}s")
+    }
+}
+
 /// A bare `[Y/n]` confirmation. Returns the default on empty input; any
 /// non-tty stdin refuses (agents must go through grants, not prompts).
 pub fn confirm(prompt: &str, default_yes: bool) -> anyhow::Result<bool> {

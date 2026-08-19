@@ -133,6 +133,84 @@ fn sign_and_broadcast_without_plans_point_to_next_step() {
 }
 
 #[test]
+fn authorize_grants_revoke_lifecycle() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+
+    sats(&dir)
+        .args(["authorize", "claude", "--budget", "50000", "--max-tx", "10000", "--max-fee", "1000"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("authorized  claude"));
+
+    // Grant file is a 0600 secret holding the wrapped seed.
+    let grant_path = dir.path().join("signet/grants/claude.json");
+    assert!(grant_path.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&grant_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    let out = sats(&dir).args(["grants", "--json"]).assert().success();
+    let json: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(json[0]["agent"], "claude");
+    assert_eq!(json[0]["budget_sat"], 50000);
+    assert_eq!(json[0]["remaining_sat"], 50000);
+    assert_eq!(json[0]["max_tx_sat"], 10000);
+    // Key material must never appear on a read surface.
+    assert!(json[0].get("grant_key").is_none());
+    assert!(json[0].get("wrapped_seed").is_none());
+
+    sats(&dir)
+        .args(["revoke", "claude"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("revoked  claude"));
+    assert!(!grant_path.exists(), "revocation must delete the grant file");
+
+    sats(&dir)
+        .args(["revoke", "claude"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no grant"));
+}
+
+#[test]
+fn authorize_requires_correct_password() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args(["authorize", "claude", "--budget", "1000"])
+        .env("SATS_PASSWORD", "not-the-password")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("wrong password"));
+}
+
+#[test]
+fn authorize_rejects_bad_inputs() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args(["authorize", "Bad Name!", "--budget", "1000"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("agent name"));
+    sats(&dir)
+        .args(["authorize", "claude", "--budget", "0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("budget"));
+    sats(&dir)
+        .args(["authorize", "claude", "--budget", "1000", "--expires", "soon"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid --expires"));
+}
+
+#[test]
 fn missing_wallet_points_to_init() {
     let dir = TempDir::new().unwrap();
     sats(&dir)

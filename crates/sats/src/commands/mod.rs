@@ -1,5 +1,8 @@
+pub mod authorize;
 pub mod balance;
 pub mod broadcast;
+pub mod grants;
+pub mod revoke;
 pub mod init;
 pub mod plan;
 pub mod receive;

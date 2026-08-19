@@ -9,11 +9,17 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use sats_core::authz::Grant;
 use sats_core::plan::{Plan, PlanStatus};
 use sats_core::seal::SealedBlob;
 
 /// AAD binding the master seed blob to its purpose.
 pub const AAD_SEED: &[u8] = b"sats-seed-v1";
+
+/// AAD binding a grant-wrapped seed to its network and agent.
+pub fn grant_aad(network: &str, agent: &str) -> Vec<u8> {
+    format!("sats-grant-v1:{network}:{agent}").into_bytes()
+}
 
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -99,6 +105,57 @@ impl Store {
             }
         }
         Ok(newest)
+    }
+
+    pub fn save_grant(&self, network: &str, grant: &Grant) -> Result<()> {
+        let path = self.grants_dir(network).join(format!("{}.json", grant.agent));
+        write_atomic(&path, &serde_json::to_vec_pretty(grant)?, true)
+    }
+
+    pub fn load_grant(&self, network: &str, agent: &str) -> Result<Option<Grant>> {
+        let path = self.grants_dir(network).join(format!("{agent}.json"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path)?;
+        let grant = serde_json::from_slice(&bytes)
+            .with_context(|| format!("corrupt grant {}", path.display()))?;
+        Ok(Some(grant))
+    }
+
+    /// Returns whether a grant existed. Deletion is revocation: no key
+    /// material survives it.
+    pub fn delete_grant(&self, network: &str, agent: &str) -> Result<bool> {
+        let path = self.grants_dir(network).join(format!("{agent}.json"));
+        if !path.exists() {
+            return Ok(false);
+        }
+        fs::remove_file(&path)?;
+        Ok(true)
+    }
+
+    /// All grants for a network, deleting expired ones as they're found.
+    pub fn active_grants(&self, network: &str, now_unix: u64) -> Result<Vec<Grant>> {
+        let dir = self.grants_dir(network);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut grants = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else { continue };
+            let Ok(grant) = serde_json::from_slice::<Grant>(&bytes) else { continue };
+            if grant.is_expired(now_unix) {
+                let _ = fs::remove_file(&path);
+                continue;
+            }
+            grants.push(grant);
+        }
+        grants.sort_by(|a, b| a.agent.cmp(&b.agent));
+        Ok(grants)
     }
 
     pub fn read_seed(&self) -> Result<SealedBlob> {

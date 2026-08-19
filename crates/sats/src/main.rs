@@ -45,6 +45,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Broadcast { plan, tx } => {
             commands::broadcast::run(&store, &config, network, plan, tx.as_deref(), json)
         }
+        Command::Authorize { agent, budget, expires, max_tx, max_fee } => {
+            commands::authorize::run(&store, network, &agent, budget, &expires, max_tx, max_fee, json)
+        }
+        Command::Revoke { agent } => commands::revoke::run(&store, network, &agent, json),
+        Command::Grants => commands::grants::run(&store, network, json),
         _ => bail!("not implemented yet"),
     }
 }
