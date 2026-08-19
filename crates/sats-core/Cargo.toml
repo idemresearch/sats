@@ -1,0 +1,24 @@
+[package]
+name = "sats-core"
+description = "Portable Bitcoin wallet engine: plans, authorization, signing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bdk_wallet = { workspace = true }
+bip39 = { workspace = true }
+argon2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+getrandom = { workspace = true }
+zeroize = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+bdk_wallet = { workspace = true, features = ["test-utils"] }
