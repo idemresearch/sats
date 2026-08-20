@@ -156,7 +156,7 @@ impl DenyReason {
                 requested_sat,
                 max_tx_sat,
             } => format!(
-                "requested  {} sats\nmax tx     {} sats",
+                "requested  {} sat\nmax tx     {} sat",
                 format_sats(*requested_sat),
                 format_sats(*max_tx_sat)
             ),
@@ -164,7 +164,7 @@ impl DenyReason {
                 fee_sat,
                 max_fee_sat,
             } => format!(
-                "fee      {} sats\nmax fee  {} sats",
+                "fee      {} sat\nmax fee  {} sat",
                 format_sats(*fee_sat),
                 format_sats(*max_fee_sat)
             ),
@@ -172,7 +172,7 @@ impl DenyReason {
                 requested_sat,
                 remaining_sat,
             } => format!(
-                "requested  {} sats (amount + fee)\nremaining  {} sats",
+                "requested  {} sat (amount + fee)\nremaining  {} sat",
                 format_sats(*requested_sat),
                 format_sats(*remaining_sat)
             ),

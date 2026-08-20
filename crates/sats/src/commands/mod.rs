@@ -1,6 +1,6 @@
-pub mod authorize;
 pub mod balance;
 pub mod broadcast;
+pub mod grant;
 pub mod grants;
 pub mod init;
 pub mod plan;

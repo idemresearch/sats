@@ -46,7 +46,8 @@ pub enum Command {
     Plan {
         /// Recipient address
         address: String,
-        /// Amount in sats
+        /// Amount in sats (shorthand ok: 10k, 1.5m)
+        #[arg(value_parser = crate::amount::parse)]
         amount: u64,
         /// Fee rate in sat/vB (default: estimated for ~2 blocks)
         #[arg(long, value_name = "SAT_VB")]
@@ -56,7 +57,8 @@ pub enum Command {
     Send {
         /// Recipient address
         address: String,
-        /// Amount in sats
+        /// Amount in sats (shorthand ok: 10k, 1.5m)
+        #[arg(value_parser = crate::amount::parse)]
         amount: u64,
         /// Fee rate in sat/vB (default: estimated for ~2 blocks)
         #[arg(long, value_name = "SAT_VB")]
@@ -67,12 +69,12 @@ pub enum Command {
     },
     /// Sign a saved plan or a PSBT file
     Sign {
-        /// Plan id (default: newest unsigned plan)
-        #[arg(long, value_name = "ID")]
-        plan: Option<String>,
-        /// Sign a PSBT file instead (base64 or binary)
-        #[arg(long, value_name = "FILE", conflicts_with = "plan")]
+        /// PSBT file to sign (base64 or binary); default: newest unsigned plan
+        #[arg(value_name = "FILE")]
         psbt: Option<PathBuf>,
+        /// Plan id (default: newest unsigned plan)
+        #[arg(long, value_name = "ID", conflicts_with = "psbt")]
+        plan: Option<String>,
     },
     /// Broadcast a signed plan or a raw transaction
     Broadcast {
@@ -84,20 +86,25 @@ pub enum Command {
         tx: Option<PathBuf>,
     },
     /// Grant an agent a spending budget
-    Authorize {
+    Grant {
         /// Agent name (e.g. claude)
         agent: String,
-        /// Total budget in sats (amounts + fees draw it down)
-        #[arg(long, value_name = "SATS")]
+        /// Total budget in sats (amounts + fees draw it down; shorthand ok: 50k)
+        #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
         budget: u64,
         /// Grant lifetime (e.g. 24h, 7d)
-        #[arg(long, default_value = "24h", value_name = "DURATION")]
-        expires: String,
+        #[arg(
+            long = "for",
+            alias = "expires",
+            default_value = "24h",
+            value_name = "DURATION"
+        )]
+        duration: String,
         /// Per-transaction amount cap in sats
-        #[arg(long, value_name = "SATS")]
+        #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
         max_tx: Option<u64>,
         /// Per-transaction fee cap in sats
-        #[arg(long, value_name = "SATS")]
+        #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
         max_fee: Option<u64>,
     },
     /// Revoke an agent's grant

@@ -92,14 +92,7 @@ fn mcp_serves_tools_and_enforces_the_grant() {
     run_sats(&dir, &["init"]);
     run_sats(
         &dir,
-        &[
-            "authorize",
-            "claude",
-            "--budget",
-            "50000",
-            "--max-tx",
-            "10000",
-        ],
+        &["grant", "claude", "--budget", "50000", "--max-tx", "10000"],
     );
 
     let mut mcp = McpSession::start(&dir, "claude");
@@ -182,14 +175,14 @@ fn mcp_refuses_to_start_without_a_grant() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("no grant for \"nobody\""), "got: {stderr}");
-    assert!(stderr.contains("sats authorize nobody"), "got: {stderr}");
+    assert!(stderr.contains("sats grant nobody"), "got: {stderr}");
 }
 
 #[test]
 fn revocation_takes_effect_mid_session() {
     let dir = TempDir::new().unwrap();
     run_sats(&dir, &["init"]);
-    run_sats(&dir, &["authorize", "claude", "--budget", "50000"]);
+    run_sats(&dir, &["grant", "claude", "--budget", "50000"]);
 
     let mut mcp = McpSession::start(&dir, "claude");
     mcp.send(serde_json::json!({

@@ -14,7 +14,7 @@ pub fn run(
     network: Network,
     agent: &str,
     budget: u64,
-    expires: &str,
+    duration: &str,
     max_tx: Option<u64>,
     max_fee: Option<u64>,
     json: bool,
@@ -23,27 +23,27 @@ pub fn run(
     if budget == 0 {
         bail!("budget must be greater than 0");
     }
-    let lifetime = humantime::parse_duration(expires)
-        .with_context(|| format!("invalid --expires {expires:?} (try 24h, 7d)"))?
+    let lifetime = humantime::parse_duration(duration)
+        .with_context(|| format!("invalid --for {duration:?} (try 24h, 7d)"))?
         .as_secs();
     if lifetime == 0 {
-        bail!("--expires must be in the future");
+        bail!("--for must be a positive duration");
     }
     let net_name = network_name(network);
     let replacing = store.load_grant(net_name, agent)?.is_some();
 
     if !json {
         let mut rows = vec![
-            ("Agent", agent.to_string()),
-            ("Budget", format!("{} sats", format_sats(budget))),
+            ("Grant", agent.to_string()),
+            ("Budget", format!("{} sat", format_sats(budget))),
         ];
         if let Some(max_tx) = max_tx {
-            rows.push(("Max tx", format!("{} sats", format_sats(max_tx))));
+            rows.push(("Max tx", format!("{} sat", format_sats(max_tx))));
         }
         if let Some(max_fee) = max_fee {
-            rows.push(("Max fee", format!("{} sats", format_sats(max_fee))));
+            rows.push(("Max fee", format!("{} sat", format_sats(max_fee))));
         }
-        rows.push(("Expires", format!("in {}", ui::human_duration(lifetime))));
+        rows.push(("For", ui::human_duration(lifetime)));
         ui::kv_rows(&rows);
         if network == Network::Bitcoin {
             ui::warn("mainnet grant — this agent will spend real bitcoin");
@@ -91,9 +91,9 @@ pub fn run(
     } else {
         println!();
         if replacing {
-            ui::ok(&format!("authorized  {agent} (previous grant replaced)"));
+            ui::ok(&format!("granted  {agent} (previous grant replaced)"));
         } else {
-            ui::ok(&format!("authorized  {agent}"));
+            ui::ok(&format!("granted  {agent}"));
         }
         ui::dim(&format!(
             "add to Claude Code:  claude mcp add sats -- sats mcp --agent {agent}"

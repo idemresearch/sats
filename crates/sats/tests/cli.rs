@@ -142,24 +142,25 @@ fn sign_and_broadcast_without_plans_point_to_next_step() {
 }
 
 #[test]
-fn authorize_grants_revoke_lifecycle() {
+fn grant_list_revoke_lifecycle() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
 
+    // Amount shorthand works on every sat-valued flag.
     sats(&dir)
         .args([
-            "authorize",
+            "grant",
             "claude",
             "--budget",
-            "50000",
+            "50k",
             "--max-tx",
-            "10000",
+            "10k",
             "--max-fee",
             "1000",
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("authorized  claude"));
+        .stdout(predicate::str::contains("granted  claude"));
 
     // Grant file is a 0600 secret holding the wrapped seed.
     let grant_path = dir.path().join("signet/grants/claude.json");
@@ -199,11 +200,11 @@ fn authorize_grants_revoke_lifecycle() {
 }
 
 #[test]
-fn authorize_requires_correct_password() {
+fn grant_requires_correct_password() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
-        .args(["authorize", "claude", "--budget", "1000"])
+        .args(["grant", "claude", "--budget", "1000"])
         .env("SATS_PASSWORD", "not-the-password")
         .assert()
         .failure()
@@ -211,31 +212,36 @@ fn authorize_requires_correct_password() {
 }
 
 #[test]
-fn authorize_rejects_bad_inputs() {
+fn grant_rejects_bad_inputs() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
-        .args(["authorize", "Bad Name!", "--budget", "1000"])
+        .args(["grant", "Bad Name!", "--budget", "1000"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("agent name"));
     sats(&dir)
-        .args(["authorize", "claude", "--budget", "0"])
+        .args(["grant", "claude", "--budget", "0"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("budget"));
     sats(&dir)
-        .args([
-            "authorize",
-            "claude",
-            "--budget",
-            "1000",
-            "--expires",
-            "soon",
-        ])
+        .args(["grant", "claude", "--budget", "1000", "--for", "soon"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("invalid --expires"));
+        .stderr(predicate::str::contains("invalid --for"));
+    // Shorthand must land on whole sats.
+    sats(&dir)
+        .args(["grant", "claude", "--budget", "1.2345k"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("whole number"));
+    // --expires still works as an alias for --for.
+    sats(&dir)
+        .args(["grant", "claude", "--budget", "1000", "--expires", "2h"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("granted  claude"));
 }
 
 #[test]
