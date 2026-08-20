@@ -20,18 +20,18 @@ pub fn run(store: &Store, config: &Config, network: Network, agent: &str) -> Res
 
     // Fail loudly at startup — `claude mcp add` time — not mid-conversation.
     let grant = store.load_grant(net_name, agent)?.with_context(|| {
-        format!("no grant for {agent:?} — run: sats authorize {agent} --budget <sats>")
+        format!("no grant for {agent:?} — run: sats grant {agent} --budget <sats>")
     })?;
     if grant.is_expired(unix_now()) {
         store.delete_grant(net_name, agent)?;
-        bail!("grant for {agent:?} has expired — run: sats authorize {agent} --budget <sats>");
+        bail!("grant for {agent:?} has expired — run: sats grant {agent} --budget <sats>");
     }
     // The wallet must exist too.
     walletd::open(store, config, network)?;
 
     // stdout is the MCP transport; all logging goes to stderr.
     eprintln!(
-        "sats mcp: agent {agent:?} on {net_name} — {} sats remaining, expires in {}",
+        "sats mcp: agent {agent:?} on {net_name} — {} sat remaining, expires in {}",
         format_sats(grant.remaining_sat()),
         ui::human_duration(grant.expires_at.saturating_sub(unix_now())),
     );

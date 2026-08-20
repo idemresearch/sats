@@ -215,7 +215,9 @@ impl SatsMcp {
             let store = Store::open(dir.as_deref())?;
             let net_name = network_name(network);
             let now = unix_now();
-            let grant = store.load_grant(net_name, &agent)?.filter(|g| !g.is_expired(now));
+            let grant = store
+                .load_grant(net_name, &agent)?
+                .filter(|g| !g.is_expired(now));
             Ok(match grant {
                 Some(g) => GrantResult {
                     active: true,
@@ -242,7 +244,7 @@ impl SatsMcp {
                     tx_count: None,
                     expires_at: None,
                     message: Some(format!(
-                        "no active grant — ask the human to run: sats authorize {agent} --budget <sats>"
+                        "no active grant — ask the human to run: sats grant {agent} --budget <sats>"
                     )),
                 },
             })
@@ -289,7 +291,7 @@ fn execute_send(
             return SendResult::denied(
                 "revoked",
                 format!(
-                    "human authorization required: no active grant — ask the human to run: sats authorize {agent} --budget <sats>"
+                    "human authorization required: no active grant — ask the human to run: sats grant {agent} --budget <sats>"
                 ),
             );
         }

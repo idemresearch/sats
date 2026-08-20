@@ -1,3 +1,4 @@
+mod amount;
 mod cli;
 mod commands;
 mod config;
@@ -51,20 +52,20 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         } => commands::send::run(
             &store, &config, network, &address, amount, fee_rate, yes, json,
         ),
-        Command::Sign { plan, psbt } => {
+        Command::Sign { psbt, plan } => {
             commands::sign::run(&store, network, plan, psbt.as_deref(), json)
         }
         Command::Broadcast { plan, tx } => {
             commands::broadcast::run(&store, &config, network, plan, tx.as_deref(), json)
         }
-        Command::Authorize {
+        Command::Grant {
             agent,
             budget,
-            expires,
+            duration,
             max_tx,
             max_fee,
-        } => commands::authorize::run(
-            &store, network, &agent, budget, &expires, max_tx, max_fee, json,
+        } => commands::grant::run(
+            &store, network, &agent, budget, &duration, max_tx, max_fee, json,
         ),
         Command::Revoke { agent } => commands::revoke::run(&store, network, &agent, json),
         Command::Grants => commands::grants::run(&store, network, json),

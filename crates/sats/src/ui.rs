@@ -44,7 +44,7 @@ pub fn sat_rows(rows: &[(&str, u64)]) {
     let formatted: Vec<String> = rows.iter().map(|(_, v)| format_sats(*v)).collect();
     let val_w = formatted.iter().map(|v| v.len()).max().unwrap_or(0);
     for ((key, _), value) in rows.iter().zip(&formatted) {
-        println!("{key:<key_w$}  {value:>val_w$} sats");
+        println!("{key:<key_w$}  {value:>val_w$} sat");
     }
 }
 
@@ -84,7 +84,9 @@ pub fn human_duration(secs: u64) -> String {
 /// non-tty stdin refuses (agents must go through grants, not prompts).
 pub fn confirm(prompt: &str, default_yes: bool) -> anyhow::Result<bool> {
     if !std::io::stdin().is_terminal() {
-        anyhow::bail!("cannot confirm: stdin is not a terminal (use --yes, or authorize an agent)");
+        anyhow::bail!(
+            "cannot confirm: stdin is not a terminal (use --yes, or grant an agent a budget)"
+        );
     }
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
     print!("{prompt} {hint} ");
