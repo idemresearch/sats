@@ -1,43 +1,11 @@
 //! End-to-end CLI tests. Fully offline and deterministic: every test gets
 //! its own SATS_DIR and uses SATS_PASSWORD instead of a prompt.
 
-use assert_cmd::Command;
+mod common;
+
+use common::{init_wallet, sats, write_mock_provider};
 use predicates::prelude::*;
 use tempfile::TempDir;
-
-const PASSWORD: &str = "integration-test-pw";
-
-fn sats(dir: &TempDir) -> Command {
-    let mut cmd = Command::cargo_bin("sats").unwrap();
-    cmd.env("SATS_DIR", dir.path())
-        .env("SATS_PASSWORD", PASSWORD)
-        .env("NO_COLOR", "1");
-    cmd
-}
-
-fn init_wallet(dir: &TempDir) {
-    sats(dir)
-        .arg("init")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("wallet created"));
-}
-
-/// Point the config at the hermetic mock chain provider (no network).
-/// Returns the mock data directory controlling its behavior.
-fn write_mock_provider(dir: &TempDir) -> std::path::PathBuf {
-    let mockdata = dir.path().join("mockdata");
-    std::fs::create_dir_all(&mockdata).unwrap();
-    // The mock driver is also a guard, and guards fail closed on a missing
-    // answer — give it an empty one by default.
-    std::fs::write(mockdata.join("guard.json"), r#"{"protected": []}"#).unwrap();
-    let config = format!(
-        "network = \"signet\"\n\n[providers.mock]\ndriver = \"mock\"\nnetwork = \"signet\"\nurl = \"file://{}\"\n",
-        mockdata.display()
-    );
-    std::fs::write(dir.path().join("config.toml"), config).unwrap();
-    mockdata
-}
 
 #[test]
 fn init_receive_balance_flow() {
