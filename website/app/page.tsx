@@ -1,5 +1,5 @@
 import Link from "next/link";
-import Terminal from "@/components/Terminal";
+import Playground from "@/components/Playground";
 import CopyButton from "@/components/CopyButton";
 
 const INSTALL_CMD =
@@ -34,7 +34,7 @@ export default function Home() {
         <CopyButton text={INSTALL_CMD} />
       </div>
 
-      <Terminal />
+      <Playground />
 
       <section id="humans">
         <h2>For humans</h2>

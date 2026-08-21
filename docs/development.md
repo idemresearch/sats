@@ -44,6 +44,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
 cargo build --release --locked
 cargo check -p sats-core --target wasm32-unknown-unknown
+cargo check -p sats-web --target wasm32-unknown-unknown
 ```
 
 Run the narrowest relevant unit or integration test during development, then
@@ -53,12 +54,13 @@ run the full gate before reporting the work ready.
 
 | Layer | Location | Covers |
 |---|---|---|
-| Core unit tests | `crates/sats-core/src/` | Preparation, finalized records, authorization, sealing, seed derivation, signing, serialization |
-| Native unit tests | `crates/sats/src/` | Amounts, config, providers, storage, and helpers |
+| Core unit tests | `crates/sats-core/src/` | Preparation, finalized records, authorization, sealing, seed derivation, signing, serialization, amount shorthand |
+| Native unit tests | `crates/sats/src/` | Config, providers, storage, and helpers |
+| Playground unit tests | `crates/sats-web/src/` | Simulated-chain wallet loop, grant lifecycle, denial shapes |
 | CLI integration | `crates/sats/tests/cli.rs` | Isolated wallet flows, failures, providers, guards, and grant lifecycle |
 | MCP integration | `crates/sats/tests/mcp.rs` | Tool schemas, granted sends, startup refusal, and live revocation |
 | Installer | `scripts/test-setup.sh` | Targets, checksums, version pinning, PATH edits, and atomic replacement |
-| WASM portability | CI `wasm-check` | `sats-core` remains buildable for `wasm32-unknown-unknown` |
+| WASM portability | CI `wasm-check` | `sats-core` and `sats-web` remain buildable for `wasm32-unknown-unknown` |
 
 Network-dependent behavior should be covered with deterministic providers and
 temporary state. Unit and integration tests must not require public services,
@@ -91,6 +93,18 @@ not implemented belongs in the maintainer's issue or private planning system.
 When commands or schemas change, update their focused reference rather than
 growing the README. CLI help, MCP schemas, tests, and typed Rust contracts
 remain authoritative.
+
+## Website playground
+
+The website's interactive terminal runs `sats-web` — `sats-core` compiled to
+WebAssembly against a simulated in-memory chain. The generated module in
+`website/public/playground/` is committed so the site deploys without a Rust
+toolchain. After changing `sats-core` or `sats-web`, regenerate it with:
+
+```sh
+cargo install wasm-bindgen-cli --version <pinned in Cargo.toml>
+sh scripts/build-playground.sh
+```
 
 ## Release builds
 

@@ -35,7 +35,7 @@ own.
 | `seed` | BIP-39 generation and parsing; BIP-86 public and private descriptors |
 | `seal` | Versioned Argon2id/XChaCha20-Poly1305 secret envelopes |
 | `signer` | Environment-neutral signer trait and local mnemonic signer |
-| `error`, `fmt` | Typed errors and shared satoshi formatting |
+| `error`, `fmt`, `amount` | Typed errors, satoshi formatting, and shorthand amount parsing |
 
 ### `sats`
 
@@ -52,10 +52,20 @@ adapters.
 | `provider` | Typed capabilities, driver resolution, chain access, and UTXO guards |
 | `keys`, `password` | Unlock the master seed or a grant-wrapped seed |
 | `mcp` | MCP stdio server, tool schemas, and agent send orchestration |
-| `ui`, `amount` | Terminal presentation and satoshi shorthand parsing |
+| `ui` | Terminal presentation |
 
 `main.rs` is the composition root. Leaf feature logic belongs in the owning
 module, not in dispatch.
+
+### `sats-web`
+
+The website playground: `sats-core` compiled to WebAssembly behind a small
+JSON API for the interactive terminal at the project website. Only the chain
+is simulated (an in-memory faucet and instant confirmation); planning, UTXO
+exclusion, signing, sealing, and grant authorization run the same core code
+as the native surfaces. It holds no compatibility surface — the CLI and MCP
+schemas remain the stable contracts — and it must never gain filesystem,
+network, or native-store dependencies.
 
 ## Persistent state
 
