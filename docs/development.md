@@ -23,6 +23,13 @@ cargo build --locked
 cargo run -- --help
 ```
 
+The default build includes MCP. To install a human-only binary without MCP
+dependencies from a checkout:
+
+```sh
+cargo install --locked --path crates/sats --no-default-features
+```
+
 Use an isolated state directory for manual development runs:
 
 ```sh

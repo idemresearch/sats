@@ -23,7 +23,7 @@ export default function CopyButton({ text }: { text: string }) {
   }
 
   return (
-    <button type="button" onClick={copy} aria-label="Copy install command">
+    <button className="copy-button" type="button" onClick={copy} aria-label="Copy install command">
       {label}
     </button>
   );
