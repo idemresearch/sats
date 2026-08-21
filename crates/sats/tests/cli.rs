@@ -23,6 +23,19 @@ fn init_wallet(dir: &TempDir) {
         .stdout(predicate::str::contains("wallet created"));
 }
 
+/// Point the config at the hermetic mock chain provider (no network).
+/// Returns the mock data directory controlling its behavior.
+fn write_mock_provider(dir: &TempDir) -> std::path::PathBuf {
+    let mockdata = dir.path().join("mockdata");
+    std::fs::create_dir_all(&mockdata).unwrap();
+    let config = format!(
+        "network = \"signet\"\n\n[providers.mock]\ndriver = \"mock\"\nnetwork = \"signet\"\nurl = \"file://{}\"\n",
+        mockdata.display()
+    );
+    std::fs::write(dir.path().join("config.toml"), config).unwrap();
+    mockdata
+}
+
 #[test]
 fn init_receive_balance_flow() {
     let dir = TempDir::new().unwrap();
@@ -92,7 +105,7 @@ fn wrong_password_is_rejected() {
 fn plan_with_no_funds_fails_cleanly() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
-    // Explicit --fee-rate keeps this fully offline (no esplora estimate).
+    write_mock_provider(&dir);
     sats(&dir)
         .args([
             "plan",
@@ -110,6 +123,7 @@ fn plan_with_no_funds_fails_cleanly() {
 fn plan_rejects_wrong_network_address() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
+    // No provider config needed: address validation runs before any IO.
     sats(&dir)
         .args([
             "plan",
@@ -121,6 +135,38 @@ fn plan_rejects_wrong_network_address() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("not valid for signet"));
+}
+
+#[test]
+fn plan_refuses_stale_state_when_sync_fails() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+    std::fs::write(mockdata.join("sync-error"), "indexer down").unwrap();
+    sats(&dir)
+        .args([
+            "plan",
+            "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
+            "25000",
+            "--fee-rate",
+            "2",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("refusing to plan on stale state"));
+}
+
+#[test]
+fn balance_tolerates_sync_failure_and_reports_it() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+    std::fs::write(mockdata.join("sync-error"), "chain offline").unwrap();
+    let out = sats(&dir).args(["balance", "--json"]).assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("json output");
+    assert_eq!(json["balance_sat"], 0);
+    assert_eq!(json["synced"], false);
 }
 
 #[test]

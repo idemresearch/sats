@@ -21,9 +21,6 @@ pub fn run(
     json: bool,
 ) -> Result<()> {
     let mut ctx = walletd::open(store, network)?;
-    if let Err(err) = services.sync_wallet(&mut ctx) {
-        eprintln!("✗ sync failed — planning on cached state ({err:#})");
-    }
     let plan = build(&mut ctx, services, address, amount, fee_rate)?;
     ctx.persist()?;
     store.save_plan(ctx.net_name, &plan)?;
@@ -48,7 +45,10 @@ pub fn run(
     Ok(())
 }
 
-/// Parse, estimate, and build — shared by `plan` and `send`.
+/// The shared planning pipeline for `plan`, `send`, and MCP sends:
+/// validate → sync → estimate → build. Ordered so that a request that can
+/// never succeed (bad address) fails before any network IO, and spending
+/// never plans on stale chain state — a failed sync is a hard error.
 pub fn build(
     ctx: &mut WalletCtx,
     services: &Services,
@@ -60,6 +60,9 @@ pub fn build(
         .map_err(|e| anyhow!("invalid address: {e}"))?
         .require_network(ctx.network)
         .map_err(|_| anyhow!("address is not valid for {}", ctx.net_name))?;
+    services
+        .sync_wallet(ctx)
+        .map_err(|e| anyhow!("{e} — refusing to plan on stale state"))?;
     let rate = match fee_rate {
         Some(sat_vb) => {
             let sat_vb = u32::try_from(sat_vb).unwrap_or(u32::MAX).max(1);

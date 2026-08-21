@@ -20,10 +20,6 @@ pub fn run(
     json: bool,
 ) -> Result<()> {
     let mut ctx = walletd::open(store, network)?;
-    if let Err(err) = services.sync_wallet(&mut ctx) {
-        eprintln!("✗ sync failed — planning on cached state ({err:#})");
-    }
-
     let mut plan = plan::build(&mut ctx, services, address, amount, fee_rate)?;
     ctx.persist()?;
 

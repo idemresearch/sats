@@ -319,9 +319,7 @@ fn execute_send(
     let planned = (|| -> Result<_> {
         let services = provider::resolve(config, &[], network)?;
         let mut ctx = walletd::open(store, network)?;
-        services
-            .sync_wallet(&mut ctx)
-            .map_err(|e| anyhow!("cannot sync: {e:#}"))?;
+        // plan::build syncs internally and hard-fails on stale state.
         let plan = plan::build(&mut ctx, &services, &params.address, params.amount_sat, None)?;
         ctx.persist()?;
         Ok((ctx, services, plan))
