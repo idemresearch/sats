@@ -6,7 +6,9 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
-    #[error("no {cap} provider configured for {network} — add one under [providers] in config.toml")]
+    #[error(
+        "no {cap} provider configured for {network} — add one under [providers] in config.toml"
+    )]
     NoProvider {
         cap: &'static str,
         network: &'static str,

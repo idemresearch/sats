@@ -224,12 +224,11 @@ pub fn resolve(
             .iter()
             .filter(|(_, p)| p.network == net_name)
             .map(|(name, p)| {
-                let kind = DriverKind::from_str(&p.driver).ok_or_else(|| {
-                    ProviderError::BadConfig {
+                let kind =
+                    DriverKind::from_str(&p.driver).ok_or_else(|| ProviderError::BadConfig {
                         name: name.clone(),
                         reason: format!("unknown driver {:?}", p.driver),
-                    }
-                })?;
+                    })?;
                 // The network string must parse even though we filtered by
                 // equality — catches typos on entries for other networks too.
                 parse_network(&p.network).map_err(|e| ProviderError::BadConfig {
@@ -258,32 +257,31 @@ pub fn resolve(
 
     // Per capability: explicit providers win; the fallback esplora covers
     // any chain capability no explicit provider offers.
-    let pick = |cap: Capability, prefer: Option<&str>| -> Result<Option<&ProviderSpec>, ProviderError> {
-        let candidates: Vec<&ProviderSpec> = specs
-            .iter()
-            .filter(|s| s.caps.contains(&cap))
-            .collect();
-        if candidates.is_empty() {
-            return Ok(fallback.as_ref().filter(|s| s.caps.contains(&cap)));
-        }
-        if let Some(name) = prefer {
-            if let Some(spec) = candidates.iter().find(|s| s.name == name) {
-                return Ok(Some(spec));
+    let pick =
+        |cap: Capability, prefer: Option<&str>| -> Result<Option<&ProviderSpec>, ProviderError> {
+            let candidates: Vec<&ProviderSpec> =
+                specs.iter().filter(|s| s.caps.contains(&cap)).collect();
+            if candidates.is_empty() {
+                return Ok(fallback.as_ref().filter(|s| s.caps.contains(&cap)));
             }
-        }
-        match candidates.len() {
-            1 => Ok(Some(candidates[0])),
-            _ => Err(ProviderError::Ambiguous {
-                cap: cap.as_str(),
-                network: net_name,
-                names: candidates
-                    .iter()
-                    .map(|s| s.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            }),
-        }
-    };
+            if let Some(name) = prefer {
+                if let Some(spec) = candidates.iter().find(|s| s.name == name) {
+                    return Ok(Some(spec));
+                }
+            }
+            match candidates.len() {
+                1 => Ok(Some(candidates[0])),
+                _ => Err(ProviderError::Ambiguous {
+                    cap: cap.as_str(),
+                    network: net_name,
+                    names: candidates
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                }),
+            }
+        };
 
     let sync_spec = pick(Capability::ChainSync, None)?;
     let sync_name = sync_spec.map(|s| s.name.clone());
@@ -345,13 +343,15 @@ fn build_spec(
     if let Some(filter) = cap_filter {
         let mut wanted = BTreeSet::new();
         for token in filter {
-            let expanded =
-                Capability::expand(token).ok_or_else(|| bad(format!("unknown capability {token:?}")))?;
+            let expanded = Capability::expand(token)
+                .ok_or_else(|| bad(format!("unknown capability {token:?}")))?;
             wanted.extend(expanded);
         }
         caps.retain(|c| wanted.contains(c));
         if caps.is_empty() {
-            return Err(bad("capabilities filter leaves nothing this driver offers".into()));
+            return Err(bad(
+                "capabilities filter leaves nothing this driver offers".into()
+            ));
         }
     }
     let driver = match kind {
@@ -393,7 +393,13 @@ fn legacy_or_default_esplora(
             None => return Ok(None),
         },
     };
-    Ok(Some(build_spec(name, DriverKind::Esplora, &url, None, None)?))
+    Ok(Some(build_spec(
+        name,
+        DriverKind::Esplora,
+        &url,
+        None,
+        None,
+    )?))
 }
 
 impl Services {
@@ -513,7 +519,6 @@ impl Services {
     ) -> Result<GuardReport, ProviderError> {
         guards::protected_outpoints(&self.guards, outpoints)
     }
-
 }
 
 /// Largest conf target ≤ the requested one; else the closest above.
@@ -555,12 +560,7 @@ mod tests {
 
     #[test]
     fn defaults_resolve_when_nothing_configured() {
-        let services = resolve(
-            &config_with(BTreeMap::new()),
-            &[],
-            Network::Signet,
-        )
-        .unwrap();
+        let services = resolve(&config_with(BTreeMap::new()), &[], Network::Signet).unwrap();
         assert!(services.sync.is_some());
         assert!(services.fees.is_some());
         assert!(services.broadcast.is_some());
@@ -609,7 +609,13 @@ mod tests {
             ),
         ]));
         let err = resolve(&config, &[], Network::Signet).unwrap_err();
-        assert!(matches!(err, ProviderError::Ambiguous { cap: "chain.sync", .. }));
+        assert!(matches!(
+            err,
+            ProviderError::Ambiguous {
+                cap: "chain.sync",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -719,7 +725,13 @@ mod tests {
             },
         ];
         let err = resolve(&config_with(BTreeMap::new()), &cli, Network::Signet).unwrap_err();
-        assert!(matches!(err, ProviderError::Ambiguous { cap: "chain.sync", .. }));
+        assert!(matches!(
+            err,
+            ProviderError::Ambiguous {
+                cap: "chain.sync",
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -89,9 +89,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Sign { psbt, plan } => {
             commands::sign::run(&store, network, plan, psbt.as_deref(), json)
         }
-        Command::Broadcast { plan, tx } => {
-            commands::broadcast::run(&store, network, &services(&config)?, plan, tx.as_deref(), json)
-        }
+        Command::Broadcast { plan, tx } => commands::broadcast::run(
+            &store,
+            network,
+            &services(&config)?,
+            plan,
+            tx.as_deref(),
+            json,
+        ),
         Command::Grant {
             agent,
             budget,
