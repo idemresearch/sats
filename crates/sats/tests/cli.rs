@@ -300,6 +300,7 @@ fn grant_list_revoke_lifecycle() {
     // Amount shorthand works on every sat-valued flag.
     sats(&dir)
         .args([
+            "agent",
             "grant",
             "claude",
             "--budget",
@@ -323,7 +324,10 @@ fn grant_list_revoke_lifecycle() {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    let out = sats(&dir).args(["grants", "--json"]).assert().success();
+    let out = sats(&dir)
+        .args(["agent", "list", "--json"])
+        .assert()
+        .success();
     let json: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
     assert_eq!(json[0]["agent"], "claude");
     assert_eq!(json[0]["budget_sat"], 50000);
@@ -334,7 +338,7 @@ fn grant_list_revoke_lifecycle() {
     assert!(json[0].get("wrapped_seed").is_none());
 
     sats(&dir)
-        .args(["revoke", "claude"])
+        .args(["agent", "revoke", "claude"])
         .assert()
         .success()
         .stdout(predicate::str::contains("revoked  claude"));
@@ -344,7 +348,7 @@ fn grant_list_revoke_lifecycle() {
     );
 
     sats(&dir)
-        .args(["revoke", "claude"])
+        .args(["agent", "revoke", "claude"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("no grant"));
@@ -355,7 +359,7 @@ fn grant_requires_correct_password() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
-        .args(["grant", "claude", "--budget", "1000"])
+        .args(["agent", "grant", "claude", "--budget", "1000"])
         .env("SATS_PASSWORD", "not-the-password")
         .assert()
         .failure()
@@ -367,29 +371,39 @@ fn grant_rejects_bad_inputs() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
-        .args(["grant", "Bad Name!", "--budget", "1000"])
+        .args(["agent", "grant", "Bad Name!", "--budget", "1000"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("agent name"));
     sats(&dir)
-        .args(["grant", "claude", "--budget", "0"])
+        .args(["agent", "grant", "claude", "--budget", "0"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("budget"));
     sats(&dir)
-        .args(["grant", "claude", "--budget", "1000", "--for", "soon"])
+        .args([
+            "agent", "grant", "claude", "--budget", "1000", "--for", "soon",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("invalid --for"));
     // Shorthand must land on whole sats.
     sats(&dir)
-        .args(["grant", "claude", "--budget", "1.2345k"])
+        .args(["agent", "grant", "claude", "--budget", "1.2345k"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("whole number"));
     // --expires still works as an alias for --for.
     sats(&dir)
-        .args(["grant", "claude", "--budget", "1000", "--expires", "2h"])
+        .args([
+            "agent",
+            "grant",
+            "claude",
+            "--budget",
+            "1000",
+            "--expires",
+            "2h",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("granted  claude"));

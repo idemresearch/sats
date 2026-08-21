@@ -35,7 +35,7 @@ struct McpSession {
 impl McpSession {
     fn start(dir: &TempDir, agent: &str) -> McpSession {
         let mut child = Command::new(sats_bin())
-            .args(["mcp", "--agent", agent])
+            .args(["agent", "serve", agent])
             .env("SATS_DIR", dir.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -93,7 +93,9 @@ fn mcp_serves_tools_and_enforces_the_grant() {
     run_sats(&dir, &["init"]);
     run_sats(
         &dir,
-        &["grant", "claude", "--budget", "50000", "--max-tx", "10000"],
+        &[
+            "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
+        ],
     );
 
     let mut mcp = McpSession::start(&dir, "claude");
@@ -168,7 +170,7 @@ fn mcp_refuses_to_start_without_a_grant() {
     let dir = TempDir::new().unwrap();
     run_sats(&dir, &["init"]);
     let output = Command::new(sats_bin())
-        .args(["mcp", "--agent", "nobody"])
+        .args(["agent", "serve", "nobody"])
         .env("SATS_DIR", dir.path())
         .stdin(Stdio::null())
         .output()
@@ -176,14 +178,14 @@ fn mcp_refuses_to_start_without_a_grant() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("no grant for \"nobody\""), "got: {stderr}");
-    assert!(stderr.contains("sats grant nobody"), "got: {stderr}");
+    assert!(stderr.contains("sats agent grant nobody"), "got: {stderr}");
 }
 
 #[test]
 fn revocation_takes_effect_mid_session() {
     let dir = TempDir::new().unwrap();
     run_sats(&dir, &["init"]);
-    run_sats(&dir, &["grant", "claude", "--budget", "50000"]);
+    run_sats(&dir, &["agent", "grant", "claude", "--budget", "50000"]);
 
     let mut mcp = McpSession::start(&dir, "claude");
     mcp.send(serde_json::json!({
@@ -198,7 +200,7 @@ fn revocation_takes_effect_mid_session() {
     mcp.send(serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
 
     // Revoke while the server is running: the very next send is denied.
-    run_sats(&dir, &["revoke", "claude"]);
+    run_sats(&dir, &["agent", "revoke", "claude"]);
     let denial = mcp.call_tool(
         2,
         "send",

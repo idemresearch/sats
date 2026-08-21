@@ -103,18 +103,24 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             tx.as_deref(),
             json,
         ),
-        Command::Grant {
-            agent,
-            budget,
-            duration,
-            max_tx,
-            max_fee,
-        } => commands::grant::run(
-            &store, network, &agent, budget, &duration, max_tx, max_fee, json,
-        ),
-        Command::Revoke { agent } => commands::revoke::run(&store, network, &agent, json),
-        Command::Grants => commands::grants::run(&store, network, json),
-        #[cfg(feature = "mcp")]
-        Command::Mcp { agent } => mcp::run(&store, &config, network, &agent, overrides.clone()),
+        Command::Agent { command } => match command {
+            cli::AgentCommand::Grant {
+                name,
+                budget,
+                duration,
+                max_tx,
+                max_fee,
+            } => commands::grant::run(
+                &store, network, &name, budget, &duration, max_tx, max_fee, json,
+            ),
+            cli::AgentCommand::Revoke { name } => {
+                commands::revoke::run(&store, network, &name, json)
+            }
+            cli::AgentCommand::List => commands::grants::run(&store, network, json),
+            #[cfg(feature = "mcp")]
+            cli::AgentCommand::Serve { name } => {
+                mcp::run(&store, &config, network, &name, overrides.clone())
+            }
+        },
     }
 }

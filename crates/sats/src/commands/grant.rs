@@ -96,9 +96,9 @@ pub fn run(
             ui::ok(&format!("granted  {agent}"));
         }
         ui::dim(&format!(
-            "add to Claude Code:  claude mcp add sats -- sats mcp --agent {agent}"
+            "add to Claude Code:  claude mcp add sats -- sats agent serve {agent}"
         ));
-        ui::dim(&format!("revoke any time:     sats revoke {agent}"));
+        ui::dim(&format!("revoke any time:     sats agent revoke {agent}"));
     }
     Ok(())
 }

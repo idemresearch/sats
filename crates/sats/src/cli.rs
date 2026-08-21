@@ -107,10 +107,19 @@ pub enum Command {
         #[arg(long, value_name = "FILE", conflicts_with_all = ["transaction", "plan"])]
         tx: Option<PathBuf>,
     },
+    /// Manage agent spending grants and the agent-facing MCP server
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentCommand {
     /// Grant an agent a spending budget
     Grant {
         /// Agent name (e.g. claude)
-        agent: String,
+        name: String,
         /// Total budget in sats (amounts + fees draw it down; shorthand ok: 50k)
         #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
         budget: u64,
@@ -132,15 +141,14 @@ pub enum Command {
     /// Revoke an agent's grant
     Revoke {
         /// Agent name
-        agent: String,
+        name: String,
     },
     /// List active grants
-    Grants,
-    /// Run an MCP server exposing wallet tools to an agent
+    List,
+    /// Run an MCP server exposing wallet tools as this agent
     #[cfg(feature = "mcp")]
-    Mcp {
+    Serve {
         /// Agent name the server acts as (must hold an active grant)
-        #[arg(long, value_name = "NAME")]
-        agent: String,
+        name: String,
     },
 }

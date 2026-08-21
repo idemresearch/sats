@@ -259,7 +259,7 @@ impl SatsMcp {
                     tx_count: None,
                     expires_at: None,
                     message: Some(format!(
-                        "no active grant — ask the human to run: sats grant {agent} --budget <sats>"
+                        "no active grant — ask the human to run: sats agent grant {agent} --budget <sats>"
                     )),
                 },
             })
@@ -309,7 +309,7 @@ fn execute_send(
             return SendResult::denied(
                 "revoked",
                 format!(
-                    "human authorization required: no active grant — ask the human to run: sats grant {agent} --budget <sats>"
+                    "human authorization required: no active grant — ask the human to run: sats agent grant {agent} --budget <sats>"
                 ),
             );
         }
