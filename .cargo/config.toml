@@ -1,0 +1,4 @@
+# getrandom 0.3 requires an explicit opt-in to the browser RNG backend on
+# wasm32-unknown-unknown; without this cfg it fails to compile for that target.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

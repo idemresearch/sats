@@ -22,10 +22,9 @@ jobs:
       - run: cargo test --workspace
       - run: cargo build --release
 
-  # Advisory: tracks the sats-core WASM-portability promise. Allowed to fail in V1.
+  # Guards the sats-core WASM-portability promise (docs/phone.md).
   wasm-check:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
