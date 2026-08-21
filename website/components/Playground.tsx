@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { IMarker, ITheme, Terminal as XTerm } from "@xterm/xterm";
 
 type WasmWallet = {
   init(now: number): string;
@@ -34,6 +35,85 @@ type WasmWallet = {
 
 type Line = { cls: string; text: string };
 type QuickAction = { label: string; command: string; primary?: boolean };
+
+const RESET = "\x1b[0m";
+const BOLD = "\x1b[1m";
+const PROMPT = "\x1b[38;2;247;147;26m";
+
+const LINE_STYLE: Record<string, string> = {
+  "": "",
+  "t-c": BOLD,
+  "t-o": "",
+  "t-g": "\x1b[32m",
+  "t-r": "\x1b[31m",
+  "t-dim": "\x1b[2m",
+};
+
+const COMPLETIONS = [
+  "help",
+  "clear",
+  "reset",
+  "sats init",
+  "sats receive",
+  "sats balance",
+  "sats faucet 100k",
+  "sats send ",
+  "sats history",
+  "sats agent grant ",
+  "sats agent list",
+  "sats agent revoke ",
+  "sats agent send ",
+];
+
+function cssValue(name: string, fallback: string): string {
+  return (
+    getComputedStyle(document.documentElement).getPropertyValue(name).trim() ||
+    fallback
+  );
+}
+
+function terminalTheme(): ITheme {
+  const background = cssValue("--surface", "#11110f");
+  const foreground = cssValue("--foreground", "#f1f0ea");
+  const output = cssValue("--output", "#c8c7c0");
+  const subtle = cssValue("--subtle", "#73736c");
+  const accent = cssValue("--accent", "#f7931a");
+  const success = cssValue("--success", "#67d391");
+  const danger = cssValue("--danger", "#ff8178");
+
+  return {
+    background,
+    foreground,
+    cursor: accent,
+    cursorAccent: background,
+    selectionBackground: cssValue("--accent-soft", "rgba(247, 147, 26, 0.22)"),
+    selectionInactiveBackground: cssValue("--surface-secondary", "#151513"),
+    black: background,
+    brightBlack: subtle,
+    red: danger,
+    brightRed: danger,
+    green: success,
+    brightGreen: success,
+    yellow: accent,
+    brightYellow: accent,
+    blue: output,
+    brightBlue: foreground,
+    magenta: output,
+    brightMagenta: foreground,
+    cyan: output,
+    brightCyan: foreground,
+    white: output,
+    brightWhite: foreground,
+  };
+}
+
+function styledLine(line: Line): string {
+  return `${LINE_STYLE[line.cls] ?? ""}${line.text}${RESET}`;
+}
+
+function styledPrompt(prompt: string, input: string): string {
+  return `${PROMPT}${prompt}${RESET}${BOLD}${input}\x1b[22m`;
+}
 
 const WELCOME: Line[] = [
   { cls: "t-c", text: "sats playground" },
@@ -111,25 +191,40 @@ function splitFlags(tokens: string[]): {
 }
 
 export default function Playground() {
-  const [lines, setLines] = useState<Line[]>(WELCOME);
-  const [input, setInput] = useState("");
-  const [prompt, setPrompt] = useState("$ ");
+  const [prompt, setPromptState] = useState("$ ");
   const [isRunning, setIsRunning] = useState(false);
+  const [terminalReady, setTerminalReady] = useState(false);
+  const [terminalError, setTerminalError] = useState<string | null>(null);
   const walletRef = useRef<WasmWallet | null>(null);
   const loadingRef = useRef<Promise<void> | null>(null);
   const pendingSendRef = useRef<string | null>(null);
   const histRef = useRef<string[]>([]);
   const histPosRef = useRef(0);
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const histDraftRef = useRef("");
+  const terminalHostRef = useRef<HTMLDivElement>(null);
+  const terminalRef = useRef<XTerm | null>(null);
+  const inputMarkerRef = useRef<IMarker | null>(null);
+  const inputBufferRef = useRef("");
+  const inputCursorRef = useRef(0);
+  const promptRef = useRef("$ ");
+  const runningRef = useRef(false);
+  const outputQueueRef = useRef<Line[]>([]);
+  const executeRef = useRef<(raw: string) => Promise<void>>(async () => {});
+  const inputHandlerRef = useRef<(data: string) => void>(() => {});
 
-  const push = useCallback((...added: Line[]) => {
-    setLines((previous) => [...previous, ...added]);
+  const setPrompt = useCallback((value: string) => {
+    promptRef.current = value;
+    setPromptState(value);
   }, []);
 
-  useEffect(() => {
-    bodyRef.current?.scrollTo({ top: bodyRef.current.scrollHeight });
-  }, [lines]);
+  const push = useCallback((...added: Line[]) => {
+    const terminal = terminalRef.current;
+    if (!terminal) {
+      outputQueueRef.current.push(...added);
+      return;
+    }
+    for (const line of added) terminal.writeln(styledLine(line));
+  }, []);
 
   const ensureWallet = useCallback(async (): Promise<WasmWallet> => {
     if (walletRef.current) return walletRef.current;
@@ -177,7 +272,6 @@ export default function Playground() {
 
   async function run(raw: string): Promise<void> {
     const cmd = raw.trim();
-    push({ cls: "", text: "" });
 
     if (pendingSendRef.current !== null) {
       const id = pendingSendRef.current;
@@ -205,11 +299,15 @@ export default function Playground() {
     }
 
     if (cmd === "") return;
-    histRef.current.push(cmd);
+    if (histRef.current.at(-1) !== cmd) histRef.current.push(cmd);
     histPosRef.current = histRef.current.length;
+    histDraftRef.current = "";
 
     if (cmd === "clear") {
-      setLines([]);
+      inputMarkerRef.current?.dispose();
+      inputMarkerRef.current = null;
+      terminalRef.current?.clear();
+      terminalRef.current?.write("\x1b[2J\x1b[H");
       return;
     }
     if (cmd === "help" || cmd === "sats help" || cmd === "sats") {
@@ -218,7 +316,11 @@ export default function Playground() {
     }
     if (cmd === "reset") {
       walletRef.current?.reset();
-      setLines(WELCOME);
+      inputMarkerRef.current?.dispose();
+      inputMarkerRef.current = null;
+      terminalRef.current?.clear();
+      terminalRef.current?.write("\x1b[2J\x1b[H");
+      push(...WELCOME);
       return;
     }
 
@@ -536,10 +638,253 @@ export default function Playground() {
     });
   }
 
+  const writePrompt = useCallback((after?: () => void) => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+
+    terminal.write("", () => {
+      if (terminalRef.current !== terminal) return;
+      inputMarkerRef.current?.dispose();
+      inputMarkerRef.current = terminal.registerMarker(0) ?? null;
+      terminal.write(
+        styledPrompt(promptRef.current, inputBufferRef.current),
+        after
+      );
+    });
+  }, []);
+
+  const redrawInput = useCallback((after?: () => void) => {
+    const terminal = terminalRef.current;
+    const marker = inputMarkerRef.current;
+    if (!terminal || !marker || marker.line < 0) return;
+
+    const buffer = inputBufferRef.current;
+    const cursor = inputCursorRef.current;
+    const promptText = promptRef.current;
+    const currentLine = terminal.buffer.active.baseY + terminal.buffer.active.cursorY;
+    const lineDelta = currentLine - marker.line;
+    let redraw = "\x1b[?25l\r";
+    if (lineDelta > 0) redraw += `\x1b[${lineDelta}A`;
+    else if (lineDelta < 0) redraw += `\x1b[${-lineDelta}B`;
+    redraw += `\x1b[0J${styledPrompt(promptText, buffer)}`;
+
+    terminal.write(redraw, () => {
+      if (terminalRef.current !== terminal || marker.line < 0) return;
+      if (cursor === buffer.length) {
+        terminal.write("\x1b[?25h", after);
+        return;
+      }
+
+      const columns = Math.max(1, terminal.cols);
+      const targetOffset = promptText.length + cursor;
+      const targetLine = marker.line + Math.floor(targetOffset / columns);
+      const targetColumn = targetOffset % columns;
+      const renderedLine =
+        terminal.buffer.active.baseY + terminal.buffer.active.cursorY;
+      const rowDelta = renderedLine - targetLine;
+      let movement = "";
+      if (rowDelta > 0) movement += `\x1b[${rowDelta}A`;
+      else if (rowDelta < 0) movement += `\x1b[${-rowDelta}B`;
+      movement += `\x1b[${targetColumn + 1}G\x1b[?25h`;
+      terminal.write(movement, after);
+    });
+  }, []);
+
+  const submitCurrentLine = useCallback(() => {
+    if (runningRef.current) return;
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+
+    const raw = inputBufferRef.current;
+    inputBufferRef.current = "";
+    inputCursorRef.current = 0;
+    inputMarkerRef.current?.dispose();
+    inputMarkerRef.current = null;
+    terminal.write("\r\n");
+
+    if (raw.trim() === "") {
+      writePrompt(() => terminal.focus());
+      return;
+    }
+    void executeRef.current(raw);
+  }, [writePrompt]);
+
+  function replaceInput(value: string, cursor = value.length): void {
+    inputBufferRef.current = value;
+    inputCursorRef.current = Math.max(0, Math.min(cursor, value.length));
+    redrawInput();
+  }
+
+  function moveHistory(direction: -1 | 1): void {
+    const history = histRef.current;
+    if (history.length === 0) {
+      terminalRef.current?.write("\x07");
+      return;
+    }
+
+    if (direction === -1) {
+      if (histPosRef.current === history.length) {
+        histDraftRef.current = inputBufferRef.current;
+      }
+      if (histPosRef.current > 0) histPosRef.current--;
+    } else if (histPosRef.current < history.length) {
+      histPosRef.current++;
+    }
+
+    replaceInput(
+      histPosRef.current === history.length
+        ? histDraftRef.current
+        : history[histPosRef.current] ?? ""
+    );
+  }
+
+  function insertInput(value: string): void {
+    const safe = value
+      .replace(/\r?\n/g, " ")
+      .replace(/[\x00-\x1f\x7f]/g, "");
+    if (!safe) return;
+    const buffer = inputBufferRef.current;
+    const cursor = inputCursorRef.current;
+    histPosRef.current = histRef.current.length;
+    histDraftRef.current = "";
+    replaceInput(
+      buffer.slice(0, cursor) + safe + buffer.slice(cursor),
+      cursor + safe.length
+    );
+  }
+
+  function completeInput(): void {
+    const buffer = inputBufferRef.current;
+    if (inputCursorRef.current !== buffer.length) {
+      terminalRef.current?.write("\x07");
+      return;
+    }
+    const matches = COMPLETIONS.filter((command) => command.startsWith(buffer));
+    if (matches.length === 0) {
+      terminalRef.current?.write("\x07");
+      return;
+    }
+    let completion = matches[0];
+    for (const match of matches.slice(1)) {
+      let index = 0;
+      while (index < completion.length && completion[index] === match[index]) {
+        index++;
+      }
+      completion = completion.slice(0, index);
+    }
+    if (completion === buffer) terminalRef.current?.write("\x07");
+    else replaceInput(completion);
+  }
+
+  function handleTerminalData(data: string): void {
+    if (runningRef.current) return;
+
+    if (data === "\r" || data === "\n") {
+      submitCurrentLine();
+      return;
+    }
+    if (data === "\x7f" || data === "\b") {
+      const buffer = inputBufferRef.current;
+      const cursor = inputCursorRef.current;
+      if (cursor === 0) {
+        terminalRef.current?.write("\x07");
+        return;
+      }
+      replaceInput(
+        buffer.slice(0, cursor - 1) + buffer.slice(cursor),
+        cursor - 1
+      );
+      return;
+    }
+    if (data === "\x1b[3~") {
+      const buffer = inputBufferRef.current;
+      const cursor = inputCursorRef.current;
+      if (cursor < buffer.length) {
+        replaceInput(buffer.slice(0, cursor) + buffer.slice(cursor + 1), cursor);
+      }
+      return;
+    }
+    if (data === "\x1b[A") {
+      moveHistory(-1);
+      return;
+    }
+    if (data === "\x1b[B") {
+      moveHistory(1);
+      return;
+    }
+    if (data === "\x1b[D") {
+      if (inputCursorRef.current > 0) {
+        inputCursorRef.current--;
+        redrawInput();
+      }
+      return;
+    }
+    if (data === "\x1b[C") {
+      if (inputCursorRef.current < inputBufferRef.current.length) {
+        inputCursorRef.current++;
+        redrawInput();
+      }
+      return;
+    }
+    if (data === "\x01" || data === "\x1b[H" || data === "\x1b[1~") {
+      inputCursorRef.current = 0;
+      redrawInput();
+      return;
+    }
+    if (data === "\x05" || data === "\x1b[F" || data === "\x1b[4~") {
+      inputCursorRef.current = inputBufferRef.current.length;
+      redrawInput();
+      return;
+    }
+    if (data === "\x15") {
+      replaceInput(inputBufferRef.current.slice(inputCursorRef.current), 0);
+      return;
+    }
+    if (data === "\x0b") {
+      replaceInput(
+        inputBufferRef.current.slice(0, inputCursorRef.current),
+        inputCursorRef.current
+      );
+      return;
+    }
+    if (data === "\x17") {
+      const buffer = inputBufferRef.current;
+      const cursor = inputCursorRef.current;
+      let start = cursor;
+      while (start > 0 && /\s/.test(buffer[start - 1])) start--;
+      while (start > 0 && !/\s/.test(buffer[start - 1])) start--;
+      replaceInput(buffer.slice(0, start) + buffer.slice(cursor), start);
+      return;
+    }
+    if (data === "\x03") {
+      terminalRef.current?.write("^C\r\n");
+      inputBufferRef.current = "";
+      inputCursorRef.current = 0;
+      inputMarkerRef.current?.dispose();
+      inputMarkerRef.current = null;
+      writePrompt(() => terminalRef.current?.focus());
+      return;
+    }
+    if (data === "\x0c") {
+      const terminal = terminalRef.current;
+      if (!terminal) return;
+      inputMarkerRef.current?.dispose();
+      inputMarkerRef.current = null;
+      terminal.clear();
+      terminal.write("\x1b[2J\x1b[H", () => writePrompt());
+      return;
+    }
+    if (data === "\t") {
+      completeInput();
+      return;
+    }
+    if (data.startsWith("\x1b")) return;
+    insertInput(data);
+  }
+
   async function execute(raw: string): Promise<void> {
-    if (isRunning || raw.trim() === "") return;
-    setInput("");
-    push({ cls: "", text: (prompt + raw).trimEnd() });
+    if (runningRef.current || raw.trim() === "") return;
+    runningRef.current = true;
     setIsRunning(true);
     try {
       await run(raw);
@@ -551,34 +896,142 @@ export default function Playground() {
         text: error instanceof Error ? error.message : String(error),
       });
     } finally {
-      setIsRunning(false);
-      window.setTimeout(() => inputRef.current?.focus(), 0);
+      writePrompt(() => {
+        runningRef.current = false;
+        setIsRunning(false);
+        terminalRef.current?.focus();
+      });
     }
   }
 
-  function onSubmit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    void execute(input);
+  executeRef.current = execute;
+  inputHandlerRef.current = handleTerminalData;
+
+  useEffect(() => {
+    const host = terminalHostRef.current;
+    if (!host) return;
+
+    let cancelled = false;
+    let terminal: XTerm | null = null;
+    let resizeObserver: ResizeObserver | null = null;
+    let fitFrame: number | null = null;
+    let media: MediaQueryList | null = null;
+    const disposables: Array<{ dispose(): void }> = [];
+
+    void Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")])
+      .then(([{ Terminal }, { FitAddon }]) => {
+        if (cancelled) return;
+
+        terminal = new Terminal({
+          cursorBlink: true,
+          cursorStyle: "block",
+          fontFamily: cssValue(
+            "--mono",
+            '"SFMono-Regular", "Cascadia Code", Consolas, monospace'
+          ),
+          fontSize: host.clientWidth < 520 ? 11 : 13,
+          fontWeight: "400",
+          fontWeightBold: "600",
+          letterSpacing: 0,
+          lineHeight: 1.35,
+          rightClickSelectsWord: true,
+          screenReaderMode: true,
+          scrollback: 5000,
+          scrollOnUserInput: true,
+          theme: terminalTheme(),
+        });
+        const fitAddon = new FitAddon();
+        terminal.loadAddon(fitAddon);
+        terminal.open(host);
+        terminalRef.current = terminal;
+
+        const fit = () => {
+          if (fitFrame !== null) return;
+          fitFrame = window.requestAnimationFrame(() => {
+            fitFrame = null;
+            if (!terminal || cancelled || !host.isConnected) return;
+            const fontSize = host.clientWidth < 520 ? 11 : 13;
+            if (terminal.options.fontSize !== fontSize) {
+              terminal.options.fontSize = fontSize;
+            }
+            fitAddon.fit();
+            if (inputMarkerRef.current) redrawInput();
+          });
+        };
+
+        fitAddon.fit();
+        resizeObserver = new ResizeObserver(fit);
+        resizeObserver.observe(host);
+        void document.fonts.ready.then(fit);
+
+        media = window.matchMedia("(prefers-color-scheme: light)");
+        const applyTheme = () => {
+          if (!terminal) return;
+          terminal.options.theme = terminalTheme();
+          fit();
+        };
+        media.addEventListener("change", applyTheme);
+        disposables.push({
+          dispose: () => media?.removeEventListener("change", applyTheme),
+        });
+
+        disposables.push(
+          terminal.onData((data) => inputHandlerRef.current(data))
+        );
+        terminal.attachCustomKeyEventHandler((event) => {
+          if (
+            event.type === "keydown" &&
+            (event.ctrlKey || event.metaKey) &&
+            event.key.toLowerCase() === "c" &&
+            terminal?.hasSelection() &&
+            navigator.clipboard?.writeText
+          ) {
+            void navigator.clipboard
+              .writeText(terminal.getSelection())
+              .catch(() => {});
+            return false;
+          }
+          return true;
+        });
+
+        for (const line of [...WELCOME, ...outputQueueRef.current.splice(0)]) {
+          terminal.writeln(styledLine(line));
+        }
+        writePrompt(() => {
+          if (cancelled || !terminal) return;
+          setTerminalReady(true);
+          terminal.focus();
+          fit();
+        });
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setTerminalError(
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      resizeObserver?.disconnect();
+      if (fitFrame !== null) window.cancelAnimationFrame(fitFrame);
+      for (const disposable of disposables) disposable.dispose();
+      inputMarkerRef.current?.dispose();
+      inputMarkerRef.current = null;
+      terminal?.dispose();
+      if (terminalRef.current === terminal) terminalRef.current = null;
+    };
+  }, [redrawInput, writePrompt]);
+
+  function executeAction(command: string): void {
+    if (!terminalReady || runningRef.current) return;
+    inputBufferRef.current = command;
+    inputCursorRef.current = command.length;
+    redrawInput(submitCurrentLine);
   }
 
-  function onKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      if (histPosRef.current > 0) {
-        setInput(histRef.current[--histPosRef.current] ?? "");
-      }
-    } else if (event.key === "ArrowDown") {
-      event.preventDefault();
-      if (histPosRef.current < histRef.current.length) {
-        setInput(histRef.current[++histPosRef.current] ?? "");
-      } else {
-        setInput("");
-      }
-    }
-  }
-
-  const actions =
-    pendingSendRef.current !== null ? CONFIRM_ACTIONS : DEFAULT_ACTIONS;
+  const actions = prompt === "$ " ? DEFAULT_ACTIONS : CONFIRM_ACTIONS;
 
   return (
     <div>
@@ -591,33 +1044,18 @@ export default function Playground() {
           <span className="term-status">signet · live wasm</span>
         </div>
 
-        <div
-          className="term-body"
-          ref={bodyRef}
-          onClick={() => inputRef.current?.focus()}
-          aria-live="polite"
-        >
-          {lines.map((line, index) => (
-            <div key={index} className={"line " + line.cls}>
-              {line.text || " "}
+        <div className="term-screen">
+          <div
+            className="term-host"
+            ref={terminalHostRef}
+            role="application"
+            aria-label="Interactive sats terminal playground"
+          />
+          {!terminalReady && (
+            <div className="term-loading" role="status">
+              {terminalError ?? "starting terminal…"}
             </div>
-          ))}
-          <form className="line term-input-line" onSubmit={onSubmit}>
-            <span className="t-p">{prompt}</span>
-            <input
-              ref={inputRef}
-              className="term-input"
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={onKeyDown}
-              disabled={isRunning}
-              spellCheck={false}
-              autoComplete="off"
-              autoCapitalize="off"
-              aria-label="sats playground command input"
-              placeholder={isRunning ? "running…" : "type a command"}
-            />
-          </form>
+          )}
         </div>
 
         <div className="term-actions" aria-label="Suggested commands">
@@ -629,8 +1067,8 @@ export default function Playground() {
                 "term-action" +
                 (action.primary ? " term-action-primary" : "")
               }
-              disabled={isRunning}
-              onClick={() => void execute(action.command)}
+              disabled={isRunning || !terminalReady}
+              onClick={() => executeAction(action.command)}
             >
               {action.label}
             </button>
@@ -642,7 +1080,7 @@ export default function Playground() {
         <span>
           Keys and state stay in this tab and disappear when you close it.
         </span>
-        <span>↑/↓ history · enter to run</span>
+        <span>tab complete · ↑/↓ history · ctrl+l clear</span>
       </p>
     </div>
   );

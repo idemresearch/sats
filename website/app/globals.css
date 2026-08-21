@@ -484,73 +484,62 @@ h2 {
   background: var(--success);
 }
 
-.term-body {
-  min-height: 404px;
-  max-height: 500px;
-  padding: 22px 22px 26px;
-  overflow: auto;
-  color: var(--foreground);
-  font-family: var(--mono);
-  font-size: 12px;
-  line-height: 1.72;
-  scrollbar-color: var(--border-strong) transparent;
-  scrollbar-width: thin;
-}
-
-.term-body .line {
-  min-height: 1.72em;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.t-p,
 .term-title-mark {
   color: var(--accent);
 }
 
-.t-c {
-  color: var(--foreground);
-  font-weight: 700;
+.term-screen {
+  position: relative;
+  height: clamp(404px, 48vw, 500px);
+  min-height: 404px;
+  overflow: hidden;
+  background: var(--surface);
 }
 
-.t-o {
-  color: var(--output);
+.term-host {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
 }
 
-.t-g {
-  color: var(--success);
+.term-host .xterm {
+  width: 100%;
+  height: 100%;
+  padding: 20px 22px 24px;
+  font-variant-ligatures: none;
 }
 
-.t-r {
-  color: var(--danger);
+.term-host .xterm-viewport {
+  background: transparent !important;
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
 }
 
-.t-dim {
-  color: var(--subtle);
+.term-host .xterm-viewport::-webkit-scrollbar {
+  width: 8px;
 }
 
-.term-input-line {
-  display: flex;
-  align-items: baseline;
+.term-host .xterm-viewport::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--border-strong);
+  background-clip: padding-box;
 }
 
-.term-input {
-  flex: 1;
-  min-width: 0;
-  padding: 0 0 0 7px;
-  border: 0;
+.term-host .xterm-helper-textarea:focus {
   outline: 0;
-  background: transparent;
-  color: var(--foreground);
-  font-family: var(--mono);
-  font-size: inherit;
-  font-weight: 600;
-  caret-color: var(--accent);
 }
 
-.term-input::placeholder {
-  color: var(--placeholder);
-  font-weight: 400;
+.term-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--surface);
+  color: var(--subtle);
+  font-family: var(--mono);
+  font-size: 11px;
+  pointer-events: none;
 }
 
 .term-actions {
@@ -1094,10 +1083,13 @@ footer > div:first-child {
     min-width: 58px;
   }
 
-  .term-body {
+  .term-screen {
     min-height: 390px;
-    padding: 18px 15px 22px;
-    font-size: 11px;
+    height: 390px;
+  }
+
+  .term-host .xterm {
+    padding: 17px 15px 20px;
   }
 
   .term-caption {

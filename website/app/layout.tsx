@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
+import "@xterm/xterm/css/xterm.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
