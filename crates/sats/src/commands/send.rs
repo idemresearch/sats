@@ -1,6 +1,5 @@
 use anyhow::{Result, bail};
 use sats_core::bitcoin::Network;
-use sats_core::plan::PlanStatus;
 use sats_core::signer::{LocalSigner, Signer};
 
 use crate::commands::plan;
@@ -17,41 +16,43 @@ pub fn run(
     json: bool,
 ) -> Result<()> {
     let mut ctx = walletd::open(store, network)?;
-    let mut plan = plan::build(&mut ctx, services, req)?;
+    let prepared = plan::build(&mut ctx, services, req)?;
     ctx.persist()?;
 
     if !json {
-        plan::print_block(&plan);
+        plan::print_block(&prepared);
     }
     if !yes && !ui::confirm("Sign?", true)? {
         ui::dim("aborted");
         return Ok(());
     }
 
-    let mut psbt = plan.psbt()?;
+    let mut psbt = prepared.psbt().clone();
     let mut signer = LocalSigner::new(keys::unlock(store)?, network);
     if !signer.sign(&mut psbt)? {
         bail!("signer produced an unfinalized transaction");
     }
-    plan.set_psbt(&psbt);
-    plan.status = PlanStatus::Signed;
+    let mut record = prepared.into_transaction(psbt, None)?;
+    // Persist before any network call. A crash or lost provider response can
+    // never strand the only copy of a signed transaction.
+    store.save_transaction(ctx.net_name, &record)?;
     if !json {
         ui::ok("signed");
     }
 
-    let tx = plan.tx()?;
+    let tx = record.tx()?;
     match services.broadcast(&mut ctx, &tx) {
         Ok(txid) => {
-            plan.status = PlanStatus::Broadcast;
-            store.save_plan(ctx.net_name, &plan)?;
+            record.mark_broadcast();
+            store.save_transaction(ctx.net_name, &record)?;
             if json {
                 println!(
                     "{}",
                     serde_json::json!({
                         "txid": txid.to_string(),
-                        "amount_sat": plan.amount_sat,
-                        "fee_sat": plan.fee_sat,
-                        "total_sat": plan.total_sat(),
+                        "amount_sat": record.amount_sat,
+                        "fee_sat": record.fee_sat,
+                        "total_sat": record.total_sat(),
                     })
                 );
             } else {
@@ -60,10 +61,10 @@ pub fn run(
             Ok(())
         }
         Err(err) => {
-            store.save_plan(ctx.net_name, &plan)?;
             bail!(
-                "{err:#} — plan {} saved as signed, retry: sats broadcast",
-                plan.id
+                "{err:#} — transaction {} saved, retry: sats broadcast --transaction {}",
+                record.txid,
+                record.txid
             );
         }
     }

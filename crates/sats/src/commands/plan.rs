@@ -4,7 +4,7 @@ use std::str::FromStr;
 use anyhow::{Context, Result, anyhow};
 use sats_core::bitcoin::{Address, Amount, FeeRate, Network, OutPoint};
 use sats_core::engine;
-use sats_core::plan::Plan;
+use sats_core::plan::PreparedSpend;
 
 use crate::provider::Services;
 use crate::store::{Store, unix_now};
@@ -41,37 +41,42 @@ pub fn run(
     json: bool,
 ) -> Result<()> {
     let mut ctx = walletd::open(store, network)?;
-    let plan = build(&mut ctx, services, req)?;
+    let prepared = build(&mut ctx, services, req)?;
     ctx.persist()?;
-    store.save_plan(ctx.net_name, &plan)?;
+    let session = prepared.session();
+    store.save_psbt_session(ctx.net_name, &session)?;
 
     if json {
         println!(
             "{}",
             serde_json::json!({
-                "id": plan.id,
-                "recipient": plan.recipient,
-                "amount_sat": plan.amount_sat,
-                "fee_sat": plan.fee_sat,
-                "total_sat": plan.total_sat(),
-                "excluded_utxos": plan.excluded_utxos,
+                "id": session.id,
+                "recipient": session.recipient,
+                "amount_sat": session.amount_sat,
+                "fee_sat": session.fee_sat,
+                "total_sat": session.total_sat(),
+                "excluded_utxos": session.excluded_utxos,
             })
         );
     } else {
-        print_block(&plan);
+        print_block(&prepared);
         println!();
-        ui::ok(&format!("plan saved  {}", plan.id));
+        ui::ok(&format!("PSBT session saved  {}", session.id));
         ui::dim("next: sats sign");
     }
     Ok(())
 }
 
-/// The shared planning pipeline for `plan`, `send`, and MCP sends:
+/// The shared preparation pipeline for `plan`, `send`, and MCP sends:
 /// validate → sync → protect → estimate → build. Ordered so that a request
 /// that can never succeed (bad address) fails before any network IO, and
 /// spending never plans on stale chain state — a failed sync is a hard
 /// error, as is a configured guard that cannot answer.
-pub fn build(ctx: &mut WalletCtx, services: &Services, req: &PlanRequest) -> Result<Plan> {
+pub fn build(
+    ctx: &mut WalletCtx,
+    services: &Services,
+    req: &PlanRequest,
+) -> Result<PreparedSpend> {
     let addr = Address::from_str(req.address)
         .map_err(|e| anyhow!("invalid address: {e}"))?
         .require_network(ctx.network)
@@ -139,7 +144,7 @@ pub fn build(ctx: &mut WalletCtx, services: &Services, req: &PlanRequest) -> Res
     )?)
 }
 
-pub fn print_block(plan: &Plan) {
+pub fn print_block(plan: &PreparedSpend) {
     ui::sat_rows(&[
         ("Send", plan.amount_sat),
         ("Fee", plan.fee_sat),

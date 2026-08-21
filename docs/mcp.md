@@ -132,7 +132,7 @@ Operational failure:
 ```json
 {
   "status": "error",
-  "message": "broadcast failed after signing: ... — budget reserved; a human can retry with: sats broadcast --plan ab12cd34"
+  "message": "broadcast failed after signing: ... — budget reserved; a human can retry with: sats broadcast --transaction <txid>"
 }
 ```
 
@@ -161,17 +161,18 @@ The server executes:
 
 1. reload the grant so revocation is current;
 2. precheck expiry, amount cap, and obviously exhausted budget;
-3. run the shared safe planner to sync, protect UTXOs, and learn the fee;
+3. run shared safe preparation to sync, protect UTXOs, and learn the fee;
 4. authorize the final amount plus fee;
 5. reserve and persist budget;
 6. unlock the grant-wrapped seed and sign;
-7. save the signed plan and broadcast;
-8. mark the plan broadcast and return the txid.
+7. privately save raw finalized transaction hex before network access;
+8. broadcast, mark the transaction broadcast, and return the txid.
 
 If signing fails before a signature exists, the reservation is refunded. If
-broadcast fails, budget stays reserved and the saved signed plan can be
-retried by a human. See [Security](security.md) for why the boundary occurs at
-signing rather than broadcast.
+broadcast fails, budget stays reserved and the saved finalized transaction
+can be retried by a human. The normal MCP path never persists the PSBT. See
+[Security](security.md) for why the boundary occurs at signing rather than
+broadcast.
 
 ## Revocation and expiry
 

@@ -24,10 +24,10 @@ continuing. Mainnet requires `--network mainnet` explicitly.
 | `sats init [--words 12|24]` | Create the sealed seed and the watch-only wallet for the selected network |
 | `sats balance [--offline]` | Sync and show confirmed/trusted and pending balances; `--offline` uses cached state |
 | `sats receive` | Reveal and persist the next external receive address |
-| `sats plan <address> <amount>` | Sync, protect UTXOs, estimate the fee, build and save an unsigned PSBT plan |
-| `sats send <address> <amount>` | Plan, confirm, sign, broadcast, and save the final plan state |
-| `sats sign [FILE]` | Sign the newest unsigned plan or an external base64/binary PSBT |
-| `sats broadcast` | Broadcast the newest signed plan or a raw transaction file |
+| `sats plan <address> <amount>` | Explicitly create a private, resumable unsigned PSBT session |
+| `sats send <address> <amount>` | Prepare, confirm, sign, privately persist raw finalized transaction hex, then broadcast |
+| `sats sign [FILE]` | Finalize the newest saved PSBT session or sign an external base64/binary PSBT |
+| `sats broadcast` | Broadcast the newest pending finalized transaction or a raw transaction file |
 | `sats grant <agent>` | Create bounded unattended signing authority |
 | `sats revoke <agent>` | Delete an agent grant immediately |
 | `sats grants` | List non-expired grants and remaining budgets |
@@ -58,7 +58,7 @@ Amounts are integer satoshis. Case-insensitive suffixes are accepted:
 Fractional shorthand must resolve to a whole satoshi. Plain values such as
 `25000` are interpreted directly as sats.
 
-## Planning and sending
+## Preparation and sending
 
 ```sh
 sats plan <address> <amount> [--fee-rate <SAT_VB>] \
@@ -68,24 +68,25 @@ sats send <address> <amount> [--fee-rate <SAT_VB>] \
   [--allow-dust] [--no-guards] [--yes]
 ```
 
-The shared planning path:
+The shared preparation path:
 
 1. validates the address against the selected network;
 2. syncs the watch-only wallet;
 3. excludes common inscription postage outputs unless `--allow-dust`;
 4. queries and unions configured guards unless `--no-guards`;
 5. estimates a roughly two-block fee unless `--fee-rate` is supplied;
-6. builds the unsigned PSBT.
+6. builds the unsigned PSBT in memory.
 
-Sync or configured-guard failure stops planning. Both bypass flags apply only
+Sync or configured-guard failure stops preparation. Both bypass flags apply only
 to the current human invocation and are intentionally absent from MCP sends.
 
 `send --yes` skips the confirmation prompt but does not bypass UTXO safety,
 provider validation, password unlocking, or any agent authorization rule.
 
-## PSBT workflow
+## Explicit PSBT workflow
 
-The newest matching saved plan is used when no ID is supplied:
+Normal `send` does not persist a PSBT. `plan` explicitly creates a private
+unsigned session, and the newest session is used when no ID is supplied:
 
 ```sh
 sats plan tb1p... 25k
@@ -93,12 +94,23 @@ sats sign
 sats broadcast
 ```
 
-Select a specific saved plan:
+Select a specific saved session:
 
 ```sh
 sats sign --plan <id>
-sats broadcast --plan <id>
 ```
+
+After successful signing, sats privately saves raw finalized transaction hex
+and removes the PSBT session. Broadcast the newest pending transaction, or
+select one by full/unique-prefix txid:
+
+```sh
+sats broadcast
+sats broadcast --transaction <txid>
+```
+
+`sats broadcast --plan <id>` remains a compatibility alias for records
+created from a session and migrates pre-refactor signed plan files on use.
 
 Sign an external PSBT:
 
@@ -116,8 +128,9 @@ Broadcast a raw transaction hex file:
 sats broadcast --tx transaction.hex
 ```
 
-If broadcast of a saved plan fails after signing, the plan remains signed and
-can be retried with `sats broadcast`.
+Finalized transaction state is written before broadcast. If broadcast fails,
+the pending raw transaction can be retried with `sats broadcast`; sats does
+not retain the signed PSBT.
 
 ## Agent grants
 
@@ -151,7 +164,7 @@ See [MCP and agent grants](mcp.md) for the tool-level contract.
 - `receive`;
 - `plan`;
 - `send`;
-- saved-plan `sign`;
+- saved-session `sign`;
 - `broadcast`;
 - `grant`;
 - `revoke`;

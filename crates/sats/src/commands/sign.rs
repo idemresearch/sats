@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
 use sats_core::bitcoin::{Network, Psbt};
-use sats_core::plan::PlanStatus;
+use sats_core::plan::LegacyPlanStatus;
 use sats_core::signer::{LocalSigner, Signer};
 
 use crate::config::network_name;
@@ -23,34 +23,70 @@ pub fn run(
     }
 
     let net_name = network_name(network);
-    let mut plan = match plan_id {
-        Some(id) => store.load_plan(net_name, &id)?,
-        None => store
-            .latest_plan(net_name, PlanStatus::Unsigned)?
-            .context("no unsigned plans — run: sats plan")?,
-    };
-    match plan.status {
-        PlanStatus::Unsigned => {}
-        PlanStatus::Signed => bail!("plan {} is already signed — run: sats broadcast", plan.id),
-        PlanStatus::Broadcast => bail!("plan {} was already broadcast", plan.id),
+    enum Source {
+        Session,
+        Legacy,
     }
 
-    let mut psbt = plan.psbt()?;
+    let (source_id, prepared, source) = match plan_id {
+        Some(id) => {
+            let session_path = store.psbt_sessions_dir(net_name).join(format!("{id}.json"));
+            if session_path.exists() {
+                let session = store.load_psbt_session(net_name, &id)?;
+                let source_id = session.id.clone();
+                (source_id, session.into_prepared()?, Source::Session)
+            } else {
+                let legacy = store.load_legacy_plan(net_name, &id)?;
+                match legacy.status {
+                    LegacyPlanStatus::Unsigned => {}
+                    LegacyPlanStatus::Signed => {
+                        bail!("plan {} is already signed — run: sats broadcast", legacy.id)
+                    }
+                    LegacyPlanStatus::Broadcast => {
+                        bail!("plan {} was already broadcast", legacy.id)
+                    }
+                }
+                let source_id = legacy.id.clone();
+                (source_id, legacy.into_prepared()?, Source::Legacy)
+            }
+        }
+        None => {
+            if let Some(session) = store.latest_psbt_session(net_name)? {
+                let source_id = session.id.clone();
+                (source_id, session.into_prepared()?, Source::Session)
+            } else {
+                let legacy = store
+                    .latest_legacy_plan(net_name, LegacyPlanStatus::Unsigned)?
+                    .context("no unsigned PSBT sessions — run: sats plan")?;
+                let source_id = legacy.id.clone();
+                (source_id, legacy.into_prepared()?, Source::Legacy)
+            }
+        }
+    };
+
+    let mut psbt = prepared.psbt().clone();
     let mut signer = LocalSigner::new(keys::unlock(store)?, network);
     if !signer.sign(&mut psbt)? {
         bail!("signer produced an unfinalized transaction");
     }
-    plan.set_psbt(&psbt);
-    plan.status = PlanStatus::Signed;
-    store.save_plan(net_name, &plan)?;
+    let record = prepared.into_transaction(psbt, Some(source_id.clone()))?;
+    store.save_transaction(net_name, &record)?;
+    match source {
+        Source::Session => store.delete_psbt_session(net_name, &source_id)?,
+        Source::Legacy => store.delete_legacy_plan(net_name, &source_id)?,
+    }
 
     if json {
         println!(
             "{}",
-            serde_json::json!({ "id": plan.id, "status": "signed" })
+            serde_json::json!({
+                "id": source_id,
+                "txid": record.txid,
+                "status": "signed",
+            })
         );
     } else {
-        ui::ok(&format!("signed  {}", plan.id));
+        ui::ok(&format!("signed  {}", record.txid));
         ui::dim("next: sats broadcast");
     }
     Ok(())

@@ -8,7 +8,7 @@ use bdk_wallet::Wallet;
 use bdk_wallet::bitcoin::{Address, Amount, FeeRate, OutPoint};
 
 use crate::error::PlanError;
-use crate::plan::{Plan, PlanStatus};
+use crate::plan::PreparedSpend;
 
 /// Classic inscription postage values. UTXOs at exactly these amounts are
 /// likely to be carrying an ordinal inscription and are excluded from
@@ -27,7 +27,7 @@ pub fn dust_suspects(utxos: impl IntoIterator<Item = (OutPoint, Amount)>) -> Vec
         .collect()
 }
 
-/// Build an unsigned spend plan. Reveals a change address on the wallet, so
+/// Prepare an unsigned spend. Reveals a change address on the wallet, so
 /// callers with persistence should persist afterwards.
 ///
 /// `unspendable` outpoints are excluded from coin selection. This is only a
@@ -41,7 +41,7 @@ pub fn build_plan(
     unspendable: &[OutPoint],
     network: &str,
     now_unix: u64,
-) -> Result<Plan, PlanError> {
+) -> Result<PreparedSpend, PlanError> {
     let excluded_utxos = {
         let excluded: HashSet<OutPoint> = unspendable.iter().copied().collect();
         wallet
@@ -56,18 +56,15 @@ pub fn build_plan(
     let psbt = builder.finish().map_err(Box::new)?;
 
     let fee_sat = psbt.fee()?.to_sat();
-    let id = psbt.unsigned_tx.compute_txid().to_string()[..8].to_string();
-    Ok(Plan {
-        id,
-        network: network.to_string(),
-        recipient: recipient.to_string(),
-        amount_sat: amount.to_sat(),
+    Ok(PreparedSpend::new(
+        network.to_string(),
+        recipient.to_string(),
+        amount.to_sat(),
         fee_sat,
-        created_at: now_unix,
-        status: PlanStatus::Unsigned,
-        psbt: psbt.to_string(),
+        now_unix,
         excluded_utxos,
-    })
+        psbt,
+    ))
 }
 
 #[cfg(test)]
@@ -137,7 +134,7 @@ mod tests {
             0,
         )
         .unwrap();
-        let tx = plan.tx().unwrap();
+        let tx = plan.psbt().unsigned_tx.clone();
         assert!(tx.input.iter().all(|i| i.previous_output != outs[0]));
         assert_eq!(plan.excluded_utxos, 1);
     }

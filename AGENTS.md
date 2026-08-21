@@ -29,10 +29,12 @@ sats is an on-chain Bitcoin wallet with two native surfaces:
 - a human-operated CLI;
 - an MCP server operating under a named, human-created spending grant.
 
-Transaction plans are PSBTs. The persisted BDK wallet is watch-only. Human
-and agent sends share the same validation, sync, protection, fee-estimation,
-and planning pipeline. Agent sends add deterministic authorization before a
-signature is produced.
+Prepared spends are PSBTs. Normal sends keep them in memory; only an explicit
+staged workflow persists an unsigned PSBT session. Once signed, durable state
+contains private raw transaction hex rather than a signed PSBT. The persisted
+BDK wallet is watch-only. Human and agent sends share validation, sync,
+protection, fee estimation, and preparation. Agent sends add deterministic
+authorization before a signature is produced.
 
 Signet is the default. Mainnet must remain an explicit choice.
 
@@ -42,7 +44,7 @@ Signet is the default. Mainnet must remain an explicit choice.
 |---|---|
 | `crates/sats-core/src/engine.rs` | Pure transaction planning and conservative UTXO exclusion |
 | `crates/sats-core/src/authz.rs` | Pure grant decisions, reservation, and refund rules |
-| `crates/sats-core/src/plan.rs` | Persisted PSBT plan model and lifecycle |
+| `crates/sats-core/src/plan.rs` | Ephemeral prepared spends, explicit PSBT sessions, finalized transaction records, and legacy-plan compatibility |
 | `crates/sats-core/src/seed.rs` | BIP-39 seed handling and BIP-86 descriptors |
 | `crates/sats-core/src/seal.rs` | Versioned authenticated secret sealing |
 | `crates/sats-core/src/signer.rs` | Signer trait and local in-memory signer |
@@ -50,7 +52,7 @@ Signet is the default. Mainnet must remain an explicit choice.
 | `crates/sats/src/cli.rs` | Clap command and flag definitions |
 | `crates/sats/src/commands/` | Human CLI workflows and rendering |
 | `crates/sats/src/provider/` | Native chain providers, capability resolution, and guards |
-| `crates/sats/src/store.rs` | Paths, atomic files, permissions, plans, and grants |
+| `crates/sats/src/store.rs` | Paths, atomic files, permissions, PSBT sessions, finalized transactions, legacy plans, and grants |
 | `crates/sats/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
 | `crates/sats/src/mcp/` | MCP transport, schemas, and granted agent workflows |
 | `crates/sats/tests/` | Native CLI and MCP integration tests |
@@ -82,6 +84,10 @@ and rendering belong to callers.
 - Preserve the `Signer` boundary; do not make callers depend directly on the
   local mnemonic signer.
 - Treat a signed transaction as spendable even when broadcast fails.
+- Persist finalized transaction hex before attempting broadcast. Do not
+  persist a signed PSBT for a fully finalized single-sig send.
+- Write PSBT sessions and finalized transaction records with restrictive
+  permissions; both expose wallet and payment metadata.
 
 ### Agent authorization
 
@@ -170,9 +176,10 @@ Call it from the shared native workflow so CLI and MCP cannot diverge.
 
 ### State format change
 
-Existing seed, plan, grant, config, and SQLite state are compatibility
-surfaces. Define backward-reading behavior before changing a serialized
-shape. Preserve atomic writes and restrictive permissions for secret files.
+Existing seed, PSBT-session, finalized-transaction, legacy-plan, grant,
+config, and SQLite state are compatibility surfaces. Define backward-reading
+behavior before changing a serialized shape. Preserve atomic writes and
+restrictive permissions for sensitive files.
 
 ## Documentation policy
 

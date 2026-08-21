@@ -49,7 +49,7 @@ pub enum Command {
     },
     /// Show a fresh receive address
     Receive,
-    /// Build an unsigned transaction plan
+    /// Create an explicit, resumable unsigned PSBT session
     Plan {
         /// Recipient address
         address: String,
@@ -66,7 +66,7 @@ pub enum Command {
         #[arg(long)]
         no_guards: bool,
     },
-    /// Send bitcoin: plan, confirm, sign, broadcast
+    /// Send bitcoin: prepare, confirm, sign, persist, broadcast
     Send {
         /// Recipient address
         address: String,
@@ -86,22 +86,25 @@ pub enum Command {
         #[arg(short, long)]
         yes: bool,
     },
-    /// Sign a saved plan or a PSBT file
+    /// Sign a saved PSBT session or an external PSBT file
     Sign {
-        /// PSBT file to sign (base64 or binary); default: newest unsigned plan
+        /// PSBT file to sign (base64 or binary); default: newest saved session
         #[arg(value_name = "FILE")]
         psbt: Option<PathBuf>,
-        /// Plan id (default: newest unsigned plan)
+        /// Saved PSBT session id (also accepts a pre-refactor plan id)
         #[arg(long, value_name = "ID", conflicts_with = "psbt")]
         plan: Option<String>,
     },
-    /// Broadcast a signed plan or a raw transaction
+    /// Broadcast a pending finalized transaction or a raw transaction file
     Broadcast {
-        /// Plan id (default: newest signed plan)
-        #[arg(long, value_name = "ID")]
+        /// Transaction id or unique prefix (default: newest pending)
+        #[arg(long, value_name = "TXID", conflicts_with_all = ["plan", "tx"])]
+        transaction: Option<String>,
+        /// Pre-refactor plan/session id; retained as a compatibility alias
+        #[arg(long, value_name = "ID", conflicts_with_all = ["transaction", "tx"])]
         plan: Option<String>,
         /// Broadcast a raw transaction hex file instead
-        #[arg(long, value_name = "FILE", conflicts_with = "plan")]
+        #[arg(long, value_name = "FILE", conflicts_with_all = ["transaction", "plan"])]
         tx: Option<PathBuf>,
     },
     /// Grant an agent a spending budget

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use sats_core::bitcoin::{Network, Transaction, consensus};
-use sats_core::plan::PlanStatus;
+use sats_core::plan::{LegacyPlan, LegacyPlanStatus, TransactionRecord, TransactionStatus};
 
 use crate::provider::Services;
 use crate::store::Store;
@@ -13,7 +13,8 @@ pub fn run(
     store: &Store,
     network: Network,
     services: &Services,
-    plan_id: Option<String>,
+    transaction_id: Option<String>,
+    legacy_plan_id: Option<String>,
     tx_file: Option<&Path>,
     json: bool,
 ) -> Result<()> {
@@ -30,24 +31,73 @@ pub fn run(
         return Ok(());
     }
 
-    let mut plan = match plan_id {
-        Some(id) => store.load_plan(ctx.net_name, &id)?,
-        None => store
-            .latest_plan(ctx.net_name, PlanStatus::Signed)?
-            .context("no signed plans — run: sats sign")?,
+    let mut record = if let Some(id) = transaction_id {
+        store.load_transaction(ctx.net_name, &id)?
+    } else if let Some(id) = legacy_plan_id {
+        match store.load_transaction(ctx.net_name, &id) {
+            Ok(record) => record,
+            Err(err) => {
+                let legacy_path = store
+                    .legacy_plans_dir(ctx.net_name)
+                    .join(format!("{id}.json"));
+                if !legacy_path.exists() {
+                    return Err(err);
+                }
+                migrate_legacy_plan(
+                    store,
+                    ctx.net_name,
+                    store.load_legacy_plan(ctx.net_name, &id)?,
+                )?
+            }
+        }
+    } else if let Some(record) =
+        store.latest_transaction(ctx.net_name, TransactionStatus::Pending)?
+    {
+        record
+    } else if let Some(plan) =
+        store.latest_legacy_plan(ctx.net_name, LegacyPlanStatus::Signed)?
+    {
+        migrate_legacy_plan(store, ctx.net_name, plan)?
+    } else {
+        bail!("no pending transactions — run: sats send, or sats plan then sats sign");
     };
-    match plan.status {
-        PlanStatus::Signed => {}
-        PlanStatus::Unsigned => bail!("plan {} is not signed — run: sats sign", plan.id),
-        PlanStatus::Broadcast => bail!("plan {} was already broadcast", plan.id),
+
+    match record.status {
+        TransactionStatus::Pending => {}
+        TransactionStatus::Broadcast => {
+            bail!("transaction {} was already broadcast", record.txid)
+        }
     }
 
-    let tx = plan.tx()?;
+    let tx = record.tx()?;
     let txid = services.broadcast(&mut ctx, &tx)?;
-    plan.status = PlanStatus::Broadcast;
-    store.save_plan(ctx.net_name, &plan)?;
+    record.mark_broadcast();
+    store.save_transaction(ctx.net_name, &record)?;
     report(json, &txid.to_string());
     Ok(())
+}
+
+fn migrate_legacy_plan(
+    store: &Store,
+    network: &str,
+    plan: LegacyPlan,
+) -> Result<TransactionRecord> {
+    match plan.status {
+        LegacyPlanStatus::Unsigned => {
+            bail!(
+                "plan {} is not signed — run: sats sign --plan {}",
+                plan.id,
+                plan.id
+            )
+        }
+        LegacyPlanStatus::Signed => {}
+        LegacyPlanStatus::Broadcast => bail!("plan {} was already broadcast", plan.id),
+    }
+    let source_id = plan.id.clone();
+    let record = plan.into_transaction()?;
+    store.save_transaction(network, &record)?;
+    store.delete_legacy_plan(network, &source_id)?;
+    Ok(record)
 }
 
 fn report(json: bool, txid: &str) {

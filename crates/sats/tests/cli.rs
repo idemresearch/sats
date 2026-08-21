@@ -269,7 +269,7 @@ fn balance_tolerates_sync_failure_and_reports_it() {
 }
 
 #[test]
-fn sign_and_broadcast_without_plans_point_to_next_step() {
+fn sign_and_broadcast_without_sessions_point_to_next_step() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
@@ -277,13 +277,19 @@ fn sign_and_broadcast_without_plans_point_to_next_step() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "no unsigned plans — run: sats plan",
+            "no unsigned PSBT sessions — run: sats plan",
         ));
     sats(&dir)
         .arg("broadcast")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no signed plans — run: sats sign"));
+        .stderr(predicate::str::contains("no pending transactions"));
+
+    sats(&dir)
+        .args(["broadcast", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--transaction"));
 }
 
 #[test]

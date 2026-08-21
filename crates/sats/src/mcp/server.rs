@@ -11,7 +11,6 @@ use rmcp::model::{ErrorData, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use sats_core::authz::{Decision, SpendRequest, authorize_spend};
 use sats_core::bitcoin::Network;
-use sats_core::plan::PlanStatus;
 use sats_core::signer::{LocalSigner, Signer};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -290,7 +289,7 @@ impl SatsMcp {
     }
 }
 
-/// The agent spend path: plan → authorize → reserve → sign → broadcast.
+/// The agent spend path: prepare → authorize → reserve → sign → persist → broadcast.
 /// Every failure mode maps to a deterministic result, never a panic.
 fn execute_send(
     store: &Store,
@@ -334,8 +333,8 @@ fn execute_send(
         );
     }
 
-    // Plan the transaction to learn the real fee before any decision.
-    let planned = (|| -> Result<_> {
+    // Prepare the transaction to learn the real fee before any decision.
+    let prepared_result = (|| -> Result<_> {
         let services = provider::resolve(config, providers, network)?;
         let mut ctx = walletd::open(store, network)?;
         // plan::build syncs internally and hard-fails on stale state; the
@@ -345,14 +344,14 @@ fn execute_send(
         ctx.persist()?;
         Ok((ctx, services, plan))
     })();
-    let (mut ctx, services, mut spend_plan) = match planned {
+    let (mut ctx, services, prepared) = match prepared_result {
         Ok(v) => v,
         Err(e) => return SendResult::error(format!("{e:#}")),
     };
 
     let request = SpendRequest {
-        amount_sat: spend_plan.amount_sat,
-        fee_sat: spend_plan.fee_sat,
+        amount_sat: prepared.amount_sat,
+        fee_sat: prepared.fee_sat,
     };
     if let Decision::Deny(reason) = authorize_spend(&grant, &request, now) {
         return SendResult::denied(
@@ -382,7 +381,7 @@ fn execute_send(
     // Sign with the grant-wrapped seed.
     let signed = (|| -> Result<_> {
         let mnemonic = keys::unlock_grant(&grant, net_name)?;
-        let mut psbt = spend_plan.psbt()?;
+        let mut psbt = prepared.psbt().clone();
         let mut signer = LocalSigner::new(mnemonic, network);
         if !signer.sign(&mut psbt)? {
             return Err(anyhow!("signer produced an unfinalized transaction"));
@@ -399,32 +398,34 @@ fn execute_send(
         }
     };
 
-    spend_plan.set_psbt(&psbt);
-    spend_plan.status = PlanStatus::Signed;
-    let plan_id = spend_plan.id.clone();
-    if let Err(e) = store.save_plan(net_name, &spend_plan) {
-        return SendResult::error(format!("cannot save signed plan: {e:#}"));
+    let mut record = match prepared.into_transaction(psbt, None) {
+        Ok(record) => record,
+        Err(e) => return SendResult::error(format!("cannot finalize transaction: {e:#}")),
+    };
+    let txid = record.txid.clone();
+    if let Err(e) = store.save_transaction(net_name, &record) {
+        return SendResult::error(format!("cannot save signed transaction: {e:#}"));
     }
 
-    let tx = match spend_plan.tx() {
+    let tx = match record.tx() {
         Ok(tx) => tx,
         Err(e) => return SendResult::error(format!("{e:#}")),
     };
     match services.broadcast(&mut ctx, &tx) {
-        Ok(txid) => {
-            spend_plan.status = PlanStatus::Broadcast;
-            let _ = store.save_plan(net_name, &spend_plan);
+        Ok(broadcast_txid) => {
+            record.mark_broadcast();
+            let _ = store.save_transaction(net_name, &record);
             SendResult::sent(
-                txid.to_string(),
+                broadcast_txid.to_string(),
                 request.amount_sat,
                 request.fee_sat,
                 grant.remaining_sat(),
             )
         }
         // Signed but not broadcast: budget stays reserved (the signed tx
-        // is out of our hands), and a human can retry the saved plan.
+        // is out of our hands), and a human can retry the saved transaction.
         Err(e) => SendResult::error(format!(
-            "broadcast failed after signing: {e:#} — budget reserved; a human can retry with: sats broadcast --plan {plan_id}"
+            "broadcast failed after signing: {e:#} — budget reserved; a human can retry with: sats broadcast --transaction {txid}"
         )),
     }
 }

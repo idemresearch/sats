@@ -52,7 +52,7 @@ mod tests {
 
     use super::*;
     use crate::engine::build_plan;
-    use crate::plan::PlanStatus;
+    use crate::plan::TransactionStatus;
 
     const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
@@ -101,26 +101,38 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(plan.status, PlanStatus::Unsigned);
         assert_eq!(plan.amount_sat, 25_000);
         assert!(plan.fee_sat > 0, "fee must be computed");
         assert_eq!(plan.total_sat(), plan.amount_sat + plan.fee_sat);
         assert_eq!(plan.id.len(), 8);
 
+        let session_json = serde_json::to_string(&plan.session()).unwrap();
+        let session: crate::plan::PsbtSession = serde_json::from_str(&session_json).unwrap();
+        assert_eq!(session.clone().into_prepared().unwrap().id, plan.id);
+
         // The watch-only wallet itself must NOT be able to sign.
-        let mut psbt = plan.psbt().unwrap();
+        let mut psbt = plan.psbt().clone();
         let watch_only_result = wallet.sign(&mut psbt, SignOptions::default()).unwrap();
         assert!(!watch_only_result, "watch-only wallet must not finalize");
 
         // The LocalSigner must.
-        let mut psbt = plan.psbt().unwrap();
+        let mut psbt = plan.psbt().clone();
         let mut signer = LocalSigner::new(mnemonic, Network::Signet);
         assert_eq!(signer.name(), "local");
         let finalized = signer.sign(&mut psbt).unwrap();
         assert!(finalized, "signed PSBT must finalize");
 
-        let tx = psbt.extract_tx().unwrap();
+        let tx = psbt.clone().extract_tx().unwrap();
         assert!(tx.output.iter().any(|o| o.value.to_sat() == 25_000));
+
+        let record = plan.into_transaction(psbt, None).unwrap();
+        assert_eq!(record.status, TransactionStatus::Pending);
+        assert_eq!(record.txid, tx.compute_txid().to_string());
+        assert_eq!(record.tx().unwrap(), tx);
+        assert!(!record.tx_hex.is_empty());
+        let record_json = serde_json::to_string(&record).unwrap();
+        assert!(record_json.contains("tx_hex"));
+        assert!(!record_json.contains("psbt"));
     }
 
     /// Planning more than the balance is a typed failure, not a panic.
