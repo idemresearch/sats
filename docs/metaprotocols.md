@@ -12,9 +12,14 @@ comes from a configurable indexer URL — a subfrost RPC, a sandshrew
 endpoint, an ord server, your own adapter. Capability is an endpoint you
 supply, not code we ship.
 
-Nothing in this document is implemented yet, deliberately. The wallet
-gets stable first; this is the strategy that stability work must not
-paint out.
+Phases 1–2 of this document are now implemented, as the **provider
+model**: chain access and asset guards are both capabilities of typed
+providers (see the Networks section of the README). The principles, the
+one-question contract, and the fail-closed semantics below all stand;
+where this document sketched `[indexers.<net>]` config and
+`--indexer`/`--no-indexer` flags, the shipped surface is `[providers.*]`
+(a guard is a provider capability, `guard.ord` / `guard.alkanes`) and
+`--no-guards`.
 
 ## Principles
 
@@ -91,28 +96,30 @@ If you want raw sandshrew calls, curl exists.
 
 ## Configuration
 
-Mirrors `[esplora]`: per-network, no defaults, absence means off. sats
-will never ship a default indexer URL — that would make a third party a
-silent dependency of every send.
+> **Superseded (shape only).** Guards shipped as provider capabilities
+> rather than a parallel `[indexers]` section — one mechanism for every
+> endpoint the wallet talks to. The semantics below are unchanged:
+> per-network, no defaults, absence means off. sats will never ship a
+> default guard URL — that would make a third party a silent dependency
+> of every send.
 
 ```toml
 network = "signet"
 
-[esplora]
-signet = "https://mempool.space/signet/api"
-
 # Optional. Absent = no asset awareness; dust heuristic only.
-[indexers.signet]
-url  = "http://localhost:8080"
-kind = "ord"        # "sats" (native contract, default) | "sandshrew" | "ord"
+[providers.subfrost]
+driver  = "subfrost"
+network = "signet"
+url     = "https://signet.subfrost.io/v4/jsonrpc"
+capabilities = ["guard"]   # omit to also use it for chain access
 ```
 
-CLI surface, sketched:
+CLI surface:
 
 ```sh
-sats send tb1p... 25k --indexer <url>   # one-shot override
-sats send tb1p... 25k --no-indexer      # skip the asset check, loudly
+sats send tb1p... 25k --no-guards       # skip the asset check, loudly
 sats send tb1p... 25k --allow-dust      # override the postage heuristic
+sats --provider subfrost=<url> send ... # one-shot provider override
 ```
 
 What you'd see:
@@ -129,20 +136,22 @@ And when the indexer is down:
 
 ```
 $ sats send tb1p... 25k
-error: indexer unreachable (http://localhost:8080) — refusing to plan
-       without asset check. retry, or pass --no-indexer to plan anyway
+error: guard ord unreachable (https://signet.subfrost.io) — refusing to
+       plan without the asset check; retry, or pass --no-guards to plan
+       anyway
 ```
 
 Bypass flags are per-invocation only. Config should not be able to
-silently disable a safety check.
+silently disable a safety check, and agent sends over MCP carry no
+bypass at all.
 
 ## Where it lives
 
 | Concern | Where |
 |---|---|
-| Excluding outpoints from selection | `sats-core::engine::build_plan` gains `unspendable: &[OutPoint]`, passed through to BDK's `unspendable()` |
+| Excluding outpoints from selection | `sats-core::engine::build_plan` takes `unspendable: &[OutPoint]`, passed through to BDK's `unspendable()` |
 | Postage heuristic | pure `dust_suspects()` in `sats-core` — testable, and the wasm PWA gets the same safety floor for free |
-| `[indexers]` config, HTTP fetch, fail-closed policy, dialects, flags | `crates/sats`, beside the existing Esplora plumbing |
+| Provider config, HTTP, fail-closed policy, dialects, flags | `crates/sats/src/provider/` — guards are the `UtxoGuard` enum beside the chain drivers |
 | Grants / authz | unchanged — see below |
 
 Protection runs *before* planning, on the shared path. Agent sends over
@@ -152,16 +161,14 @@ change to the authorization engine.
 
 ## Phases
 
-1. **Phase 0 — this document.** No code. Gating condition for
-   everything below: the basic-bitcoin wallet is stable.
-2. **Phase 1 — the safety floor.** `unspendable` on `build_plan`, pure
-   `dust_suspects()`, heuristic on by default with `--allow-dust`. No
-   config, no network. The smallest change that stops "wallet burns your
-   inscription" by default.
-3. **Phase 2 — the URL.** `[indexers]` config, `--indexer`/
-   `--no-indexer`, the native contract, fail-closed enforcement.
-   Possibly `sats config get/set` (which also fixes hand-editing
-   Esplora URLs) and the first dialects.
+1. **Phase 0 — this document.** No code.
+2. **Phase 1 — the safety floor.** ✅ Shipped: `unspendable` on
+   `build_plan`, pure `dust_suspects()`, heuristic on by default with
+   `--allow-dust`.
+3. **Phase 2 — the URL.** ✅ Shipped as the provider model:
+   `[providers.*]` config with guard capabilities, `--no-guards`,
+   fail-closed enforcement, and the first dialect (subfrost/sandshrew
+   namespaced RPC for ord + alkanes).
 4. **Phase 3 — deferred, a sketch only.** Asset-aware operations:
    seeing what a UTXO carries, deliberately transferring an asset,
    asset budgets on grants. Protocol-correct transaction construction is
