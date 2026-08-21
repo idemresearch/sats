@@ -159,6 +159,10 @@ The runtime grows outward from the same core: a bare `sats` wallet shell,
 `sats-core.wasm` + `@sats/core` for browsers and apps, and hardware/passkey
 `Signer` backends. `sats-core` already compiles to `wasm32-unknown-unknown`;
 the phone-without-an-app plan and its priorities live in
-[docs/phone.md](docs/phone.md).
+[docs/phone.md](docs/phone.md). Metaprotocols (ordinals, runes, alkanes)
+are bring-your-own-indexer by design; the strategy lives in
+[docs/metaprotocols.md](docs/metaprotocols.md).
 
-**Not planned for V1:** Lightning, coin control, multi-wallet, RBF.
+**Not planned for V1:** Lightning, coin control, multi-wallet, RBF —
+and no metaprotocol features until the basic wallet is stable
+([why and what instead](docs/metaprotocols.md)).
