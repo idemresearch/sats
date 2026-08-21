@@ -316,6 +316,33 @@ fn psbt_sign_needs_an_explicit_source() {
 }
 
 #[test]
+fn status_starts_empty() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+
+    let out = sats(&dir).args(["status", "--json"]).assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("json output");
+    assert_eq!(json["pending"], serde_json::json!([]));
+    assert_eq!(json["broadcast"], serde_json::json!([]));
+
+    // --offline never touches the provider, even a broken one.
+    std::fs::write(mockdata.join("sync-error"), "chain offline").unwrap();
+    sats(&dir)
+        .args(["status", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no transactions"));
+
+    sats(&dir)
+        .args(["status", "deadbeef", "--offline"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no transaction deadbeef"));
+}
+
+#[test]
 fn tx_broadcast_needs_an_explicit_target() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);

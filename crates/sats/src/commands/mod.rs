@@ -7,4 +7,5 @@ pub mod psbt;
 pub mod receive;
 pub mod revoke;
 pub mod send;
+pub mod status;
 pub mod tx;

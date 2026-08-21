@@ -50,6 +50,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Send(args) => {
             commands::send::run(&store, network, &services(&config)?, &args, json)
         }
+        Command::Status { txid, offline } => commands::status::run(
+            &store,
+            network,
+            &services(&config)?,
+            txid.as_deref(),
+            offline,
+            json,
+        ),
         Command::Psbt { command } => match command {
             cli::PsbtCommand::Inspect { file } => commands::psbt::inspect(network, &file, json),
             cli::PsbtCommand::Sign { file, session, out } => commands::psbt::sign(

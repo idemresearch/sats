@@ -170,6 +170,33 @@ impl Store {
         }
     }
 
+    /// Every transaction record for a network, newest first. An unreadable
+    /// file is skipped with a warning rather than failing the listing.
+    pub fn list_transactions(&self, network: &str) -> Result<Vec<TransactionRecord>> {
+        let dir = self.transactions_dir(network);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut records = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            match read_transaction(&path, network) {
+                Ok(record) => records.push(record),
+                Err(_) => {
+                    eprintln!(
+                        "⚠ skipping unreadable transaction record {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(records)
+    }
+
     pub fn load_legacy_plan(&self, network: &str, id: &str) -> Result<LegacyPlan> {
         let path = self.legacy_plans_dir(network).join(format!("{id}.json"));
         if !path.exists() {
@@ -363,6 +390,43 @@ mod tests {
             source_id,
             &test_transaction(),
         )
+    }
+
+    fn record_with(value_sat: u64, created_at: u64) -> TransactionRecord {
+        let mut tx = test_transaction();
+        tx.output[0].value = Amount::from_sat(value_sat);
+        TransactionRecord::from_transaction(
+            "signet".into(),
+            "tb1ptest".into(),
+            value_sat,
+            100,
+            created_at,
+            0,
+            None,
+            &tx,
+        )
+    }
+
+    #[test]
+    fn listing_transactions_skips_unreadable_files() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        store
+            .save_transaction("signet", &record_with(1_000, 10))
+            .unwrap();
+        store
+            .save_transaction("signet", &record_with(2_000, 20))
+            .unwrap();
+        fs::write(
+            store.transactions_dir("signet").join("garbage.json"),
+            b"not json",
+        )
+        .unwrap();
+
+        let records = store.list_transactions("signet").unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].created_at, 20);
+        assert_eq!(records[1].created_at, 10);
     }
 
     #[test]

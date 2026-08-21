@@ -51,6 +51,15 @@ pub enum Command {
     Receive,
     /// Send bitcoin: prepare, confirm, sign, persist, broadcast
     Send(SendArgs),
+    /// Show pending and broadcast transactions, or one by txid
+    Status {
+        /// Transaction id, unique prefix, or session id
+        #[arg(value_name = "TXID")]
+        txid: Option<String>,
+        /// Skip chain sync; confirmation state may be stale
+        #[arg(long)]
+        offline: bool,
+    },
     /// Inspect and sign PSBT files (advanced, multi-signer workflows)
     Psbt {
         #[command(subcommand)]
