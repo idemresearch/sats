@@ -4,7 +4,7 @@
   --surface: #11110f;
   --foreground: #f1f0ea;
   --muted: #aaa9a1;
-  --subtle: #73736c;
+  --subtle: #82827a;
   --border: #292927;
   --border-strong: #3c3c38;
   --accent: #f7931a;
@@ -18,7 +18,6 @@
   --surface-secondary: #151513;
   --surface-code: rgba(255, 255, 255, 0.025);
   --output: #c8c7c0;
-  --placeholder: #5f5f58;
   --danger-soft: rgba(255, 129, 120, 0.1);
   --shadow: rgba(0, 0, 0, 0.32);
   --install-shadow: rgba(0, 0, 0, 0.18);
@@ -35,7 +34,7 @@
     --surface: #ffffff;
     --foreground: #151513;
     --muted: #696962;
-    --subtle: #92928a;
+    --subtle: #70706a;
     --border: #ddddd6;
     --border-strong: #c8c8c0;
     --accent-soft: #fff0dc;
@@ -48,7 +47,6 @@
     --surface-secondary: #fbfbf8;
     --surface-code: rgba(255, 255, 255, 0.62);
     --output: #454540;
-    --placeholder: #b3b3ac;
     --danger-soft: #fff1ef;
     --shadow: rgba(21, 21, 19, 0.08);
     --install-shadow: rgba(21, 21, 19, 0.035);
@@ -482,10 +480,6 @@ h2 {
   height: 6px;
   border-radius: 50%;
   background: var(--success);
-}
-
-.term-title-mark {
-  color: var(--accent);
 }
 
 .term-screen {
