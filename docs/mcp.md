@@ -195,11 +195,3 @@ MCP protocol frames use stdout. Human-readable startup information and
 diagnostics use stderr. Code running inside the MCP server must not print
 arbitrary messages to stdout.
 
-Wallet operations are blocking and run outside the async server thread. The
-only Tokio runtime in the native binary belongs to the optional MCP feature.
-
-Build a human-only binary without MCP dependencies with:
-
-```sh
-cargo install --locked --path crates/sats --no-default-features
-```
