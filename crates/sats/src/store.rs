@@ -31,6 +31,7 @@ pub fn unix_now() -> u64 {
 pub struct Store {
     config_dir: PathBuf,
     data_dir: PathBuf,
+    #[cfg(feature = "mcp")]
     override_dir: Option<PathBuf>,
 }
 
@@ -50,12 +51,14 @@ impl Store {
         Ok(Store {
             config_dir,
             data_dir,
+            #[cfg(feature = "mcp")]
             override_dir: dir_override.map(Path::to_path_buf),
         })
     }
 
     /// The `--dir`/`SATS_DIR` override this store was opened with, if any —
     /// lets long-running components reconstruct an identical store.
+    #[cfg(feature = "mcp")]
     pub fn dir_override(&self) -> Option<&Path> {
         self.override_dir.as_deref()
     }

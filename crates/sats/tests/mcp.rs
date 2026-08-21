@@ -1,6 +1,7 @@
 //! MCP server smoke test: raw JSON-RPC over the child process's stdio.
 //! Fully offline — exercises startup validation, tool listing, the grant
 //! snapshot, and a deterministic denial.
+#![cfg(feature = "mcp")]
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};

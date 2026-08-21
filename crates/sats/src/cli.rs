@@ -115,6 +115,7 @@ pub enum Command {
     /// List active grants
     Grants,
     /// Run an MCP server exposing wallet tools to an agent
+    #[cfg(feature = "mcp")]
     Mcp {
         /// Agent name the server acts as (must hold an active grant)
         #[arg(long, value_name = "NAME")]
