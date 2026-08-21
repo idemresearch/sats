@@ -2,18 +2,18 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow};
-use sats_core::bitcoin::{Address, Amount, FeeRate, Network, OutPoint};
+use sats_core::bitcoin::{Address, Amount, FeeRate, OutPoint};
 use sats_core::engine;
-use sats_core::plan::Plan;
+use sats_core::plan::PreparedSpend;
 
 use crate::provider::Services;
-use crate::store::{Store, unix_now};
+use crate::store::unix_now;
+use crate::ui;
 use crate::walletd::WalletCtx;
-use crate::{ui, walletd};
 
-/// One planning request. MCP sends always use the defaults for the safety
-/// escapes: agents get no bypass.
-pub struct PlanRequest<'a> {
+/// One preparation request. MCP sends always use the defaults for the
+/// safety escapes: agents get no bypass.
+pub struct PrepareRequest<'a> {
     pub address: &'a str,
     pub amount: u64,
     pub fee_rate: Option<u64>,
@@ -21,9 +21,9 @@ pub struct PlanRequest<'a> {
     pub no_guards: bool,
 }
 
-impl<'a> PlanRequest<'a> {
+impl<'a> PrepareRequest<'a> {
     pub fn for_agent(address: &'a str, amount: u64) -> Self {
-        PlanRequest {
+        PrepareRequest {
             address,
             amount,
             fee_rate: None,
@@ -33,45 +33,16 @@ impl<'a> PlanRequest<'a> {
     }
 }
 
-pub fn run(
-    store: &Store,
-    network: Network,
-    services: &Services,
-    req: &PlanRequest,
-    json: bool,
-) -> Result<()> {
-    let mut ctx = walletd::open(store, network)?;
-    let plan = build(&mut ctx, services, req)?;
-    ctx.persist()?;
-    store.save_plan(ctx.net_name, &plan)?;
-
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "id": plan.id,
-                "recipient": plan.recipient,
-                "amount_sat": plan.amount_sat,
-                "fee_sat": plan.fee_sat,
-                "total_sat": plan.total_sat(),
-                "excluded_utxos": plan.excluded_utxos,
-            })
-        );
-    } else {
-        print_block(&plan);
-        println!();
-        ui::ok(&format!("plan saved  {}", plan.id));
-        ui::dim("next: sats sign");
-    }
-    Ok(())
-}
-
-/// The shared planning pipeline for `plan`, `send`, and MCP sends:
+/// The shared preparation pipeline for human and MCP sends:
 /// validate → sync → protect → estimate → build. Ordered so that a request
 /// that can never succeed (bad address) fails before any network IO, and
 /// spending never plans on stale chain state — a failed sync is a hard
 /// error, as is a configured guard that cannot answer.
-pub fn build(ctx: &mut WalletCtx, services: &Services, req: &PlanRequest) -> Result<Plan> {
+pub fn build(
+    ctx: &mut WalletCtx,
+    services: &Services,
+    req: &PrepareRequest,
+) -> Result<PreparedSpend> {
     let addr = Address::from_str(req.address)
         .map_err(|e| anyhow!("invalid address: {e}"))?
         .require_network(ctx.network)
@@ -139,7 +110,7 @@ pub fn build(ctx: &mut WalletCtx, services: &Services, req: &PlanRequest) -> Res
     )?)
 }
 
-pub fn print_block(plan: &Plan) {
+pub fn print_block(plan: &PreparedSpend) {
     ui::sat_rows(&[
         ("Send", plan.amount_sat),
         ("Fee", plan.fee_sat),

@@ -3,8 +3,8 @@
 **A tiny Bitcoin wallet for humans and agents.**
 
 Run an on-chain wallet from your terminal, or give an AI agent a budget it
-cannot exceed. Keys stay local, transaction plans are PSBTs, and every agent
-spend is checked against human-set limits before signing.
+cannot exceed. Keys stay local, spends are prepared as in-memory PSBTs, and
+every agent spend is checked against human-set limits before signing.
 
 [Docs](docs/README.md) · [CLI](docs/cli.md) · [MCP](docs/mcp.md) ·
 [Architecture](docs/architecture.md) · [Security](docs/security.md)
@@ -46,20 +46,26 @@ sats init
 sats receive
 sats balance
 sats send tb1p... 25k
+sats status
+sats history
 ```
 
-`send` plans the transaction, shows its amount and fee, asks for confirmation,
-signs locally, and broadcasts. The same lifecycle can be run step by step:
+`send` prepares the transaction, shows its amount and fee, asks for
+confirmation, signs locally, saves the finalized transaction, and broadcasts.
+`send --dry-run` prices the same spend without persisting anything. The
+explicit PSBT lifecycle runs on file artifacts, step by step:
 
 ```sh
-sats plan tb1p... 25k
-sats sign
-sats broadcast
+sats send tb1p... 25k --export-psbt spend.psbt
+sats psbt inspect spend.psbt
+sats psbt sign spend.psbt
+sats tx broadcast <txid>
 ```
 
-Every step is resumable. A failed broadcast leaves a signed plan that can be
-retried, and `sats sign tx.psbt` signs an external PSBT file. Amounts are
-integer sats with shorthand: `25k` is 25,000 and `1.5m` is 1,500,000.
+After signing, sats keeps private raw transaction hex for broadcast retry; it
+does not retain the signed PSBT. `sats psbt sign tx.psbt` also signs external
+PSBTs from other wallets. Amounts are integer sats with shorthand: `25k` is
+25,000 and `1.5m` is 1,500,000.
 
 See the [CLI reference](docs/cli.md) for all commands, flags, configuration,
 and machine-readable output.
@@ -69,8 +75,8 @@ and machine-readable output.
 Create bounded spending authority, then launch the MCP server as that agent:
 
 ```sh
-sats grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
-claude mcp add sats -- sats mcp --agent claude
+sats agent grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
+claude mcp add sats -- sats agent serve claude
 ```
 
 The agent receives four tools: `get_balance`, `get_receive_address`,
@@ -86,9 +92,10 @@ authority the agent receives a deterministic refusal, not a signature.
 }
 ```
 
-`sats grants` shows current authority. `sats revoke claude` takes effect on
-the agent's next send call, including during an existing MCP session. See the
-[MCP guide](docs/mcp.md) for tool contracts and integration details.
+`sats agent list` shows current authority. `sats agent revoke claude` takes
+effect on the agent's next send call, including during an existing MCP
+session. See the [MCP guide](docs/mcp.md) for tool contracts and integration
+details.
 
 ## Safety model
 
@@ -96,6 +103,8 @@ the agent's next send call, including during an existing MCP session. See the
   database is watch-only and never contains private keys.
 - Agent authorization is deterministic. Budget is reserved and persisted
   before signing because a signed transaction is already spendable.
+- Finalized transactions are written privately before broadcast so a crash or
+  lost provider response cannot strand the only retry copy.
 - Planning excludes common inscription postage outputs by default and unions
   those exclusions with every configured asset guard.
 - A configured guard fails closed. Agents cannot use `--allow-dust` or
@@ -114,10 +123,11 @@ authorization, seed sealing, and the signer boundary, with no filesystem,
 network, clock, or async-runtime dependencies. `crates/sats` supplies native
 storage, providers, terminal output, the CLI, and the MCP server.
 
-PSBTs are the transaction contract at every stage. The watch-only wallet
-plans, a signer implementation signs, and a provider broadcasts. Agents use
-the same planning and safety path as humans, with the grant check added before
-signing.
+PSBTs are the preparation and signer contract. They stay in memory for normal
+sends and leave the wallet only as explicit `--export-psbt` file artifacts.
+Once fully signed, sats persists private raw transaction hex instead; a
+provider then broadcasts it. Agents use the same preparation and safety path
+as humans, with the grant check added before signing.
 
 See [Architecture](docs/architecture.md) for module ownership and end-to-end
 flows, or [AGENTS.md](AGENTS.md) for the implementation rules used by coding

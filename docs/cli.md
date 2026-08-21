@@ -12,6 +12,7 @@ sats receive
 # Fund the printed address from a signet faucet, then:
 sats balance
 sats send tb1p... 25k
+sats status
 ```
 
 Signet is the default. `init` prints the new mnemonic once; back it up before
@@ -19,19 +20,26 @@ continuing. Mainnet requires `--network mainnet` explicitly.
 
 ## Commands
 
+Everyday commands express intent; the `psbt`, `tx`, and `agent` namespaces
+hold the explicit advanced workflows.
+
 | Command | Behavior |
 |---|---|
 | `sats init [--words 12|24]` | Create the sealed seed and the watch-only wallet for the selected network |
 | `sats balance [--offline]` | Sync and show confirmed/trusted and pending balances; `--offline` uses cached state |
 | `sats receive` | Reveal and persist the next external receive address |
-| `sats plan <address> <amount>` | Sync, protect UTXOs, estimate the fee, build and save an unsigned PSBT plan |
-| `sats send <address> <amount>` | Plan, confirm, sign, broadcast, and save the final plan state |
-| `sats sign [FILE]` | Sign the newest unsigned plan or an external base64/binary PSBT |
-| `sats broadcast` | Broadcast the newest signed plan or a raw transaction file |
-| `sats grant <agent>` | Create bounded unattended signing authority |
-| `sats revoke <agent>` | Delete an agent grant immediately |
-| `sats grants` | List non-expired grants and remaining budgets |
-| `sats mcp --agent <name>` | Serve the four wallet tools for one granted agent over MCP stdio |
+| `sats send <address> <amount>` | Prepare, confirm, sign, privately persist raw finalized transaction hex, then broadcast |
+| `sats send ... --dry-run` | Prepare and price the send, persist nothing |
+| `sats send ... --export-psbt <FILE>` | Write the unsigned PSBT to a private file artifact instead of signing |
+| `sats status [TXID] [--offline]` | Show signed-but-unbroadcast and broadcast transactions with confirmation state |
+| `sats history [--offline]` | List the wallet's transactions, newest first |
+| `sats psbt inspect <FILE>` | Decode a PSBT file offline: outputs, fee, signing state |
+| `sats psbt sign <FILE> [--out FILE]` | Sign an explicit PSBT artifact |
+| `sats tx broadcast <FILE\|TXID>` | Broadcast a raw hex file, or a saved transaction by txid/prefix/id |
+| `sats agent grant <name>` | Create bounded unattended signing authority |
+| `sats agent revoke <name>` | Delete an agent grant immediately |
+| `sats agent list` | List non-expired grants and remaining budgets |
+| `sats agent serve <name>` | Serve the four wallet tools for one granted agent over MCP stdio |
 
 ## Global flags
 
@@ -58,71 +66,86 @@ Amounts are integer satoshis. Case-insensitive suffixes are accepted:
 Fractional shorthand must resolve to a whole satoshi. Plain values such as
 `25000` are interpreted directly as sats.
 
-## Planning and sending
+## Sending
 
 ```sh
-sats plan <address> <amount> [--fee-rate <SAT_VB>] \
-  [--allow-dust] [--no-guards]
-
 sats send <address> <amount> [--fee-rate <SAT_VB>] \
-  [--allow-dust] [--no-guards] [--yes]
+  [--allow-dust] [--no-guards] [--yes | --dry-run | --export-psbt <FILE>]
 ```
 
-The shared planning path:
+Every send — human or agent — runs the shared preparation path:
 
 1. validates the address against the selected network;
 2. syncs the watch-only wallet;
 3. excludes common inscription postage outputs unless `--allow-dust`;
 4. queries and unions configured guards unless `--no-guards`;
 5. estimates a roughly two-block fee unless `--fee-rate` is supplied;
-6. builds the unsigned PSBT.
+6. builds the unsigned PSBT in memory.
 
-Sync or configured-guard failure stops planning. Both bypass flags apply only
+Sync or configured-guard failure stops preparation. Both bypass flags apply only
 to the current human invocation and are intentionally absent from MCP sends.
 
-`send --yes` skips the confirmation prompt but does not bypass UTXO safety,
-provider validation, password unlocking, or any agent authorization rule.
+The three send modes:
 
-## PSBT workflow
+- **Default**: shows the priced spend, asks for confirmation, signs, privately
+  persists raw finalized transaction hex, then broadcasts. `--yes` skips the
+  confirmation prompt but does not bypass UTXO safety, provider validation,
+  password unlocking, or any agent authorization rule.
+- **`--dry-run`**: prints or returns the priced spend and persists nothing —
+  no PSBT, no transaction record, no wallet-state change, and no password
+  prompt.
+- **`--export-psbt <FILE>`**: writes the unsigned PSBT to `FILE` as an
+  owner-only artifact and signs nothing. The change address it reserves is
+  persisted so the artifact stays valid.
 
-The newest matching saved plan is used when no ID is supplied:
+If broadcast fails after signing, the transaction is already saved:
+`sats status` lists it and `sats tx broadcast <txid>` retries it.
 
-```sh
-sats plan tb1p... 25k
-sats sign
-sats broadcast
-```
-
-Select a specific saved plan:
-
-```sh
-sats sign --plan <id>
-sats broadcast --plan <id>
-```
-
-Sign an external PSBT:
+## Transaction visibility
 
 ```sh
-sats sign transaction.psbt
+sats status                # pending (signed, unbroadcast) + broadcast with confirmations
+sats status <txid>         # one transaction by txid, unique prefix, or session id
+sats history               # every wallet transaction, unconfirmed first
 ```
 
-The input may be base64 text or binary. Output is written beside it as
-`transaction.signed.psbt`. A PSBT that still needs other signers is reported
-as partially signed.
+Both commands sync first and tolerate sync failure with a stderr warning;
+`--offline` skips sync entirely. `status <txid>` falls back to the wallet's
+canonical chain view for transactions the store never saw, such as incoming
+payments.
 
-Broadcast a raw transaction hex file:
+## Explicit PSBT workflow
+
+Normal `send` never persists a PSBT. The staged lifecycle works on explicit
+file artifacts:
 
 ```sh
-sats broadcast --tx transaction.hex
+sats send tb1p... 25k --export-psbt spend.psbt
+sats psbt inspect spend.psbt
+sats psbt sign spend.psbt
+sats tx broadcast <txid>
 ```
 
-If broadcast of a saved plan fails after signing, the plan remains signed and
-can be retried with `sats broadcast`.
+`psbt sign FILE` accepts base64 text or binary. When the wallet's signature
+finalizes the transaction, sats privately saves raw finalized transaction hex
+(ready for `sats tx broadcast`); it does not retain the signed PSBT. A PSBT
+that still needs other signers is written back beside the input as
+`<name>.signed.psbt` and reported as partially signed. `--out <FILE>` always
+writes the signed PSBT to `FILE` and persists nothing — the pure artifact
+path for multi-signer flows.
+
+`psbt sign --session <id>` signs a stored PSBT session or pre-refactor plan
+from an older release. The id is always explicit: signing never consumes
+hidden internal state. New sats versions no longer write stored sessions.
+
+`tx broadcast` takes exactly one target: an existing file is read as raw
+transaction hex; anything else resolves a saved transaction by full txid,
+unique prefix, or the session id that produced it.
 
 ## Agent grants
 
 ```sh
-sats grant <agent> --budget <SATS> [--for <DURATION>] \
+sats agent grant <name> --budget <SATS> [--for <DURATION>] \
   [--max-tx <SATS>] [--max-fee <SATS>]
 ```
 
@@ -134,14 +157,15 @@ Budget is amount plus fee. `--max-tx` applies to recipient amount only and
 `--max-fee` applies to fee only. Grant creation requires the wallet password.
 
 ```sh
-sats grants
-sats revoke claude
+sats agent list
+sats agent revoke claude
 ```
 
 Expired grants are removed while listing. Revocation deletes the grant file;
 an active MCP server observes the deletion on its next send call.
 
-See [MCP and agent grants](mcp.md) for the tool-level contract.
+`sats agent serve <name>` runs the MCP server as that agent. See
+[MCP and agent grants](mcp.md) for the tool-level contract.
 
 ## JSON output
 
@@ -149,19 +173,22 @@ See [MCP and agent grants](mcp.md) for the tool-level contract.
 
 - `balance`;
 - `receive`;
-- `plan`;
-- `send`;
-- saved-plan `sign`;
-- `broadcast`;
-- `grant`;
-- `revoke`;
-- `grants`.
+- `send` (all three modes);
+- `status`;
+- `history`;
+- `psbt inspect`;
+- `psbt sign`;
+- `tx broadcast`;
+- `agent grant`;
+- `agent revoke`;
+- `agent list`.
 
 JSON field names are compatibility surfaces. Scripts should branch on
 documented status and reason fields rather than human-readable messages.
 
-`init` remains an interactive recovery-material flow. External-file signing
-writes a file and reports its path rather than returning a JSON document.
+`init` remains an interactive recovery-material flow and deliberately has no
+JSON mode: emitting the mnemonic on a machine-readable stream invites
+accidental capture.
 
 ## Configuration
 
@@ -189,7 +216,8 @@ precedence, authentication, and command-line overrides.
 
 ## Exit and failure behavior
 
-Command failures print a diagnostic to stderr and exit non-zero. Balance is
-the one intentionally tolerant chain-read command: when sync fails without
-`--offline`, it reports the cached balance with `synced: false`. Planning,
-signing, provider validation, and broadcast failures remain hard failures.
+Command failures print a diagnostic to stderr and exit non-zero. Balance,
+status, and history are the intentionally tolerant chain-read commands: when
+sync fails without `--offline`, they report cached state with a stderr
+warning (`synced: false` for balance). Planning, signing, provider
+validation, and broadcast failures remain hard failures.

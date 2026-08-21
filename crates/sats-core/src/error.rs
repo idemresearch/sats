@@ -56,4 +56,6 @@ pub enum PlanError {
     Psbt(String),
     #[error("cannot extract transaction: {0}")]
     Extract(String),
+    #[error("invalid transaction record: {0}")]
+    Transaction(String),
 }

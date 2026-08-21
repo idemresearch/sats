@@ -1,10 +1,12 @@
 pub mod balance;
-pub mod broadcast;
 pub mod grant;
 pub mod grants;
+pub mod history;
 pub mod init;
-pub mod plan;
+pub mod prepare;
+pub mod psbt;
 pub mod receive;
 pub mod revoke;
 pub mod send;
-pub mod sign;
+pub mod status;
+pub mod tx;

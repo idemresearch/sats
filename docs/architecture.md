@@ -1,8 +1,8 @@
 # Architecture
 
 sats is a native Bitcoin wallet with a portable core. The CLI and MCP server
-share wallet state and transaction planning, while agent sends add a bounded
-authorization step before signing.
+share wallet state and transaction preparation, while agent sends add a
+bounded authorization step before signing.
 
 ## System shape
 
@@ -30,8 +30,8 @@ own.
 | Module | Responsibility |
 |---|---|
 | `authz` | Grant model, spend request, deterministic allow/deny decision, reservation and refund |
-| `engine` | PSBT planning and conservative UTXO exclusion |
-| `plan` | Persisted plan metadata and unsigned/signed/broadcast lifecycle |
+| `engine` | In-memory PSBT preparation and conservative UTXO exclusion |
+| `plan` | Prepared spends, legacy PSBT sessions, finalized transaction records, and legacy-plan conversion |
 | `seed` | BIP-39 generation and parsing; BIP-86 public and private descriptors |
 | `seal` | Versioned Argon2id/XChaCha20-Poly1305 secret envelopes |
 | `signer` | Environment-neutral signer trait and local mnemonic signer |
@@ -47,7 +47,7 @@ adapters.
 | `main`, `cli` | Parse global flags and commands, resolve the selected network, dispatch workflows |
 | `commands` | Human CLI workflows and their text/JSON presentation |
 | `config` | TOML configuration and canonical network names |
-| `store` | XDG paths, atomic files, plans, grants, and secret permissions |
+| `store` | XDG paths, atomic files, PSBT sessions, finalized transactions, legacy plans, grants, and sensitive-file permissions |
 | `walletd` | SQLite-backed watch-only BDK wallet creation, loading, and persistence |
 | `provider` | Typed capabilities, driver resolution, chain access, and UTXO guards |
 | `keys`, `password` | Unlock the master seed or a grant-wrapped seed |
@@ -68,12 +68,15 @@ isolated runs.
 | Configuration | `config.toml` | Default network and typed providers |
 | Master seed | `seed.sealed` | Password-sealed mnemonic |
 | Wallet | `<network>/wallet.sqlite` | Public descriptors and BDK changes only |
-| Plans | `<network>/plans/<id>.json` | PSBT plus amount, fee, status, and metadata |
+| PSBT sessions | `<network>/psbts/<id>.json` | Read-only legacy state from older releases' staged workflow; new exports are PSBT file artifacts |
+| Finalized transactions | `<network>/transactions/<txid>.json` | Private raw transaction hex, pending/broadcast status, and payment metadata |
+| Legacy plans | `<network>/plans/<id>.json` | Pre-refactor state; read, permission-hardened, and converted on sign/broadcast |
 | Grants | `<network>/grants/<agent>.json` | Limits, accounting, and grant-wrapped seed |
 
-Wallet, plans, and grants are namespaced by Bitcoin network. The sealed master
-seed is shared so each network derives from the same mnemonic. Secret files
-are written atomically with restrictive permissions.
+Wallet state, sessions, transactions, legacy plans, and grants are namespaced
+by Bitcoin network. The sealed master seed is shared so each network derives
+from the same mnemonic. Sensitive files are written atomically with
+restrictive permissions.
 
 ## Human send
 
@@ -86,20 +89,23 @@ sequenceDiagram
     participant S as Store
     H->>C: sats send address amount
     C->>P: sync, guards, fee estimate
-    C->>E: build PSBT plan
+    C->>E: prepare PSBT
     C-->>H: amount, fee, confirmation
-    C->>E: sign locally
+    C->>E: sign and finalize locally
+    C->>S: save pending raw transaction
     C->>P: broadcast transaction
-    C->>S: save broadcast or signed plan
+    C->>S: mark transaction broadcast
 ```
 
-The shared planning pipeline validates the address before network I/O, syncs
+The shared preparation pipeline validates the address before network I/O, syncs
 the wallet, builds the union of dust and configured-guard exclusions,
 estimates the fee when none was supplied, and asks `sats-core` to build the
-PSBT. Planning fails rather than using stale state after a sync failure.
+PSBT. Preparation fails rather than using stale state after a sync failure.
 
-If broadcast fails after signing, the signed plan is saved for retry. It is
-not converted back to unsigned.
+The prepared PSBT stays in memory during a normal send. After finalization,
+sats writes private raw transaction hex before any broadcast attempt. A
+broadcast failure therefore leaves a pending transaction that can be retried
+without retaining the signed PSBT.
 
 ## Agent send
 
@@ -107,24 +113,24 @@ not converted back to unsigned.
 sequenceDiagram
     participant A as Agent
     participant M as MCP
-    participant P as Planner
+    participant P as Preparation
     participant Z as Authorization
     participant S as Store
     A->>M: send address, amount
     M->>S: reload active grant
     M->>Z: cheap amount precheck
-    M->>P: shared safe planning
+    M->>P: shared safe preparation
     M->>Z: authorize amount plus fee
     M->>S: reserve and persist budget
-    M->>M: sign, save, broadcast
+    M->>M: sign, save finalized tx, broadcast
     M-->>A: sent, denied, or error
 ```
 
 The amount-only precheck rejects an obviously impossible request before
-network access. Final authorization uses the planned fee. Budget is persisted
-before signing; it is refunded only if signing fails before a signature
-exists. Broadcast failure leaves both the signed plan and budget reservation
-intact.
+network access. Final authorization uses the prepared fee. Budget is
+persisted before signing; it is refunded only if signing fails before a
+signature exists. Broadcast failure leaves both the finalized transaction
+record and budget reservation intact.
 
 ## Provider model
 
@@ -145,7 +151,7 @@ Operations validate the selected network when they execute. See
 
 | Change | Primary owner | Required checks |
 |---|---|---|
-| Transaction selection or plan metadata | `sats-core::engine`, `sats-core::plan` | Core unit tests plus CLI/MCP integration paths |
+| Transaction selection, preparation, or finalized-record metadata | `sats-core::engine`, `sats-core::plan` | Core unit tests plus CLI/MCP integration paths |
 | Grant rule or accounting | `sats-core::authz` | Decision edge cases, persistence ordering, MCP denial tests |
 | Human command or flag | `cli`, `commands`, `main` dispatch | CLI integration test and `docs/cli.md` |
 | MCP tool or result schema | `mcp::server` | MCP integration test and `docs/mcp.md` |

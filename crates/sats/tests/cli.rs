@@ -1,43 +1,11 @@
 //! End-to-end CLI tests. Fully offline and deterministic: every test gets
 //! its own SATS_DIR and uses SATS_PASSWORD instead of a prompt.
 
-use assert_cmd::Command;
+mod common;
+
+use common::{init_wallet, sats, write_mock_provider};
 use predicates::prelude::*;
 use tempfile::TempDir;
-
-const PASSWORD: &str = "integration-test-pw";
-
-fn sats(dir: &TempDir) -> Command {
-    let mut cmd = Command::cargo_bin("sats").unwrap();
-    cmd.env("SATS_DIR", dir.path())
-        .env("SATS_PASSWORD", PASSWORD)
-        .env("NO_COLOR", "1");
-    cmd
-}
-
-fn init_wallet(dir: &TempDir) {
-    sats(dir)
-        .arg("init")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("wallet created"));
-}
-
-/// Point the config at the hermetic mock chain provider (no network).
-/// Returns the mock data directory controlling its behavior.
-fn write_mock_provider(dir: &TempDir) -> std::path::PathBuf {
-    let mockdata = dir.path().join("mockdata");
-    std::fs::create_dir_all(&mockdata).unwrap();
-    // The mock driver is also a guard, and guards fail closed on a missing
-    // answer — give it an empty one by default.
-    std::fs::write(mockdata.join("guard.json"), r#"{"protected": []}"#).unwrap();
-    let config = format!(
-        "network = \"signet\"\n\n[providers.mock]\ndriver = \"mock\"\nnetwork = \"signet\"\nurl = \"file://{}\"\n",
-        mockdata.display()
-    );
-    std::fs::write(dir.path().join("config.toml"), config).unwrap();
-    mockdata
-}
 
 #[test]
 fn init_receive_balance_flow() {
@@ -105,17 +73,18 @@ fn wrong_password_is_rejected() {
 }
 
 #[test]
-fn plan_with_no_funds_fails_cleanly() {
+fn dry_run_with_no_funds_fails_cleanly() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     write_mock_provider(&dir);
     sats(&dir)
         .args([
-            "plan",
+            "send",
             "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
             "25000",
             "--fee-rate",
             "2",
+            "--dry-run",
         ])
         .assert()
         .failure()
@@ -123,17 +92,18 @@ fn plan_with_no_funds_fails_cleanly() {
 }
 
 #[test]
-fn plan_rejects_wrong_network_address() {
+fn send_rejects_wrong_network_address() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     // No provider config needed: address validation runs before any IO.
     sats(&dir)
         .args([
-            "plan",
+            "send",
             "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
             "1000",
             "--fee-rate",
             "2",
+            "--dry-run",
         ])
         .assert()
         .failure()
@@ -141,18 +111,19 @@ fn plan_rejects_wrong_network_address() {
 }
 
 #[test]
-fn plan_refuses_stale_state_when_sync_fails() {
+fn send_refuses_stale_state_when_sync_fails() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     let mockdata = write_mock_provider(&dir);
     std::fs::write(mockdata.join("sync-error"), "indexer down").unwrap();
     sats(&dir)
         .args([
-            "plan",
+            "send",
             "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
             "25000",
             "--fee-rate",
             "2",
+            "--dry-run",
         ])
         .assert()
         .failure()
@@ -168,11 +139,12 @@ fn guard_failure_stops_planning() {
     std::fs::remove_file(mockdata.join("guard.json")).unwrap();
     sats(&dir)
         .args([
-            "plan",
+            "send",
             "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
             "25000",
             "--fee-rate",
             "2",
+            "--dry-run",
         ])
         .assert()
         .failure()
@@ -191,16 +163,37 @@ fn no_guards_flag_skips_the_asset_check() {
     // fails for the ordinary reason: an empty wallet.
     sats(&dir)
         .args([
-            "plan",
+            "send",
             "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
             "25000",
             "--fee-rate",
             "2",
+            "--dry-run",
             "--no-guards",
         ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("Insufficient funds"));
+}
+
+#[test]
+fn dry_run_conflicts_with_yes_and_export() {
+    let dir = TempDir::new().unwrap();
+    sats(&dir)
+        .args(["send", "tb1qexample", "1000", "--dry-run", "--yes"])
+        .assert()
+        .code(2);
+    sats(&dir)
+        .args([
+            "send",
+            "tb1qexample",
+            "1000",
+            "--dry-run",
+            "--export-psbt",
+            "x.psbt",
+        ])
+        .assert()
+        .code(2);
 }
 
 #[test]
@@ -269,21 +262,95 @@ fn balance_tolerates_sync_failure_and_reports_it() {
 }
 
 #[test]
-fn sign_and_broadcast_without_plans_point_to_next_step() {
+fn psbt_sign_needs_an_explicit_source() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
+    // No hidden "newest session" default: FILE or --session is required.
+    sats(&dir).args(["psbt", "sign"]).assert().code(2);
     sats(&dir)
-        .arg("sign")
+        .args(["psbt", "sign", "--session", "nope"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "no unsigned plans — run: sats plan",
-        ));
+        .stderr(predicate::str::contains("no PSBT session nope"));
     sats(&dir)
-        .arg("broadcast")
+        .args([
+            "psbt",
+            "inspect",
+            dir.path().join("config.toml").to_str().unwrap(),
+        ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no signed plans — run: sats sign"));
+        .stderr(predicate::str::contains("not a valid PSBT"));
+}
+
+#[test]
+fn status_starts_empty() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+
+    let out = sats(&dir).args(["status", "--json"]).assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("json output");
+    assert_eq!(json["pending"], serde_json::json!([]));
+    assert_eq!(json["broadcast"], serde_json::json!([]));
+
+    // --offline never touches the provider, even a broken one.
+    std::fs::write(mockdata.join("sync-error"), "chain offline").unwrap();
+    sats(&dir)
+        .args(["status", "--offline"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no transactions"));
+
+    sats(&dir)
+        .args(["status", "deadbeef", "--offline"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no transaction deadbeef"));
+}
+
+#[test]
+fn history_starts_empty() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    write_mock_provider(&dir);
+    let out = sats(&dir)
+        .args(["history", "--offline", "--json"])
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("json output");
+    assert_eq!(json, serde_json::json!([]));
+}
+
+#[test]
+fn tx_broadcast_needs_an_explicit_target() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    // No hidden "newest pending" default: the target is required.
+    sats(&dir).args(["tx", "broadcast"]).assert().code(2);
+    sats(&dir)
+        .args(["tx", "broadcast", "deadbeef"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no transaction deadbeef"));
+}
+
+#[test]
+fn old_command_names_are_gone() {
+    let dir = TempDir::new().unwrap();
+    for args in [
+        vec!["plan", "tb1qexample", "1000"],
+        vec!["sign"],
+        vec!["broadcast"],
+        vec!["grant", "claude", "--budget", "1000"],
+        vec!["grants"],
+        vec!["revoke", "claude"],
+        vec!["mcp", "--agent", "claude"],
+    ] {
+        sats(&dir).args(&args).assert().code(2);
+    }
 }
 
 #[test]
@@ -294,6 +361,7 @@ fn grant_list_revoke_lifecycle() {
     // Amount shorthand works on every sat-valued flag.
     sats(&dir)
         .args([
+            "agent",
             "grant",
             "claude",
             "--budget",
@@ -317,7 +385,10 @@ fn grant_list_revoke_lifecycle() {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    let out = sats(&dir).args(["grants", "--json"]).assert().success();
+    let out = sats(&dir)
+        .args(["agent", "list", "--json"])
+        .assert()
+        .success();
     let json: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
     assert_eq!(json[0]["agent"], "claude");
     assert_eq!(json[0]["budget_sat"], 50000);
@@ -328,7 +399,7 @@ fn grant_list_revoke_lifecycle() {
     assert!(json[0].get("wrapped_seed").is_none());
 
     sats(&dir)
-        .args(["revoke", "claude"])
+        .args(["agent", "revoke", "claude"])
         .assert()
         .success()
         .stdout(predicate::str::contains("revoked  claude"));
@@ -338,7 +409,7 @@ fn grant_list_revoke_lifecycle() {
     );
 
     sats(&dir)
-        .args(["revoke", "claude"])
+        .args(["agent", "revoke", "claude"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("no grant"));
@@ -349,7 +420,7 @@ fn grant_requires_correct_password() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
-        .args(["grant", "claude", "--budget", "1000"])
+        .args(["agent", "grant", "claude", "--budget", "1000"])
         .env("SATS_PASSWORD", "not-the-password")
         .assert()
         .failure()
@@ -361,29 +432,39 @@ fn grant_rejects_bad_inputs() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
-        .args(["grant", "Bad Name!", "--budget", "1000"])
+        .args(["agent", "grant", "Bad Name!", "--budget", "1000"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("agent name"));
     sats(&dir)
-        .args(["grant", "claude", "--budget", "0"])
+        .args(["agent", "grant", "claude", "--budget", "0"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("budget"));
     sats(&dir)
-        .args(["grant", "claude", "--budget", "1000", "--for", "soon"])
+        .args([
+            "agent", "grant", "claude", "--budget", "1000", "--for", "soon",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("invalid --for"));
     // Shorthand must land on whole sats.
     sats(&dir)
-        .args(["grant", "claude", "--budget", "1.2345k"])
+        .args(["agent", "grant", "claude", "--budget", "1.2345k"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("whole number"));
     // --expires still works as an alias for --for.
     sats(&dir)
-        .args(["grant", "claude", "--budget", "1000", "--expires", "2h"])
+        .args([
+            "agent",
+            "grant",
+            "claude",
+            "--budget",
+            "1000",
+            "--expires",
+            "2h",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("granted  claude"));

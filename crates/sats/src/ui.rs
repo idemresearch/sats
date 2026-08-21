@@ -112,7 +112,7 @@ impl StatusLine {
 pub fn confirm(prompt: &str, default_yes: bool) -> anyhow::Result<bool> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!(
-            "cannot confirm: stdin is not a terminal (use --yes, or grant an agent a budget)"
+            "cannot confirm: stdin is not a terminal (use --yes, or give an agent a budget: sats agent grant)"
         );
     }
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };

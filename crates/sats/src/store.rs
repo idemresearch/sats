@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use sats_core::authz::Grant;
-use sats_core::plan::{Plan, PlanStatus};
+use sats_core::plan::{LegacyPlan, PsbtSession, TransactionRecord};
 use sats_core::seal::SealedBlob;
 
 /// AAD binding the master seed blob to its purpose.
@@ -75,8 +75,17 @@ impl Store {
         self.data_dir.join(network).join("wallet.sqlite")
     }
 
-    pub fn plans_dir(&self, network: &str) -> PathBuf {
+    /// Pre-refactor plan storage, retained for backward-reading only.
+    pub fn legacy_plans_dir(&self, network: &str) -> PathBuf {
         self.data_dir.join(network).join("plans")
+    }
+
+    pub fn psbt_sessions_dir(&self, network: &str) -> PathBuf {
+        self.data_dir.join(network).join("psbts")
+    }
+
+    pub fn transactions_dir(&self, network: &str) -> PathBuf {
+        self.data_dir.join(network).join("transactions")
     }
 
     pub fn grants_dir(&self, network: &str) -> PathBuf {
@@ -87,45 +96,131 @@ impl Store {
         self.seed_path().exists()
     }
 
-    pub fn save_plan(&self, network: &str, plan: &Plan) -> Result<()> {
-        let path = self.plans_dir(network).join(format!("{}.json", plan.id));
-        write_atomic(&path, &serde_json::to_vec_pretty(plan)?, false)
-    }
-
-    pub fn load_plan(&self, network: &str, id: &str) -> Result<Plan> {
-        let path = self.plans_dir(network).join(format!("{id}.json"));
+    /// Read-only legacy state: new code never writes PSBT sessions —
+    /// `sats send --export-psbt` produces file artifacts instead.
+    pub fn load_psbt_session(&self, network: &str, id: &str) -> Result<PsbtSession> {
+        let path = self.psbt_sessions_dir(network).join(format!("{id}.json"));
         if !path.exists() {
-            bail!("no plan {id}");
+            bail!("no PSBT session {id}");
         }
         let bytes = fs::read(&path)?;
-        serde_json::from_slice(&bytes).with_context(|| format!("corrupt plan {}", path.display()))
+        let session: PsbtSession = serde_json::from_slice(&bytes)
+            .with_context(|| format!("corrupt PSBT session {}", path.display()))?;
+        if session.network != network {
+            bail!(
+                "PSBT session network {} does not match {network}",
+                session.network
+            );
+        }
+        session.clone().into_prepared()?;
+        Ok(session)
     }
 
-    /// The newest plan in the given status, if any.
-    pub fn latest_plan(&self, network: &str, status: PlanStatus) -> Result<Option<Plan>> {
-        let dir = self.plans_dir(network);
-        if !dir.exists() {
-            return Ok(None);
+    pub fn delete_psbt_session(&self, network: &str, id: &str) -> Result<()> {
+        let path = self.psbt_sessions_dir(network).join(format!("{id}.json"));
+        if path.exists() {
+            fs::remove_file(&path)?;
         }
-        let mut newest: Option<Plan> = None;
+        Ok(())
+    }
+
+    pub fn save_transaction(&self, network: &str, record: &TransactionRecord) -> Result<()> {
+        if record.network != network {
+            bail!(
+                "transaction network {} does not match {network}",
+                record.network
+            );
+        }
+        record.tx()?;
+        let path = self
+            .transactions_dir(network)
+            .join(format!("{}.json", record.txid));
+        write_atomic(&path, &serde_json::to_vec_pretty(record)?, true)
+    }
+
+    /// Resolve a transaction by full/prefix txid or by the explicit PSBT
+    /// session id that produced it.
+    pub fn load_transaction(&self, network: &str, id: &str) -> Result<TransactionRecord> {
+        let dir = self.transactions_dir(network);
+        let exact = dir.join(format!("{id}.json"));
+        if exact.exists() {
+            return read_transaction(&exact, network);
+        }
+        if !dir.exists() {
+            bail!("no transaction {id}");
+        }
+
+        let mut matches = Vec::new();
         for entry in fs::read_dir(&dir)? {
             let path = entry?.path();
             if path.extension().is_none_or(|e| e != "json") {
                 continue;
             }
-            let Ok(bytes) = fs::read(&path) else { continue };
-            let Ok(plan) = serde_json::from_slice::<Plan>(&bytes) else {
+            let Ok(record) = read_transaction(&path, network) else {
                 continue;
             };
-            if plan.status == status
-                && newest
-                    .as_ref()
-                    .is_none_or(|n| plan.created_at > n.created_at)
-            {
-                newest = Some(plan);
+            if record.txid.starts_with(id) || record.source_id.as_deref() == Some(id) {
+                matches.push(record);
             }
         }
-        Ok(newest)
+        match matches.len() {
+            0 => bail!("no transaction {id}"),
+            1 => Ok(matches.remove(0)),
+            _ => bail!("transaction id {id} is ambiguous"),
+        }
+    }
+
+    /// Every transaction record for a network, newest first. An unreadable
+    /// file is skipped with a warning rather than failing the listing.
+    pub fn list_transactions(&self, network: &str) -> Result<Vec<TransactionRecord>> {
+        let dir = self.transactions_dir(network);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut records = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            match read_transaction(&path, network) {
+                Ok(record) => records.push(record),
+                Err(_) => {
+                    eprintln!(
+                        "⚠ skipping unreadable transaction record {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        records.sort_by_key(|record| std::cmp::Reverse(record.created_at));
+        Ok(records)
+    }
+
+    pub fn load_legacy_plan(&self, network: &str, id: &str) -> Result<LegacyPlan> {
+        let path = self.legacy_plans_dir(network).join(format!("{id}.json"));
+        if !path.exists() {
+            bail!("no legacy plan {id}");
+        }
+        harden_path(&path)?;
+        let bytes = fs::read(&path)?;
+        let plan: LegacyPlan = serde_json::from_slice(&bytes)
+            .with_context(|| format!("corrupt legacy plan {}", path.display()))?;
+        if plan.network != network {
+            bail!(
+                "legacy plan network {} does not match {network}",
+                plan.network
+            );
+        }
+        Ok(plan)
+    }
+
+    pub fn delete_legacy_plan(&self, network: &str, id: &str) -> Result<()> {
+        let path = self.legacy_plans_dir(network).join(format!("{id}.json"));
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        Ok(())
     }
 
     pub fn save_grant(&self, network: &str, grant: &Grant) -> Result<()> {
@@ -199,6 +294,32 @@ impl Store {
     }
 }
 
+fn read_transaction(path: &Path, network: &str) -> Result<TransactionRecord> {
+    let bytes = fs::read(path)?;
+    let record: TransactionRecord = serde_json::from_slice(&bytes)
+        .with_context(|| format!("corrupt transaction {}", path.display()))?;
+    if record.network != network {
+        bail!(
+            "transaction network {} does not match {network}",
+            record.network
+        );
+    }
+    record.tx()?;
+    Ok(record)
+}
+
+#[cfg(unix)]
+fn harden_path(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn harden_path(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 /// Write via tmp file + fsync + rename so a crash never leaves a torn file.
 /// `secret` restricts the file to owner read/write before any bytes land.
 pub fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
@@ -228,4 +349,175 @@ fn set_secret_perms(file: &fs::File, secret: bool) -> Result<()> {
 #[cfg(not(unix))]
 fn set_secret_perms(_file: &fs::File, _secret: bool) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use sats_core::bitcoin::{
+        Amount, OutPoint, Psbt, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+        absolute::LockTime, transaction::Version,
+    };
+    use sats_core::plan::{PreparedSpend, TransactionRecord};
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn test_transaction() -> Transaction {
+        Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        }
+    }
+
+    fn record(source_id: Option<String>) -> TransactionRecord {
+        TransactionRecord::from_transaction(
+            "signet".into(),
+            "tb1ptest".into(),
+            1_000,
+            100,
+            42,
+            0,
+            source_id,
+            &test_transaction(),
+        )
+    }
+
+    fn record_with(value_sat: u64, created_at: u64) -> TransactionRecord {
+        let mut tx = test_transaction();
+        tx.output[0].value = Amount::from_sat(value_sat);
+        TransactionRecord::from_transaction(
+            "signet".into(),
+            "tb1ptest".into(),
+            value_sat,
+            100,
+            created_at,
+            0,
+            None,
+            &tx,
+        )
+    }
+
+    #[test]
+    fn listing_transactions_skips_unreadable_files() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        store
+            .save_transaction("signet", &record_with(1_000, 10))
+            .unwrap();
+        store
+            .save_transaction("signet", &record_with(2_000, 20))
+            .unwrap();
+        fs::write(
+            store.transactions_dir("signet").join("garbage.json"),
+            b"not json",
+        )
+        .unwrap();
+
+        let records = store.list_transactions("signet").unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].created_at, 20);
+        assert_eq!(records[1].created_at, 10);
+    }
+
+    #[test]
+    fn finalized_transactions_are_private_and_resolvable() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let record = record(Some("session-id".into()));
+
+        store.save_transaction("signet", &record).unwrap();
+        let path = store
+            .transactions_dir("signet")
+            .join(format!("{}.json", record.txid));
+        let json = fs::read_to_string(&path).unwrap();
+        assert!(json.contains("tx_hex"));
+        assert!(!json.contains("psbt"));
+        assert_eq!(
+            store.load_transaction("signet", "session-id").unwrap().txid,
+            record.txid
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_psbt_sessions_are_private_and_legacy_plans_still_load() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let tx = test_transaction();
+        let psbt = Psbt::from_unsigned_tx(tx).unwrap();
+        let prepared =
+            PreparedSpend::new("signet".into(), "tb1ptest".into(), 1_000, 100, 42, 0, psbt);
+        let session = prepared.session();
+
+        // Sessions are read-only legacy state: fabricate one on disk the
+        // way an older release would have written it.
+        let session_path = store
+            .psbt_sessions_dir("signet")
+            .join(format!("{}.json", session.id));
+        write_atomic(
+            &session_path,
+            &serde_json::to_vec_pretty(&session).unwrap(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            store.load_psbt_session("signet", &session.id).unwrap().id,
+            session.id
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&session_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let legacy_path = store.legacy_plans_dir("signet").join("legacy.json");
+        let legacy = serde_json::json!({
+            "id": "legacy",
+            "network": "signet",
+            "recipient": "tb1ptest",
+            "amount_sat": 1000,
+            "fee_sat": 100,
+            "created_at": 42,
+            "status": "unsigned",
+            "psbt": session.psbt,
+            "excluded_utxos": 0,
+        });
+        write_atomic(&legacy_path, &serde_json::to_vec(&legacy).unwrap(), false).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&legacy_path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let loaded = store.load_legacy_plan("signet", "legacy").unwrap();
+        assert_eq!(loaded.id, "legacy");
+        assert_eq!(loaded.into_prepared().unwrap().id, session.id);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(legacy_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
 }

@@ -7,6 +7,7 @@ mod keys;
 mod mcp;
 mod password;
 mod provider;
+mod spend;
 mod store;
 mod ui;
 mod walletd;
@@ -46,69 +47,54 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             commands::balance::run(&store, network, &services(&config)?, offline, json)
         }
         Command::Receive => commands::receive::run(&store, network, json),
-        Command::Plan {
-            address,
-            amount,
-            fee_rate,
-            allow_dust,
-            no_guards,
-        } => commands::plan::run(
-            &store,
-            network,
-            &services(&config)?,
-            &commands::plan::PlanRequest {
-                address: &address,
-                amount,
-                fee_rate,
-                allow_dust,
-                no_guards,
-            },
-            json,
-        ),
-        Command::Send {
-            address,
-            amount,
-            fee_rate,
-            allow_dust,
-            no_guards,
-            yes,
-        } => commands::send::run(
-            &store,
-            network,
-            &services(&config)?,
-            &commands::plan::PlanRequest {
-                address: &address,
-                amount,
-                fee_rate,
-                allow_dust,
-                no_guards,
-            },
-            yes,
-            json,
-        ),
-        Command::Sign { psbt, plan } => {
-            commands::sign::run(&store, network, plan, psbt.as_deref(), json)
+        Command::Send(args) => {
+            commands::send::run(&store, network, &services(&config)?, &args, json)
         }
-        Command::Broadcast { plan, tx } => commands::broadcast::run(
+        Command::History { offline } => {
+            commands::history::run(&store, network, &services(&config)?, offline, json)
+        }
+        Command::Status { txid, offline } => commands::status::run(
             &store,
             network,
             &services(&config)?,
-            plan,
-            tx.as_deref(),
+            txid.as_deref(),
+            offline,
             json,
         ),
-        Command::Grant {
-            agent,
-            budget,
-            duration,
-            max_tx,
-            max_fee,
-        } => commands::grant::run(
-            &store, network, &agent, budget, &duration, max_tx, max_fee, json,
-        ),
-        Command::Revoke { agent } => commands::revoke::run(&store, network, &agent, json),
-        Command::Grants => commands::grants::run(&store, network, json),
-        #[cfg(feature = "mcp")]
-        Command::Mcp { agent } => mcp::run(&store, &config, network, &agent, overrides.clone()),
+        Command::Psbt { command } => match command {
+            cli::PsbtCommand::Inspect { file } => commands::psbt::inspect(network, &file, json),
+            cli::PsbtCommand::Sign { file, session, out } => commands::psbt::sign(
+                &store,
+                network,
+                file.as_deref(),
+                session.as_deref(),
+                out.as_deref(),
+                json,
+            ),
+        },
+        Command::Tx { command } => match command {
+            cli::TxCommand::Broadcast { target } => {
+                commands::tx::broadcast(&store, network, &services(&config)?, &target, json)
+            }
+        },
+        Command::Agent { command } => match command {
+            cli::AgentCommand::Grant {
+                name,
+                budget,
+                duration,
+                max_tx,
+                max_fee,
+            } => commands::grant::run(
+                &store, network, &name, budget, &duration, max_tx, max_fee, json,
+            ),
+            cli::AgentCommand::Revoke { name } => {
+                commands::revoke::run(&store, network, &name, json)
+            }
+            cli::AgentCommand::List => commands::grants::run(&store, network, json),
+            #[cfg(feature = "mcp")]
+            cli::AgentCommand::Serve { name } => {
+                mcp::run(&store, &config, network, &name, overrides.clone())
+            }
+        },
     }
 }

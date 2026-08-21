@@ -1,57 +1,102 @@
 use anyhow::{Result, bail};
 use sats_core::bitcoin::Network;
-use sats_core::plan::PlanStatus;
-use sats_core::signer::{LocalSigner, Signer};
 
-use crate::commands::plan;
+use crate::cli::SendArgs;
+use crate::commands::prepare;
 use crate::provider::Services;
-use crate::store::Store;
-use crate::{keys, ui, walletd};
+use crate::store::{Store, write_atomic};
+use crate::{keys, spend, ui, walletd};
 
 pub fn run(
     store: &Store,
     network: Network,
     services: &Services,
-    req: &plan::PlanRequest,
-    yes: bool,
+    args: &SendArgs,
     json: bool,
 ) -> Result<()> {
     let mut ctx = walletd::open(store, network)?;
-    let mut plan = plan::build(&mut ctx, services, req)?;
+    let req = prepare::PrepareRequest {
+        address: &args.address,
+        amount: args.amount,
+        fee_rate: args.fee_rate,
+        allow_dust: args.allow_dust,
+        no_guards: args.no_guards,
+    };
+    let prepared = prepare::build(&mut ctx, services, &req)?;
+
+    if args.dry_run {
+        // Nothing is persisted — not even the wallet's revealed change
+        // index, so a preview never burns durable state.
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "recipient": prepared.recipient,
+                    "amount_sat": prepared.amount_sat,
+                    "fee_sat": prepared.fee_sat,
+                    "total_sat": prepared.total_sat(),
+                    "excluded_utxos": prepared.excluded_utxos,
+                    "dry_run": true,
+                })
+            );
+        } else {
+            prepare::print_block(&prepared);
+            ui::dim("dry run — nothing signed or saved");
+        }
+        return Ok(());
+    }
     ctx.persist()?;
 
-    if !json {
-        plan::print_block(&plan);
+    if let Some(file) = &args.export_psbt {
+        // The PSBT names the wallet's UTXOs and change: owner-only perms.
+        write_atomic(file, prepared.psbt().to_string().as_bytes(), true)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "recipient": prepared.recipient,
+                    "amount_sat": prepared.amount_sat,
+                    "fee_sat": prepared.fee_sat,
+                    "total_sat": prepared.total_sat(),
+                    "excluded_utxos": prepared.excluded_utxos,
+                    "psbt_file": file.display().to_string(),
+                })
+            );
+        } else {
+            prepare::print_block(&prepared);
+            println!();
+            ui::ok(&format!("unsigned PSBT written  {}", file.display()));
+            ui::dim(&format!("next: sats psbt sign {}", file.display()));
+        }
+        return Ok(());
     }
-    if !yes && !ui::confirm("Sign?", true)? {
+
+    if !json {
+        prepare::print_block(&prepared);
+    }
+    if !args.yes && !ui::confirm("Sign?", true)? {
         ui::dim("aborted");
         return Ok(());
     }
 
-    let mut psbt = plan.psbt()?;
-    let mut signer = LocalSigner::new(keys::unlock(store)?, network);
-    if !signer.sign(&mut psbt)? {
-        bail!("signer produced an unfinalized transaction");
-    }
-    plan.set_psbt(&psbt);
-    plan.status = PlanStatus::Signed;
+    let mut record = spend::sign_to_record(prepared, keys::unlock(store)?, network, None)?;
+    // Persist before any network call. A crash or lost provider response can
+    // never strand the only copy of a signed transaction.
+    store.save_transaction(ctx.net_name, &record)?;
     if !json {
         ui::ok("signed");
     }
 
-    let tx = plan.tx()?;
-    match services.broadcast(&mut ctx, &tx) {
+    match spend::broadcast_record(store, &mut ctx, services, &mut record) {
         Ok(txid) => {
-            plan.status = PlanStatus::Broadcast;
-            store.save_plan(ctx.net_name, &plan)?;
             if json {
                 println!(
                     "{}",
                     serde_json::json!({
                         "txid": txid.to_string(),
-                        "amount_sat": plan.amount_sat,
-                        "fee_sat": plan.fee_sat,
-                        "total_sat": plan.total_sat(),
+                        "amount_sat": record.amount_sat,
+                        "fee_sat": record.fee_sat,
+                        "total_sat": record.total_sat(),
                     })
                 );
             } else {
@@ -60,10 +105,10 @@ pub fn run(
             Ok(())
         }
         Err(err) => {
-            store.save_plan(ctx.net_name, &plan)?;
             bail!(
-                "{err:#} — plan {} saved as signed, retry: sats broadcast",
-                plan.id
+                "{err:#} — transaction {} saved, retry: sats tx broadcast {}",
+                record.txid,
+                record.txid
             );
         }
     }

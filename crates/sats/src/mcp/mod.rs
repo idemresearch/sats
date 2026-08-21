@@ -1,4 +1,4 @@
-//! `sats mcp` — serve wallet tools to an agent over MCP stdio.
+//! `sats agent serve` — serve wallet tools to an agent over MCP stdio.
 //!
 //! The only tokio in the binary lives here (rmcp requires a runtime);
 //! every human-facing command stays synchronous.
@@ -26,11 +26,11 @@ pub fn run(
 
     // Fail loudly at startup — `claude mcp add` time — not mid-conversation.
     let grant = store.load_grant(net_name, agent)?.with_context(|| {
-        format!("no grant for {agent:?} — run: sats grant {agent} --budget <sats>")
+        format!("no grant for {agent:?} — run: sats agent grant {agent} --budget <sats>")
     })?;
     if grant.is_expired(unix_now()) {
         store.delete_grant(net_name, agent)?;
-        bail!("grant for {agent:?} has expired — run: sats grant {agent} --budget <sats>");
+        bail!("grant for {agent:?} has expired — run: sats agent grant {agent} --budget <sats>");
     }
     // The wallet must exist, and the provider config must resolve.
     walletd::open(store, network)?;
@@ -38,7 +38,7 @@ pub fn run(
 
     // stdout is the MCP transport; all logging goes to stderr.
     eprintln!(
-        "sats mcp: agent {agent:?} on {net_name} — {} sat remaining, expires in {}",
+        "sats agent serve: agent {agent:?} on {net_name} — {} sat remaining, expires in {}",
         format_sats(grant.remaining_sat()),
         ui::human_duration(grant.expires_at.saturating_sub(unix_now())),
     );

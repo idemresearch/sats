@@ -53,7 +53,7 @@ run the full gate before reporting the work ready.
 
 | Layer | Location | Covers |
 |---|---|---|
-| Core unit tests | `crates/sats-core/src/` | Planning, authorization, sealing, seed derivation, signing, serialization |
+| Core unit tests | `crates/sats-core/src/` | Preparation, finalized records, authorization, sealing, seed derivation, signing, serialization |
 | Native unit tests | `crates/sats/src/` | Amounts, config, providers, storage, and helpers |
 | CLI integration | `crates/sats/tests/cli.rs` | Isolated wallet flows, failures, providers, guards, and grant lifecycle |
 | MCP integration | `crates/sats/tests/mcp.rs` | Tool schemas, granted sends, startup refusal, and live revocation |

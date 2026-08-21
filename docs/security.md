@@ -18,28 +18,31 @@ additional authenticated data binds the blob to its purpose. The SQLite
 wallet database contains public descriptors and chain state, not private key
 material.
 
-Secret files are written atomically with restrictive Unix permissions. This
-protects against partial writes and other OS users, but not against a process
-already running as the wallet's user.
+Sensitive files are written atomically with restrictive Unix permissions.
+This includes sealed keys, grants, explicit PSBT sessions, and finalized
+transaction records. The boundary protects against partial writes and other
+OS users, but not against a process already running as the wallet's user.
 
 ## Human signing
 
 For a human send, sats:
 
-1. validates and plans with the watch-only wallet;
+1. validates and prepares a PSBT with the watch-only wallet;
 2. displays amount, fee, and total;
 3. asks for confirmation unless explicitly bypassed;
 4. unlocks the sealed mnemonic with the supplied password;
 5. builds an ephemeral signing wallet and signs the PSBT;
-6. broadcasts and records the final plan status.
+6. extracts and privately saves raw finalized transaction hex;
+7. broadcasts it and records the final status.
 
-The private descriptor is never written to the wallet database. A failed
-broadcast leaves a signed PSBT saved locally because the transaction may
-still be broadcast by another path.
+The private descriptor is never written to the wallet database. Normal sends
+never persist the prepared or signed PSBT. The finalized transaction is saved
+before network broadcast, so a failure or lost response leaves an exact retry
+without retaining PSBT derivation metadata.
 
 ## Agent grants
 
-`sats grant <agent>` creates bounded unattended authority with:
+`sats agent grant <name>` creates bounded unattended authority with:
 
 - total budget, including transaction fees;
 - optional per-transaction amount cap;
@@ -73,15 +76,15 @@ order:
 4. remaining total budget.
 
 Budget drawdown is amount plus fee. The MCP server performs a cheap
-amount-only precheck, plans to learn the real fee, then makes the final
-decision.
+amount-only precheck, prepares the transaction to learn the real fee, then
+makes the final decision.
 
 After approval, sats reserves and persists the budget before signing. If
 signing fails and no signature exists, the reservation is refunded. Once a
 signature exists, the reservation remains even if saving or broadcast fails:
 the transaction is already spendable outside sats.
 
-The grant file is reloaded for every send. Deleting it with `sats revoke`
+The grant file is reloaded for every send. Deleting it with `sats agent revoke`
 therefore takes effect on the next send call, even in an existing MCP session.
 
 ## MCP boundary
@@ -103,10 +106,11 @@ stderr so logs cannot corrupt protocol frames.
 
 ## Chain providers and asset guards
 
-Planning requires fresh wallet state. A chain sync failure stops `plan`,
-`send`, and MCP sends rather than allowing coin selection from stale data.
-Balance is different by design: when sync fails it may return the cached value
-and reports that it was not synced.
+Transaction preparation requires fresh wallet state. A chain sync failure
+stops every send mode — including `--dry-run` and `--export-psbt` — and MCP
+sends rather than allowing coin selection from stale data. Balance, status,
+and history are different by design: when sync fails they may report cached
+state and say so.
 
 UTXO protection has two layers:
 
@@ -130,12 +134,22 @@ a redacted origin in errors and debug output. Esplora authentication is
 expected in the configured bearer header; its endpoint URL may be displayed
 in diagnostics. Do not embed Esplora credentials in URL paths or queries.
 
-## PSBT boundary
+## PSBT and finalized-transaction boundary
 
-Plans remain PSBTs from construction through signing. `sats sign FILE`
-accepts an external base64 or binary PSBT and writes a signed PSBT beside it.
-External PSBTs are untrusted input: inspect their destinations, amounts, fees,
-and inputs with an independent tool before signing.
+PSBTs are the preparation and signer contract. A normal human or agent send
+keeps the PSBT in memory. `sats send --export-psbt` is the explicit
+exception: it writes the unsigned PSBT to an owner-only file artifact the
+user names. Successful `sats psbt sign` converts an artifact — or a stored
+session from an older release, by explicit `--session` id — into a private
+raw finalized-transaction record. Stored sessions and pre-refactor plan
+files remain readable, permission-hardened, and are converted and deleted
+when used; new releases never write them.
+
+`sats psbt sign FILE` accepts an external base64 or binary PSBT; a PSBT that
+still needs other signers is written back as a signed artifact rather than
+entering sats-managed transaction state. External PSBTs are untrusted input:
+`sats psbt inspect` shows destinations, amounts, fee, and signing state, and
+an independent tool should confirm them before signing.
 
 The local signer may partially sign a PSBT that requires additional signers.
 That is reported as partial rather than treated as a broadcastable success.
@@ -150,7 +164,7 @@ That is reported as partial rather than treated as a broadcastable success.
 | Revoked agent session | Grant reloaded on every send | A transaction signed before revocation remains valid |
 | Provider outage | Planning and configured guards fail closed | Loss of availability |
 | Malicious asset guard | Restrictive-only result | Can hide funds; incomplete results can miss assets |
-| Broadcast failure | Signed plan saved; budget remains reserved | Manual retry or reconciliation is required |
+| Broadcast failure | Finalized raw transaction saved before the attempt; agent budget remains reserved | Manual retry or reconciliation is required |
 | Wrong Bitcoin network | Address and provider network validation | Misconfigured third-party responses remain possible |
 
 ## Operational guidance
@@ -160,7 +174,7 @@ That is reported as partial rather than treated as a broadcastable success.
 - Use a strong, unique wallet password.
 - Run sats only on a machine and user account you trust.
 - Keep grant budgets small, set fee caps, and prefer short expiries.
-- Review `sats grants` regularly and revoke unused grants.
+- Review `sats agent list` regularly and revoke unused grants.
 - Treat provider endpoints and their responses as part of your trust model.
 - Never paste a real mnemonic into issues, logs, screenshots, tests, or agent
   conversations.

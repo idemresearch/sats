@@ -43,3 +43,6 @@ zeroize = { workspace = true }
 tempfile = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+# test-utils lets integration tests seed the persisted wallet with
+# deterministic confirmed UTXOs; it never ships in the binary.
+bdk_wallet = { workspace = true, features = ["rusqlite", "test-utils"] }
