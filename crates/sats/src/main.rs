@@ -50,9 +50,17 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Send(args) => {
             commands::send::run(&store, network, &services(&config)?, &args, json)
         }
-        Command::Sign { psbt, plan } => {
-            commands::sign::run(&store, network, plan, psbt.as_deref(), json)
-        }
+        Command::Psbt { command } => match command {
+            cli::PsbtCommand::Inspect { file } => commands::psbt::inspect(network, &file, json),
+            cli::PsbtCommand::Sign { file, session, out } => commands::psbt::sign(
+                &store,
+                network,
+                file.as_deref(),
+                session.as_deref(),
+                out.as_deref(),
+                json,
+            ),
+        },
         Command::Broadcast {
             transaction,
             plan,

@@ -118,34 +118,6 @@ impl Store {
         Ok(session)
     }
 
-    pub fn latest_psbt_session(&self, network: &str) -> Result<Option<PsbtSession>> {
-        let dir = self.psbt_sessions_dir(network);
-        if !dir.exists() {
-            return Ok(None);
-        }
-        let mut newest: Option<PsbtSession> = None;
-        for entry in fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let Ok(bytes) = fs::read(&path) else { continue };
-            let Ok(session) = serde_json::from_slice::<PsbtSession>(&bytes) else {
-                continue;
-            };
-            if session.network != network {
-                continue;
-            }
-            if newest
-                .as_ref()
-                .is_none_or(|n| session.created_at > n.created_at)
-            {
-                newest = Some(session);
-            }
-        }
-        Ok(newest)
-    }
-
     pub fn delete_psbt_session(&self, network: &str, id: &str) -> Result<()> {
         let path = self.psbt_sessions_dir(network).join(format!("{id}.json"));
         if path.exists() {

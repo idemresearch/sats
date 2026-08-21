@@ -51,14 +51,10 @@ pub enum Command {
     Receive,
     /// Send bitcoin: prepare, confirm, sign, persist, broadcast
     Send(SendArgs),
-    /// Sign a saved PSBT session or an external PSBT file
-    Sign {
-        /// PSBT file to sign (base64 or binary); default: newest saved session
-        #[arg(value_name = "FILE")]
-        psbt: Option<PathBuf>,
-        /// Saved PSBT session id (also accepts a pre-refactor plan id)
-        #[arg(long, value_name = "ID", conflicts_with = "psbt")]
-        plan: Option<String>,
+    /// Inspect and sign PSBT files (advanced, multi-signer workflows)
+    Psbt {
+        #[command(subcommand)]
+        command: PsbtCommand,
     },
     /// Broadcast a pending finalized transaction or a raw transaction file
     Broadcast {
@@ -76,6 +72,28 @@ pub enum Command {
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PsbtCommand {
+    /// Decode a PSBT file: outputs, fee, and signing state
+    Inspect {
+        /// PSBT file (base64 text or binary)
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
+    /// Sign a PSBT file with the wallet seed
+    Sign {
+        /// PSBT file (base64 text or binary)
+        #[arg(value_name = "FILE", required_unless_present = "session")]
+        file: Option<PathBuf>,
+        /// Sign a stored PSBT session or pre-refactor plan by id instead
+        #[arg(long, value_name = "ID", conflicts_with = "file")]
+        session: Option<String>,
+        /// Write the signed PSBT here instead of staging a broadcast
+        #[arg(long, value_name = "FILE", conflicts_with = "session")]
+        out: Option<PathBuf>,
     },
 }
 

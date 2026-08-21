@@ -294,27 +294,31 @@ fn balance_tolerates_sync_failure_and_reports_it() {
 }
 
 #[test]
-fn sign_and_broadcast_without_sessions_point_to_next_step() {
+fn psbt_sign_needs_an_explicit_source() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
+    // No hidden "newest session" default: FILE or --session is required.
+    sats(&dir).args(["psbt", "sign"]).assert().code(2);
     sats(&dir)
-        .arg("sign")
+        .args(["psbt", "sign", "--session", "nope"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "no unsigned PSBT sessions — run: sats plan",
-        ));
+        .stderr(predicate::str::contains("no PSBT session nope"));
+    sats(&dir)
+        .args([
+            "psbt",
+            "inspect",
+            dir.path().join("config.toml").to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a valid PSBT"));
+
     sats(&dir)
         .arg("broadcast")
         .assert()
         .failure()
         .stderr(predicate::str::contains("no pending transactions"));
-
-    sats(&dir)
-        .args(["broadcast", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--transaction"));
 }
 
 #[test]
