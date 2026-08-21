@@ -52,6 +52,12 @@ pub enum Command {
         /// Fee rate in sat/vB (default: estimated for ~2 blocks)
         #[arg(long, value_name = "SAT_VB")]
         fee_rate: Option<u64>,
+        /// Spend UTXOs at inscription postage values (546/330 sats)
+        #[arg(long)]
+        allow_dust: bool,
+        /// Skip the configured metaprotocol guards, loudly
+        #[arg(long)]
+        no_guards: bool,
     },
     /// Send bitcoin: plan, confirm, sign, broadcast
     Send {
@@ -63,6 +69,12 @@ pub enum Command {
         /// Fee rate in sat/vB (default: estimated for ~2 blocks)
         #[arg(long, value_name = "SAT_VB")]
         fee_rate: Option<u64>,
+        /// Spend UTXOs at inscription postage values (546/330 sats)
+        #[arg(long)]
+        allow_dust: bool,
+        /// Skip the configured metaprotocol guards, loudly
+        #[arg(long)]
+        no_guards: bool,
         /// Skip the confirmation prompt
         #[arg(short, long)]
         yes: bool,

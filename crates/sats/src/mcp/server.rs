@@ -319,8 +319,10 @@ fn execute_send(
     let planned = (|| -> Result<_> {
         let services = provider::resolve(config, &[], network)?;
         let mut ctx = walletd::open(store, network)?;
-        // plan::build syncs internally and hard-fails on stale state.
-        let plan = plan::build(&mut ctx, &services, &params.address, params.amount_sat, None)?;
+        // plan::build syncs internally and hard-fails on stale state; the
+        // agent request form carries no safety bypasses.
+        let request = plan::PlanRequest::for_agent(&params.address, params.amount_sat);
+        let plan = plan::build(&mut ctx, &services, &request)?;
         ctx.persist()?;
         Ok((ctx, services, plan))
     })();

@@ -28,6 +28,9 @@ fn init_wallet(dir: &TempDir) {
 fn write_mock_provider(dir: &TempDir) -> std::path::PathBuf {
     let mockdata = dir.path().join("mockdata");
     std::fs::create_dir_all(&mockdata).unwrap();
+    // The mock driver is also a guard, and guards fail closed on a missing
+    // answer — give it an empty one by default.
+    std::fs::write(mockdata.join("guard.json"), r#"{"protected": []}"#).unwrap();
     let config = format!(
         "network = \"signet\"\n\n[providers.mock]\ndriver = \"mock\"\nnetwork = \"signet\"\nurl = \"file://{}\"\n",
         mockdata.display()
@@ -154,6 +157,50 @@ fn plan_refuses_stale_state_when_sync_fails() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("refusing to plan on stale state"));
+}
+
+#[test]
+fn guard_failure_stops_planning() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+    // A configured guard that cannot answer must stop planning.
+    std::fs::remove_file(mockdata.join("guard.json")).unwrap();
+    sats(&dir)
+        .args([
+            "plan",
+            "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
+            "25000",
+            "--fee-rate",
+            "2",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to plan without the asset check",
+        ));
+}
+
+#[test]
+fn no_guards_flag_skips_the_asset_check() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+    std::fs::remove_file(mockdata.join("guard.json")).unwrap();
+    // With the explicit escape the pipeline proceeds past the guard and
+    // fails for the ordinary reason: an empty wallet.
+    sats(&dir)
+        .args([
+            "plan",
+            "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
+            "25000",
+            "--fee-rate",
+            "2",
+            "--no-guards",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Insufficient funds"));
 }
 
 #[test]

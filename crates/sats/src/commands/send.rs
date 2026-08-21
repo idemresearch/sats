@@ -8,19 +8,16 @@ use crate::provider::Services;
 use crate::store::Store;
 use crate::{keys, ui, walletd};
 
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     store: &Store,
     network: Network,
     services: &Services,
-    address: &str,
-    amount: u64,
-    fee_rate: Option<u64>,
+    req: &plan::PlanRequest,
     yes: bool,
     json: bool,
 ) -> Result<()> {
     let mut ctx = walletd::open(store, network)?;
-    let mut plan = plan::build(&mut ctx, services, address, amount, fee_rate)?;
+    let mut plan = plan::build(&mut ctx, services, req)?;
     ctx.persist()?;
 
     if !json {
