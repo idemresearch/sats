@@ -411,7 +411,7 @@ fn execute_send(
         // Signed but not broadcast: budget stays reserved (the signed tx
         // is out of our hands), and a human can retry the saved transaction.
         Err(e) => SendResult::error(format!(
-            "broadcast failed after signing: {e:#} — budget reserved; a human can retry with: sats broadcast --transaction {txid}"
+            "broadcast failed after signing: {e:#} — budget reserved; a human can retry with: sats tx broadcast {txid}"
         )),
     }
 }

@@ -313,12 +313,35 @@ fn psbt_sign_needs_an_explicit_source() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("not a valid PSBT"));
+}
 
+#[test]
+fn tx_broadcast_needs_an_explicit_target() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    // No hidden "newest pending" default: the target is required.
+    sats(&dir).args(["tx", "broadcast"]).assert().code(2);
     sats(&dir)
-        .arg("broadcast")
+        .args(["tx", "broadcast", "deadbeef"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no pending transactions"));
+        .stderr(predicate::str::contains("no transaction deadbeef"));
+}
+
+#[test]
+fn old_command_names_are_gone() {
+    let dir = TempDir::new().unwrap();
+    for args in [
+        vec!["plan", "tb1qexample", "1000"],
+        vec!["sign"],
+        vec!["broadcast"],
+        vec!["grant", "claude", "--budget", "1000"],
+        vec!["grants"],
+        vec!["revoke", "claude"],
+        vec!["mcp", "--agent", "claude"],
+    ] {
+        sats(&dir).args(&args).assert().code(2);
+    }
 }
 
 #[test]

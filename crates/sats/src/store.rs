@@ -10,9 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use sats_core::authz::Grant;
-use sats_core::plan::{
-    LegacyPlan, LegacyPlanStatus, PsbtSession, TransactionRecord, TransactionStatus,
-};
+use sats_core::plan::{LegacyPlan, PsbtSession, TransactionRecord};
 use sats_core::seal::SealedBlob;
 
 /// AAD binding the master seed blob to its purpose.
@@ -172,35 +170,6 @@ impl Store {
         }
     }
 
-    pub fn latest_transaction(
-        &self,
-        network: &str,
-        status: TransactionStatus,
-    ) -> Result<Option<TransactionRecord>> {
-        let dir = self.transactions_dir(network);
-        if !dir.exists() {
-            return Ok(None);
-        }
-        let mut newest: Option<TransactionRecord> = None;
-        for entry in fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let Ok(record) = read_transaction(&path, network) else {
-                continue;
-            };
-            if record.status == status
-                && newest
-                    .as_ref()
-                    .is_none_or(|n| record.created_at > n.created_at)
-            {
-                newest = Some(record);
-            }
-        }
-        Ok(newest)
-    }
-
     pub fn load_legacy_plan(&self, network: &str, id: &str) -> Result<LegacyPlan> {
         let path = self.legacy_plans_dir(network).join(format!("{id}.json"));
         if !path.exists() {
@@ -217,40 +186,6 @@ impl Store {
             );
         }
         Ok(plan)
-    }
-
-    pub fn latest_legacy_plan(
-        &self,
-        network: &str,
-        status: LegacyPlanStatus,
-    ) -> Result<Option<LegacyPlan>> {
-        let dir = self.legacy_plans_dir(network);
-        if !dir.exists() {
-            return Ok(None);
-        }
-        let mut newest: Option<LegacyPlan> = None;
-        for entry in fs::read_dir(&dir)? {
-            let path = entry?.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let Ok(bytes) = fs::read(&path) else { continue };
-            let Ok(plan) = serde_json::from_slice::<LegacyPlan>(&bytes) else {
-                continue;
-            };
-            if plan.network != network {
-                continue;
-            }
-            if plan.status == status
-                && newest
-                    .as_ref()
-                    .is_none_or(|n| plan.created_at > n.created_at)
-            {
-                harden_path(&path)?;
-                newest = Some(plan);
-            }
-        }
-        Ok(newest)
     }
 
     pub fn delete_legacy_plan(&self, network: &str, id: &str) -> Result<()> {
@@ -395,7 +330,7 @@ mod tests {
         Amount, OutPoint, Psbt, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
         absolute::LockTime, transaction::Version,
     };
-    use sats_core::plan::{PreparedSpend, TransactionRecord, TransactionStatus};
+    use sats_core::plan::{PreparedSpend, TransactionRecord};
     use tempfile::TempDir;
 
     use super::*;
@@ -445,14 +380,6 @@ mod tests {
         assert!(!json.contains("psbt"));
         assert_eq!(
             store.load_transaction("signet", "session-id").unwrap().txid,
-            record.txid
-        );
-        assert_eq!(
-            store
-                .latest_transaction("signet", TransactionStatus::Pending)
-                .unwrap()
-                .unwrap()
-                .txid,
             record.txid
         );
         #[cfg(unix)]

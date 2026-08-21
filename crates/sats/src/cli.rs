@@ -56,22 +56,26 @@ pub enum Command {
         #[command(subcommand)]
         command: PsbtCommand,
     },
-    /// Broadcast a pending finalized transaction or a raw transaction file
-    Broadcast {
-        /// Transaction id or unique prefix (default: newest pending)
-        #[arg(long, value_name = "TXID", conflicts_with_all = ["plan", "tx"])]
-        transaction: Option<String>,
-        /// Pre-refactor plan/session id; retained as a compatibility alias
-        #[arg(long, value_name = "ID", conflicts_with_all = ["transaction", "tx"])]
-        plan: Option<String>,
-        /// Broadcast a raw transaction hex file instead
-        #[arg(long, value_name = "FILE", conflicts_with_all = ["transaction", "plan"])]
-        tx: Option<PathBuf>,
+    /// Work with signed transactions (advanced)
+    Tx {
+        #[command(subcommand)]
+        command: TxCommand,
     },
     /// Manage agent spending grants and the agent-facing MCP server
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TxCommand {
+    /// Broadcast a raw transaction hex file, or a saved transaction by
+    /// txid, unique prefix, or session id
+    Broadcast {
+        /// Raw transaction hex file, or a txid/prefix/id (`sats status` lists them)
+        #[arg(value_name = "FILE|TXID")]
+        target: String,
     },
 }
 

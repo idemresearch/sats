@@ -1,5 +1,4 @@
 pub mod balance;
-pub mod broadcast;
 pub mod grant;
 pub mod grants;
 pub mod init;
@@ -8,3 +7,4 @@ pub mod psbt;
 pub mod receive;
 pub mod revoke;
 pub mod send;
+pub mod tx;

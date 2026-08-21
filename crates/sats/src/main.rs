@@ -61,19 +61,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 json,
             ),
         },
-        Command::Broadcast {
-            transaction,
-            plan,
-            tx,
-        } => commands::broadcast::run(
-            &store,
-            network,
-            &services(&config)?,
-            transaction,
-            plan,
-            tx.as_deref(),
-            json,
-        ),
+        Command::Tx { command } => match command {
+            cli::TxCommand::Broadcast { target } => {
+                commands::tx::broadcast(&store, network, &services(&config)?, &target, json)
+            }
+        },
         Command::Agent { command } => match command {
             cli::AgentCommand::Grant {
                 name,
