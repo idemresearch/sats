@@ -112,10 +112,8 @@ impl DriverKind {
                 Capability::ChainFees,
                 Capability::ChainBroadcast,
             ],
-            // chain.sync lands with the scan port (see subfrost.rs); until
-            // then a subfrost-only config pairs with an esplora provider
-            // (or the built-in default) for sync.
             DriverKind::Subfrost => &[
+                Capability::ChainSync,
                 Capability::ChainFees,
                 Capability::ChainBroadcast,
                 Capability::GuardOrd,
@@ -157,6 +155,7 @@ enum Driver {
 #[derive(Debug)]
 pub enum ChainSource {
     Esplora(EsploraProvider),
+    Subfrost(SubfrostClient),
     Mock(MockProvider),
 }
 
@@ -287,13 +286,11 @@ pub fn resolve(
 
     Ok(Services {
         network,
-        sync: match sync_spec.map(|s| &s.driver) {
-            Some(Driver::Esplora(e)) => Some(ChainSource::Esplora(e.clone())),
-            Some(Driver::Mock(m)) => Some(ChainSource::Mock(m.clone())),
-            // Unreachable while the subfrost capability table omits
-            // chain.sync; explicit until the scan port lands.
-            Some(Driver::Subfrost(_)) | None => None,
-        },
+        sync: sync_spec.map(|s| match &s.driver {
+            Driver::Esplora(e) => ChainSource::Esplora(e.clone()),
+            Driver::Subfrost(c) => ChainSource::Subfrost(c.clone()),
+            Driver::Mock(m) => ChainSource::Mock(m.clone()),
+        }),
         fees: fees_spec.map(|s| match &s.driver {
             Driver::Esplora(e) => FeeSource::Esplora(e.clone()),
             Driver::Subfrost(c) => FeeSource::Subfrost(c.clone()),
@@ -429,6 +426,22 @@ impl Services {
                 ctx.persist()
                     .map_err(|err| sync_err(e.url(), format!("{err:#}")))
             }
+            ChainSource::Subfrost(c) => {
+                c.check_network(ctx.network)?;
+                if ctx.wallet.latest_checkpoint().height() == 0 {
+                    let update = c.full_scan(ctx.wallet.start_full_scan())?;
+                    ctx.wallet
+                        .apply_update(update)
+                        .map_err(|err| sync_err(c.display_url(), err.to_string()))?;
+                } else {
+                    let update = c.sync(ctx.wallet.start_sync_with_revealed_spks())?;
+                    ctx.wallet
+                        .apply_update(update)
+                        .map_err(|err| sync_err(c.display_url(), err.to_string()))?;
+                }
+                ctx.persist()
+                    .map_err(|err| sync_err(c.display_url(), format!("{err:#}")))
+            }
             ChainSource::Mock(m) => m.sync(),
         }
     }
@@ -484,16 +497,6 @@ impl Services {
         guards::protected_outpoints(&self.guards, outpoints)
     }
 
-    #[cfg(test)]
-    pub fn for_tests(network: Network, guards: Vec<UtxoGuard>) -> Services {
-        Services {
-            network,
-            sync: None,
-            fees: None,
-            broadcast: None,
-            guards,
-        }
-    }
 }
 
 /// Largest conf target ≤ the requested one; else the closest above.
