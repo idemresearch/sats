@@ -43,5 +43,8 @@ assert_cmd = "2"
 predicates = "3"
 
 [profile.release]
-lto = "thin"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
 strip = true
