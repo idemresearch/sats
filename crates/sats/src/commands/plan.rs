@@ -72,6 +72,7 @@ pub fn build(
         &addr,
         Amount::from_sat(amount),
         rate,
+        &[],
         ctx.net_name,
         unix_now(),
     )?)

@@ -95,6 +95,7 @@ mod tests {
             &recipient,
             Amount::from_sat(25_000),
             FeeRate::from_sat_per_vb_u32(2),
+            &[],
             "signet",
             1_700_000_000,
         )
@@ -137,6 +138,7 @@ mod tests {
             &recipient,
             Amount::from_sat(25_000),
             FeeRate::from_sat_per_vb_u32(2),
+            &[],
             "signet",
             0,
         );
