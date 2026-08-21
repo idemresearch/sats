@@ -10,9 +10,7 @@ use std::collections::HashMap;
 use bdk_esplora::EsploraExt;
 use bdk_esplora::esplora_client::{self, BlockingClient};
 use bdk_wallet::KeychainKind;
-use bdk_wallet::chain::spk_client::{
-    FullScanRequest, FullScanResponse, SyncRequest, SyncResponse,
-};
+use bdk_wallet::chain::spk_client::{FullScanRequest, FullScanResponse, SyncRequest, SyncResponse};
 use sats_core::bitcoin::{BlockHash, Network, Transaction, Txid, constants};
 
 use super::error::ProviderError;
@@ -101,12 +99,10 @@ impl EsploraProvider {
     pub fn fee_estimates(&self) -> Result<HashMap<u16, f64>, ProviderError> {
         match self.client().get_fee_estimates() {
             Ok(estimates) => Ok(estimates),
-            Err(err) => {
-                fee_estimates_from_2xx(&err).ok_or_else(|| ProviderError::Fees {
-                    url: self.url.clone(),
-                    message: format!("esplora unreachable: {err}"),
-                })
-            }
+            Err(err) => fee_estimates_from_2xx(&err).ok_or_else(|| ProviderError::Fees {
+                url: self.url.clone(),
+                message: format!("esplora unreachable: {err}"),
+            }),
         }
     }
 

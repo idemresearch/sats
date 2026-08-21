@@ -91,8 +91,7 @@ impl MockProvider {
         struct GuardFile {
             protected: Vec<String>,
         }
-        let file: GuardFile =
-            serde_json::from_str(&text).map_err(|e| guard_err(e.to_string()))?;
+        let file: GuardFile = serde_json::from_str(&text).map_err(|e| guard_err(e.to_string()))?;
         let listed = file
             .protected
             .iter()

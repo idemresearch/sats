@@ -1,21 +1,17 @@
 # sats
 
-**Tiny, open Bitcoin wallet.**
+**A tiny Bitcoin wallet for humans and agents.**
 
-A Bitcoin wallet runtime: one core, many surfaces. Run it natively in your
-terminal, hand it to an AI agent over MCP, and — next — embed the same core
-as WebAssembly. Humans sign locally; agents get bounded spending authority
-without ever touching keys.
+Run an on-chain wallet from your terminal, or give an AI agent a budget it
+cannot exceed. Keys stay local, transaction plans are PSBTs, and every agent
+spend is checked against human-set limits before signing.
 
-```
-$ sats send tb1p... 25k
-Send   25,000 sat
-Fee       412 sat
-Total  25,412 sat
-Sign? [Y/n] y
-✓ signed
-✓ broadcast  a1b2c3…
-```
+[Docs](docs/README.md) · [CLI](docs/cli.md) · [MCP](docs/mcp.md) ·
+[Architecture](docs/architecture.md) · [Security](docs/security.md)
+
+> [!WARNING]
+> sats is experimental. Signet is the default; use small amounts and short
+> agent grants while evaluating it.
 
 ## Install
 
@@ -26,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/jonatns/sats/main/setup.sh | sh
 ```
 
 The installer verifies the release checksum, installs `sats` to
-`~/.local/bin`, and adds that directory to your shell PATH when needed.
+`~/.local/bin`, and adds that directory to your shell path when needed.
 Pin a release or choose another install directory with environment variables:
 
 ```sh
@@ -40,173 +36,125 @@ To build from a checkout instead:
 cargo install --locked --path crates/sats
 ```
 
-## The runtime
+## Try it
 
-```
-                sats
-        Bitcoin wallet runtime
-      ┌──────────┬──────────┐
-      │          │          │
-     CLI        MCP        lib
-      │          │          │
-      └──────────┼──────────┘
-                 │
-             sats-core
-                 │
-       ┌─────────┴─────────┐
-     wallet             signing
-       │                   │
-  PSBT / UTXO      human authorization
-```
-
-`crates/sats-core` is the portable engine — wallet ops, transaction plans,
-the authorization engine, the `Signer` trait — with no filesystem, network,
-or clock dependencies. `crates/sats` is the CLI and MCP server on top.
-Agents are downstream of the wallet, not the other way around.
-
-**PSBT in. PSBT out.** Plans are PSBTs at every stage; signing is the
-standard watch-only + external-signer flow.
-
-## Humans
+Signet is the default, so the complete flow can be tested without real funds.
+Initialize, print a receive address, and fund it from a signet faucet:
 
 ```sh
-sats init                # create a wallet (signet by default)
-sats receive             # fresh address
+sats init
+sats receive
 sats balance
-sats send tb1p... 25k    # plan → confirm → sign → broadcast
+sats send tb1p... 25k
 ```
 
-Or step by step: `sats plan tb1p... 25k` → `sats sign` → `sats broadcast`.
-Every step is resumable; a failed broadcast leaves a signed plan you can
-retry. `sats sign tx.psbt` signs an external PSBT file.
-
-Amounts are integer sats, with shorthand: `25k` = 25,000 · `1.5m` = 1,500,000.
-
-## Agents
-
-Grant an agent a budget, then hand it the MCP server:
+`send` plans the transaction, shows its amount and fee, asks for confirmation,
+signs locally, and broadcasts. The same lifecycle can be run step by step:
 
 ```sh
-$ sats grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
-Grant    claude
-Budget   50,000 sat
-Max tx   10,000 sat
-Max fee  1,000 sat
-For      24h
-password: ********
-✓ granted  claude
-
-$ claude mcp add sats -- sats mcp --agent claude
+sats plan tb1p... 25k
+sats sign
+sats broadcast
 ```
 
-The agent gets four tools: `get_balance`, `get_receive_address`, `get_grant`,
-and `send`. Every `send` is checked deterministically against the grant —
-budget (amount + fee), per-tx cap, fee cap, expiry:
+Every step is resumable. A failed broadcast leaves a signed plan that can be
+retried, and `sats sign tx.psbt` signs an external PSBT file. Amounts are
+integer sats with shorthand: `25k` is 25,000 and `1.5m` is 1,500,000.
+
+See the [CLI reference](docs/cli.md) for all commands, flags, configuration,
+and machine-readable output.
+
+## Give an agent a budget
+
+Create bounded spending authority, then launch the MCP server as that agent:
+
+```sh
+sats grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
+claude mcp add sats -- sats mcp --agent claude
+```
+
+The agent receives four tools: `get_balance`, `get_receive_address`,
+`get_grant`, and `send`. Each send is checked against the grant's expiry,
+per-transaction amount cap, fee cap, and remaining budget. Outside that
+authority the agent receives a deterministic refusal, not a signature.
 
 ```json
-{ "status": "sent", "txid": "…", "fee_sat": 281, "remaining_budget_sat": 45219 }
+{
+  "status": "denied",
+  "reason": "over_max_tx",
+  "message": "human authorization required: requested 20,000 sat; max tx 10,000 sat"
+}
 ```
 
-Outside its authority, the agent gets a refusal, not a signature:
+`sats grants` shows current authority. `sats revoke claude` takes effect on
+the agent's next send call, including during an existing MCP session. See the
+[MCP guide](docs/mcp.md) for tool contracts and integration details.
 
-```json
-{ "status": "denied", "reason": "over_max_tx",
-  "message": "human authorization required: requested 20,000 sat; max tx 10,000 sat" }
-```
+## Safety model
 
-The user learns one rule: **whenever authority changes, sats asks you.**
-`sats grants` shows live budgets; `sats revoke claude` takes effect on the
-agent's very next call, even mid-session.
+- The seed is sealed with Argon2id and XChaCha20-Poly1305. The SQLite wallet
+  database is watch-only and never contains private keys.
+- Agent authorization is deterministic. Budget is reserved and persisted
+  before signing because a signed transaction is already spendable.
+- Planning excludes common inscription postage outputs by default and unions
+  those exclusions with every configured asset guard.
+- A configured guard fails closed. Agents cannot use `--allow-dust` or
+  `--no-guards`.
+- An active grant enables unattended signing. Anyone who can read the grant
+  file as your OS user can recover the seed; keep budgets small and expiries
+  short.
 
-## Commands
+Read the full [security and trust model](docs/security.md) before using
+mainnet or unattended grants.
 
-| Command | Does |
-|---|---|
-| `sats init` | Create a wallet (BIP-39 → BIP-86 taproot), encrypted at rest |
-| `sats balance` | Sync and show the balance (`--offline` for cached) |
-| `sats receive` | Fresh receive address |
-| `sats plan <addr> <amount>` | Build an unsigned plan: amount / fee / total |
-| `sats send <addr> <amount>` | Plan → confirm → sign → broadcast |
-| | Both exclude asset-bearing UTXOs (`--allow-dust`, `--no-guards` to override) |
-| `sats sign [FILE]` | Sign the newest plan, a `--plan <id>`, or a PSBT file |
-| `sats broadcast` | Broadcast the newest signed plan (or `--tx <hex-file>`) |
-| `sats grant <agent>` | Grant a spending budget (`--budget --for --max-tx --max-fee`) |
-| `sats revoke <agent>` | Revoke a grant immediately |
-| `sats grants` | List active grants and remaining budgets |
-| `sats mcp --agent <name>` | Serve wallet tools to that agent over MCP stdio |
+## One engine, two native surfaces
 
-Global flags: `--network mainnet|signet|testnet4|regtest`, `--json` on read
-commands, and `--provider KIND=URL` (repeatable) to override chain access
-for one invocation. `SATS_PASSWORD` replaces the prompt for scripting;
-`SATS_DIR` relocates all state.
+`crates/sats-core` is the portable wallet engine: transaction planning,
+authorization, seed sealing, and the signer boundary, with no filesystem,
+network, clock, or async-runtime dependencies. `crates/sats` supplies native
+storage, providers, terminal output, the CLI, and the MCP server.
 
-## Trust model, honestly
+PSBTs are the transaction contract at every stage. The watch-only wallet
+plans, a signer implementation signs, and a provider broadcasts. Agents use
+the same planning and safety path as humans, with the grant check added before
+signing.
 
-- Your seed lives in one file, sealed with argon2id + XChaCha20-Poly1305.
-  The wallet database is watch-only — it never contains keys.
-- `sats grant` unseals the seed once (your password is the authorization)
-  and re-seals it under a fresh random key stored in the grant file (0600).
-  Your password is never given to the agent.
-- Budget/caps/expiry enforcement is deterministic and happens before any
-  signature exists. Revocation deletes the grant file — nothing survives it.
-- **The honest cost of unattended signing:** while a grant is active, an
-  attacker who can read that grant file as your user can extract the seed.
-  The boundaries during a grant are OS file permissions and the expiry
-  window. Keep budgets small and expiries short; hardware-backed signers
-  (the `Signer` trait is already there) close this gap properly.
+See [Architecture](docs/architecture.md) for module ownership and end-to-end
+flows, or [AGENTS.md](AGENTS.md) for the implementation rules used by coding
+agents and contributors.
 
-## Networks
+## Networks and providers
 
-Signet is the default — grab coins from a signet faucet and try the whole
-loop for free. Mainnet is an explicit choice: `sats init --network mainnet`.
-Wallets are namespaced per network and share one seed.
+Wallets are namespaced by network and share one sealed seed. Supported
+networks are `mainnet`, `signet`, `testnet4`, and `regtest`; mainnet is always
+an explicit choice.
 
-Chain access is a **provider**: a typed endpoint bound to one network,
-advertising capabilities — chain access (`chain.sync`, `chain.fees`,
-`chain.broadcast`) and metaprotocol UTXO guards (`guard.ord`,
-`guard.alkanes`). With nothing configured, sats uses `mempool.space`'s
-Esplora API. One aggregate endpoint can supply everything:
+Chain access and optional asset protection come from typed providers.
+With no provider configuration, sats uses the appropriate mempool.space
+Esplora endpoint for chain sync, fee estimates, and broadcast. Guards are
+never enabled implicitly.
 
 ```toml
 # ~/.config/sats/config.toml
 network = "mainnet"
 
 [providers.subfrost]
-driver  = "subfrost"                             # or "esplora"
+driver = "subfrost"
 network = "mainnet"
-url     = "https://mainnet.subfrost.io/v4/jsonrpc"
+url = "https://mainnet.subfrost.io/v4/jsonrpc"
 ```
 
-Responsibilities can be split with `capabilities = ["chain"]` /
-`["guard"]` filters per provider; exactly one provider may supply
-`chain.sync` per network. `--provider esplora=URL` overrides everything
-for a single invocation. The legacy `[esplora]` config section keeps
-working. Guards make spending *more* conservative, never less: planning
-refuses to run when a configured guard cannot answer (`--no-guards` is
-the explicit, per-invocation escape), and it refuses to plan on stale
-chain state when sync fails.
+See [Providers and guards](docs/providers.md) for capabilities, resolution
+precedence, split-provider configuration, and fail-closed behavior.
 
 ## Development
 
 ```sh
-cargo test --workspace                  # offline: unit + CLI + MCP smoke tests
-cargo clippy --workspace --all-targets  # lint
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
+cargo check -p sats-core --target wasm32-unknown-unknown
 ```
 
-Stable `vMAJOR.MINOR.PATCH` tags publish release archives automatically; see
-[docs/releasing.md](docs/releasing.md).
-
-## Next
-
-The runtime grows outward from the same core: a bare `sats` wallet shell,
-`sats psbt inspect/create/finalize` as composable primitives,
-`sats-core.wasm` + `@sats/core` for browsers and apps, and hardware/passkey
-`Signer` backends. `sats-core` already compiles to `wasm32-unknown-unknown`;
-the phone-without-an-app plan and its priorities live in
-[docs/phone.md](docs/phone.md). Metaprotocols (ordinals, runes, alkanes)
-are bring-your-own-indexer by design; the strategy lives in
-[docs/metaprotocols.md](docs/metaprotocols.md).
-
-**Not planned for V1:** Lightning, coin control, multi-wallet, RBF —
-and no metaprotocol features until the basic wallet is stable
-([why and what instead](docs/metaprotocols.md)).
+Start with [CONTRIBUTING.md](CONTRIBUTING.md). Release maintainers should also
+read [docs/releasing.md](docs/releasing.md).

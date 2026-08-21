@@ -146,7 +146,10 @@ impl SubfrostClient {
         let mut protected = Vec::new();
         for outpoint in outpoints {
             let value: serde_json::Value = self
-                .call(dialect::ORD_OUTPUT, serde_json::json!([outpoint.to_string()]))
+                .call(
+                    dialect::ORD_OUTPUT,
+                    serde_json::json!([outpoint.to_string()]),
+                )
                 .map_err(|m| self.guard_err("ord", m))?;
             if parse_ord_output(&value) {
                 protected.push(*outpoint);
@@ -678,10 +681,13 @@ mod tests {
         let client = SubfrostClient::new("https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc".into());
         assert_eq!(client.display_url(), "https://mainnet.subfrost.io");
         assert!(!format!("{client:?}").contains("SECRETKEY"));
-        let scrubbed =
-            client.scrub("error connecting to https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc: refused");
+        let scrubbed = client
+            .scrub("error connecting to https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc: refused");
         assert!(!scrubbed.contains("SECRETKEY"));
-        let guard_err = client.guard_err("ord", client.scrub("boom at https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc"));
+        let guard_err = client.guard_err(
+            "ord",
+            client.scrub("boom at https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc"),
+        );
         assert!(!guard_err.to_string().contains("SECRETKEY"));
     }
 }
