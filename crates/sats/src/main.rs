@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod config;
 mod keys;
+#[cfg(feature = "mcp")]
 mod mcp;
 mod password;
 mod store;
@@ -69,6 +70,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         ),
         Command::Revoke { agent } => commands::revoke::run(&store, network, &agent, json),
         Command::Grants => commands::grants::run(&store, network, json),
+        #[cfg(feature = "mcp")]
         Command::Mcp { agent } => mcp::run(&store, &config, network, &agent),
     }
 }

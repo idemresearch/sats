@@ -11,14 +11,20 @@ rust-version.workspace = true
 name = "sats"
 path = "src/main.rs"
 
+[features]
+default = ["mcp"]
+# The `sats mcp` agent server (rmcp + tokio). Disable for a smaller
+# human-only binary: cargo install --no-default-features
+mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
+
 [dependencies]
 sats-core = { workspace = true }
 bdk_wallet = { workspace = true, features = ["rusqlite"] }
 bdk_esplora = { workspace = true }
 clap = { workspace = true }
-rmcp = { workspace = true }
-schemars = { workspace = true }
-tokio = { workspace = true }
+rmcp = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 owo-colors = { workspace = true }
 rpassword = { workspace = true }
 serde = { workspace = true }
