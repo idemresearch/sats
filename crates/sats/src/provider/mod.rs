@@ -17,6 +17,7 @@ pub mod error;
 pub mod esplora;
 pub mod guards;
 pub mod mock;
+pub mod subfrost;
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -30,6 +31,7 @@ pub use guards::{GuardReport, UtxoGuard};
 
 use esplora::EsploraProvider;
 use mock::MockProvider;
+use subfrost::SubfrostClient;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Capability {
@@ -88,6 +90,7 @@ impl Capability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriverKind {
     Esplora,
+    Subfrost,
     Mock,
 }
 
@@ -95,6 +98,7 @@ impl DriverKind {
     fn from_str(s: &str) -> Option<DriverKind> {
         Some(match s {
             "esplora" => DriverKind::Esplora,
+            "subfrost" => DriverKind::Subfrost,
             "mock" => DriverKind::Mock,
             _ => return None,
         })
@@ -107,6 +111,15 @@ impl DriverKind {
                 Capability::ChainSync,
                 Capability::ChainFees,
                 Capability::ChainBroadcast,
+            ],
+            // chain.sync lands with the scan port (see subfrost.rs); until
+            // then a subfrost-only config pairs with an esplora provider
+            // (or the built-in default) for sync.
+            DriverKind::Subfrost => &[
+                Capability::ChainFees,
+                Capability::ChainBroadcast,
+                Capability::GuardOrd,
+                Capability::GuardAlkanes,
             ],
             DriverKind::Mock => &[
                 Capability::ChainSync,
@@ -137,6 +150,7 @@ struct ProviderSpec {
 #[derive(Debug, Clone)]
 enum Driver {
     Esplora(EsploraProvider),
+    Subfrost(SubfrostClient),
     Mock(MockProvider),
 }
 
@@ -149,12 +163,14 @@ pub enum ChainSource {
 #[derive(Debug)]
 pub enum FeeSource {
     Esplora(EsploraProvider),
+    Subfrost(SubfrostClient),
     Mock(MockProvider),
 }
 
 #[derive(Debug)]
 pub enum BroadcastSource {
     Esplora(EsploraProvider),
+    Subfrost(SubfrostClient),
     Mock(MockProvider),
 }
 
@@ -215,32 +231,31 @@ pub fn resolve(
             .collect::<Result<_, _>>()?
     };
 
-    // Fallback tiers for chain capabilities only: the legacy [esplora] map,
-    // then built-in defaults. Guards never fall back.
-    let fallback = if cli.is_empty() && !chain_covered(&specs) {
+    // Fallback for chain capabilities only: the legacy [esplora] map, then
+    // built-in defaults. Guards never fall back, and CLI overrides replace
+    // everything — no fallback behind an explicit --provider.
+    let fallback = if cli.is_empty() {
         legacy_or_default_esplora(config, net_name)?
     } else {
         None
     };
 
-    let chain_specs: Vec<&ProviderSpec> = if specs.iter().any(has_chain_caps) {
-        specs.iter().filter(|s| has_chain_caps(s)).collect()
-    } else {
-        fallback.iter().collect()
-    };
-
+    // Per capability: explicit providers win; the fallback esplora covers
+    // any chain capability no explicit provider offers.
     let pick = |cap: Capability, prefer: Option<&str>| -> Result<Option<&ProviderSpec>, ProviderError> {
-        let candidates: Vec<&&ProviderSpec> = chain_specs
+        let candidates: Vec<&ProviderSpec> = specs
             .iter()
             .filter(|s| s.caps.contains(&cap))
             .collect();
+        if candidates.is_empty() {
+            return Ok(fallback.as_ref().filter(|s| s.caps.contains(&cap)));
+        }
         if let Some(name) = prefer {
             if let Some(spec) = candidates.iter().find(|s| s.name == name) {
                 return Ok(Some(spec));
             }
         }
         match candidates.len() {
-            0 => Ok(None),
             1 => Ok(Some(candidates[0])),
             _ => Err(ProviderError::Ambiguous {
                 cap: cap.as_str(),
@@ -272,16 +287,21 @@ pub fn resolve(
 
     Ok(Services {
         network,
-        sync: sync_spec.map(|s| match &s.driver {
-            Driver::Esplora(e) => ChainSource::Esplora(e.clone()),
-            Driver::Mock(m) => ChainSource::Mock(m.clone()),
-        }),
+        sync: match sync_spec.map(|s| &s.driver) {
+            Some(Driver::Esplora(e)) => Some(ChainSource::Esplora(e.clone())),
+            Some(Driver::Mock(m)) => Some(ChainSource::Mock(m.clone())),
+            // Unreachable while the subfrost capability table omits
+            // chain.sync; explicit until the scan port lands.
+            Some(Driver::Subfrost(_)) | None => None,
+        },
         fees: fees_spec.map(|s| match &s.driver {
             Driver::Esplora(e) => FeeSource::Esplora(e.clone()),
+            Driver::Subfrost(c) => FeeSource::Subfrost(c.clone()),
             Driver::Mock(m) => FeeSource::Mock(m.clone()),
         }),
         broadcast: broadcast_spec.map(|s| match &s.driver {
             Driver::Esplora(e) => BroadcastSource::Esplora(e.clone()),
+            Driver::Subfrost(c) => BroadcastSource::Subfrost(c.clone()),
             Driver::Mock(m) => BroadcastSource::Mock(m.clone()),
         }),
         guards,
@@ -291,16 +311,9 @@ pub fn resolve(
 fn driver_name(kind: DriverKind) -> &'static str {
     match kind {
         DriverKind::Esplora => "esplora",
+        DriverKind::Subfrost => "subfrost",
         DriverKind::Mock => "mock",
     }
-}
-
-fn has_chain_caps(spec: &ProviderSpec) -> bool {
-    spec.caps.iter().any(|c| !c.is_guard())
-}
-
-fn chain_covered(specs: &[ProviderSpec]) -> bool {
-    specs.iter().any(has_chain_caps)
 }
 
 fn build_spec(
@@ -333,6 +346,7 @@ fn build_spec(
             url.to_string(),
             bearer,
         )),
+        DriverKind::Subfrost => Driver::Subfrost(SubfrostClient::new(url.to_string())),
         DriverKind::Mock => Driver::Mock(MockProvider::new(url).map_err(bad)?),
     };
     Ok(ProviderSpec {
@@ -344,6 +358,10 @@ fn build_spec(
 
 fn guard_for(driver: &Driver, cap: Capability) -> Option<UtxoGuard> {
     match (driver, cap) {
+        (Driver::Subfrost(c), Capability::GuardOrd) => Some(UtxoGuard::SubfrostOrd(c.clone())),
+        (Driver::Subfrost(c), Capability::GuardAlkanes) => {
+            Some(UtxoGuard::SubfrostAlkanes(c.clone()))
+        }
         (Driver::Mock(m), Capability::GuardNative) => Some(UtxoGuard::Mock(m.clone())),
         _ => None,
     }
@@ -424,6 +442,7 @@ impl Services {
             .ok_or_else(|| self.no_provider(Capability::ChainFees))?
         {
             FeeSource::Esplora(e) => e.fee_estimates()?,
+            FeeSource::Subfrost(c) => c.fee_estimates()?,
             FeeSource::Mock(m) => m.fee_estimates()?,
         };
         Ok(pick_fee_rate(&estimates, target))
@@ -440,6 +459,7 @@ impl Services {
                 e.broadcast(tx)?;
                 tx.compute_txid()
             }
+            BroadcastSource::Subfrost(c) => c.broadcast(tx)?,
             BroadcastSource::Mock(m) => m.broadcast(tx)?,
         };
         let now = std::time::SystemTime::now()

@@ -13,10 +13,13 @@ use sats_core::bitcoin::OutPoint;
 
 use super::error::ProviderError;
 use super::mock::MockProvider;
+use super::subfrost::SubfrostClient;
 
 /// One configured guard. Audited enum, not a plugin surface.
 #[derive(Debug, Clone)]
 pub enum UtxoGuard {
+    SubfrostOrd(SubfrostClient),
+    SubfrostAlkanes(SubfrostClient),
     Mock(MockProvider),
     #[cfg(test)]
     Static(BTreeSet<OutPoint>),
@@ -26,6 +29,8 @@ impl UtxoGuard {
     /// Short display name for warnings ("guard: carrying assets").
     pub fn kind(&self) -> &'static str {
         match self {
+            UtxoGuard::SubfrostOrd(_) => "ord",
+            UtxoGuard::SubfrostAlkanes(_) => "alkanes",
             UtxoGuard::Mock(_) => "mock",
             #[cfg(test)]
             UtxoGuard::Static(_) => "static",
@@ -34,6 +39,8 @@ impl UtxoGuard {
 
     fn protected(&self, outpoints: &[OutPoint]) -> Result<Vec<OutPoint>, ProviderError> {
         match self {
+            UtxoGuard::SubfrostOrd(client) => client.ord_protected(outpoints),
+            UtxoGuard::SubfrostAlkanes(client) => client.alkanes_protected(outpoints),
             UtxoGuard::Mock(mock) => mock.protected(outpoints),
             #[cfg(test)]
             UtxoGuard::Static(set) => Ok(outpoints

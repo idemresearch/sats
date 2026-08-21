@@ -1354,6 +1354,7 @@ dependencies = [
  "directories",
  "hex",
  "humantime",
+ "minreq",
  "owo-colors",
  "predicates",
  "rmcp",
