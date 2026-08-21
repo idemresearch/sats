@@ -343,6 +343,20 @@ fn status_starts_empty() {
 }
 
 #[test]
+fn history_starts_empty() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    write_mock_provider(&dir);
+    let out = sats(&dir)
+        .args(["history", "--offline", "--json"])
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("json output");
+    assert_eq!(json, serde_json::json!([]));
+}
+
+#[test]
 fn tx_broadcast_needs_an_explicit_target() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);

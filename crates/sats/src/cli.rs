@@ -51,6 +51,12 @@ pub enum Command {
     Receive,
     /// Send bitcoin: prepare, confirm, sign, persist, broadcast
     Send(SendArgs),
+    /// List the wallet's transactions, newest first
+    History {
+        /// Skip chain sync; history may be stale
+        #[arg(long)]
+        offline: bool,
+    },
     /// Show pending and broadcast transactions, or one by txid
     Status {
         /// Transaction id, unique prefix, or session id

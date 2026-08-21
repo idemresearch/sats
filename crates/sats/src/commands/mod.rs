@@ -1,6 +1,7 @@
 pub mod balance;
 pub mod grant;
 pub mod grants;
+pub mod history;
 pub mod init;
 pub mod prepare;
 pub mod psbt;

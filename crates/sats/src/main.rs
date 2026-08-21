@@ -50,6 +50,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Send(args) => {
             commands::send::run(&store, network, &services(&config)?, &args, json)
         }
+        Command::History { offline } => {
+            commands::history::run(&store, network, &services(&config)?, offline, json)
+        }
         Command::Status { txid, offline } => commands::status::run(
             &store,
             network,
