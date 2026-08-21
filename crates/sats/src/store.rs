@@ -98,19 +98,8 @@ impl Store {
         self.seed_path().exists()
     }
 
-    pub fn save_psbt_session(&self, network: &str, session: &PsbtSession) -> Result<()> {
-        if session.network != network {
-            bail!(
-                "PSBT session network {} does not match {network}",
-                session.network
-            );
-        }
-        let path = self
-            .psbt_sessions_dir(network)
-            .join(format!("{}.json", session.id));
-        write_atomic(&path, &serde_json::to_vec_pretty(session)?, true)
-    }
-
+    /// Read-only legacy state: new code never writes PSBT sessions —
+    /// `sats send --export-psbt` produces file artifacts instead.
     pub fn load_psbt_session(&self, network: &str, id: &str) -> Result<PsbtSession> {
         let path = self.psbt_sessions_dir(network).join(format!("{id}.json"));
         if !path.exists() {
@@ -514,10 +503,17 @@ mod tests {
             PreparedSpend::new("signet".into(), "tb1ptest".into(), 1_000, 100, 42, 0, psbt);
         let session = prepared.session();
 
-        store.save_psbt_session("signet", &session).unwrap();
+        // Sessions are read-only legacy state: fabricate one on disk the
+        // way an older release would have written it.
         let session_path = store
             .psbt_sessions_dir("signet")
             .join(format!("{}.json", session.id));
+        write_atomic(
+            &session_path,
+            &serde_json::to_vec_pretty(&session).unwrap(),
+            true,
+        )
+        .unwrap();
         assert_eq!(
             store.load_psbt_session("signet", &session.id).unwrap().id,
             session.id

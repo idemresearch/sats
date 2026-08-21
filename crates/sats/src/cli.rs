@@ -49,43 +49,8 @@ pub enum Command {
     },
     /// Show a fresh receive address
     Receive,
-    /// Create an explicit, resumable unsigned PSBT session
-    Plan {
-        /// Recipient address
-        address: String,
-        /// Amount in sats (shorthand ok: 10k, 1.5m)
-        #[arg(value_parser = crate::amount::parse)]
-        amount: u64,
-        /// Fee rate in sat/vB (default: estimated for ~2 blocks)
-        #[arg(long, value_name = "SAT_VB")]
-        fee_rate: Option<u64>,
-        /// Spend UTXOs at inscription postage values (546/330 sats)
-        #[arg(long)]
-        allow_dust: bool,
-        /// Skip the configured metaprotocol guards, loudly
-        #[arg(long)]
-        no_guards: bool,
-    },
     /// Send bitcoin: prepare, confirm, sign, persist, broadcast
-    Send {
-        /// Recipient address
-        address: String,
-        /// Amount in sats (shorthand ok: 10k, 1.5m)
-        #[arg(value_parser = crate::amount::parse)]
-        amount: u64,
-        /// Fee rate in sat/vB (default: estimated for ~2 blocks)
-        #[arg(long, value_name = "SAT_VB")]
-        fee_rate: Option<u64>,
-        /// Spend UTXOs at inscription postage values (546/330 sats)
-        #[arg(long)]
-        allow_dust: bool,
-        /// Skip the configured metaprotocol guards, loudly
-        #[arg(long)]
-        no_guards: bool,
-        /// Skip the confirmation prompt
-        #[arg(short, long)]
-        yes: bool,
-    },
+    Send(SendArgs),
     /// Sign a saved PSBT session or an external PSBT file
     Sign {
         /// PSBT file to sign (base64 or binary); default: newest saved session
@@ -112,6 +77,33 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+}
+
+#[derive(clap::Args)]
+pub struct SendArgs {
+    /// Recipient address
+    pub address: String,
+    /// Amount in sats (shorthand ok: 10k, 1.5m)
+    #[arg(value_parser = crate::amount::parse)]
+    pub amount: u64,
+    /// Fee rate in sat/vB (default: estimated for ~2 blocks)
+    #[arg(long, value_name = "SAT_VB")]
+    pub fee_rate: Option<u64>,
+    /// Spend UTXOs at inscription postage values (546/330 sats)
+    #[arg(long)]
+    pub allow_dust: bool,
+    /// Skip the configured metaprotocol guards, loudly
+    #[arg(long)]
+    pub no_guards: bool,
+    /// Skip the confirmation prompt
+    #[arg(short, long, conflicts_with_all = ["dry_run", "export_psbt"])]
+    pub yes: bool,
+    /// Preview only: prepare and price the send, persist nothing
+    #[arg(long, conflicts_with = "export_psbt")]
+    pub dry_run: bool,
+    /// Write the unsigned PSBT to FILE instead of signing
+    #[arg(long, value_name = "FILE")]
+    pub export_psbt: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]

@@ -3,7 +3,7 @@ pub mod broadcast;
 pub mod grant;
 pub mod grants;
 pub mod init;
-pub mod plan;
+pub mod prepare;
 pub mod receive;
 pub mod revoke;
 pub mod send;

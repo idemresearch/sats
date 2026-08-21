@@ -14,7 +14,7 @@ use sats_core::bitcoin::Network;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::commands::plan;
+use crate::commands::prepare;
 use crate::config::{Config, network_name};
 use crate::provider;
 use crate::store::{Store, unix_now};
@@ -336,12 +336,12 @@ fn execute_send(
     let prepared_result = (|| -> Result<_> {
         let services = provider::resolve(config, providers, network)?;
         let mut ctx = walletd::open(store, network)?;
-        // plan::build syncs internally and hard-fails on stale state; the
+        // prepare::build syncs internally and hard-fails on stale state; the
         // agent request form carries no safety bypasses.
-        let request = plan::PlanRequest::for_agent(&params.address, params.amount_sat);
-        let plan = plan::build(&mut ctx, &services, &request)?;
+        let request = prepare::PrepareRequest::for_agent(&params.address, params.amount_sat);
+        let prepared = prepare::build(&mut ctx, &services, &request)?;
         ctx.persist()?;
-        Ok((ctx, services, plan))
+        Ok((ctx, services, prepared))
     })();
     let (mut ctx, services, prepared) = match prepared_result {
         Ok(v) => v,

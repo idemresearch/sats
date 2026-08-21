@@ -47,46 +47,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             commands::balance::run(&store, network, &services(&config)?, offline, json)
         }
         Command::Receive => commands::receive::run(&store, network, json),
-        Command::Plan {
-            address,
-            amount,
-            fee_rate,
-            allow_dust,
-            no_guards,
-        } => commands::plan::run(
-            &store,
-            network,
-            &services(&config)?,
-            &commands::plan::PlanRequest {
-                address: &address,
-                amount,
-                fee_rate,
-                allow_dust,
-                no_guards,
-            },
-            json,
-        ),
-        Command::Send {
-            address,
-            amount,
-            fee_rate,
-            allow_dust,
-            no_guards,
-            yes,
-        } => commands::send::run(
-            &store,
-            network,
-            &services(&config)?,
-            &commands::plan::PlanRequest {
-                address: &address,
-                amount,
-                fee_rate,
-                allow_dust,
-                no_guards,
-            },
-            yes,
-            json,
-        ),
+        Command::Send(args) => {
+            commands::send::run(&store, network, &services(&config)?, &args, json)
+        }
         Command::Sign { psbt, plan } => {
             commands::sign::run(&store, network, plan, psbt.as_deref(), json)
         }

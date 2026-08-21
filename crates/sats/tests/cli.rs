@@ -105,17 +105,18 @@ fn wrong_password_is_rejected() {
 }
 
 #[test]
-fn plan_with_no_funds_fails_cleanly() {
+fn dry_run_with_no_funds_fails_cleanly() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     write_mock_provider(&dir);
     sats(&dir)
         .args([
-            "plan",
+            "send",
             "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
             "25000",
             "--fee-rate",
             "2",
+            "--dry-run",
         ])
         .assert()
         .failure()
@@ -123,17 +124,18 @@ fn plan_with_no_funds_fails_cleanly() {
 }
 
 #[test]
-fn plan_rejects_wrong_network_address() {
+fn send_rejects_wrong_network_address() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     // No provider config needed: address validation runs before any IO.
     sats(&dir)
         .args([
-            "plan",
+            "send",
             "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
             "1000",
             "--fee-rate",
             "2",
+            "--dry-run",
         ])
         .assert()
         .failure()
@@ -141,18 +143,19 @@ fn plan_rejects_wrong_network_address() {
 }
 
 #[test]
-fn plan_refuses_stale_state_when_sync_fails() {
+fn send_refuses_stale_state_when_sync_fails() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     let mockdata = write_mock_provider(&dir);
     std::fs::write(mockdata.join("sync-error"), "indexer down").unwrap();
     sats(&dir)
         .args([
-            "plan",
+            "send",
             "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
             "25000",
             "--fee-rate",
             "2",
+            "--dry-run",
         ])
         .assert()
         .failure()
@@ -168,11 +171,12 @@ fn guard_failure_stops_planning() {
     std::fs::remove_file(mockdata.join("guard.json")).unwrap();
     sats(&dir)
         .args([
-            "plan",
+            "send",
             "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
             "25000",
             "--fee-rate",
             "2",
+            "--dry-run",
         ])
         .assert()
         .failure()
@@ -191,16 +195,37 @@ fn no_guards_flag_skips_the_asset_check() {
     // fails for the ordinary reason: an empty wallet.
     sats(&dir)
         .args([
-            "plan",
+            "send",
             "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
             "25000",
             "--fee-rate",
             "2",
+            "--dry-run",
             "--no-guards",
         ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("Insufficient funds"));
+}
+
+#[test]
+fn dry_run_conflicts_with_yes_and_export() {
+    let dir = TempDir::new().unwrap();
+    sats(&dir)
+        .args(["send", "tb1qexample", "1000", "--dry-run", "--yes"])
+        .assert()
+        .code(2);
+    sats(&dir)
+        .args([
+            "send",
+            "tb1qexample",
+            "1000",
+            "--dry-run",
+            "--export-psbt",
+            "x.psbt",
+        ])
+        .assert()
+        .code(2);
 }
 
 #[test]

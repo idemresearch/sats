@@ -1,9 +1,10 @@
 //! Transaction preparation and durable finalized-transaction records.
 //!
 //! A [`PreparedSpend`] exists only while a caller is reviewing, authorizing,
-//! and signing a transaction. Normal sends never serialize its PSBT. The
-//! explicit `sats plan` workflow may serialize a [`PsbtSession`], while the
-//! durable retry/audit record is always a raw finalized transaction.
+//! and signing a transaction. Normal sends never serialize its PSBT; an
+//! explicit export writes a plain PSBT artifact instead. A [`PsbtSession`]
+//! is backward-reading state from older releases' staged workflow, while
+//! the durable retry/audit record is always a raw finalized transaction.
 
 use std::str::FromStr;
 
@@ -21,7 +22,7 @@ const fn format_version() -> u32 {
 /// A fully constructed spend awaiting review, authorization, and signing.
 ///
 /// This type intentionally does not implement serialization. Callers should
-/// keep it in memory unless the user explicitly requested a PSBT session.
+/// keep it in memory unless the user explicitly requested a PSBT export.
 #[derive(Debug, Clone)]
 pub struct PreparedSpend {
     pub id: String,
@@ -107,8 +108,8 @@ impl PreparedSpend {
     }
 }
 
-/// An unsigned PSBT persisted only because the user explicitly invoked the
-/// staged `plan → sign → broadcast` workflow.
+/// An unsigned PSBT persisted by older releases' explicit staged workflow.
+/// Retained for backward-reading; new code writes PSBT file artifacts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PsbtSession {
     #[serde(default = "format_version")]
