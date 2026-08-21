@@ -10,7 +10,7 @@ Compile `sats-core` to WebAssembly and serve it as a static page. Open it
 in the phone's browser; optionally "Add to Home Screen" for an app-like
 feel. Everything sensitive happens client-side:
 
-- **Network** — Esplora over `fetch()`. mempool.space serves CORS-friendly
+- **Network** — a chain provider over `fetch()` (Esplora first). mempool.space serves CORS-friendly
   APIs, so chain sync works straight from the browser.
 - **Storage** — the sealed seed and the watch-only wallet DB live in
   IndexedDB/OPFS. The seal format (argon2id + XChaCha20-Poly1305) carries
@@ -55,7 +55,7 @@ queue is the wasm path, smallest risk first:
    the core flows to JS — create/restore (seal/unseal), receive address,
    build plan from a UTXO snapshot, sign, serialize PSBT. Core stays free
    of wasm-bindgen; only `sats-web` depends on it.
-3. **JS shell: network + persistence.** Esplora sync over `fetch()`
+3. **JS shell: network + persistence.** Chain-provider sync over `fetch()`
    feeding the core's update types; sealed-seed and changeset persistence
    in IndexedDB/OPFS. This is where core's "no filesystem, no network"
    discipline pays off — the shell implements what core deliberately lacks.

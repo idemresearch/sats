@@ -23,6 +23,22 @@ fn init_wallet(dir: &TempDir) {
         .stdout(predicate::str::contains("wallet created"));
 }
 
+/// Point the config at the hermetic mock chain provider (no network).
+/// Returns the mock data directory controlling its behavior.
+fn write_mock_provider(dir: &TempDir) -> std::path::PathBuf {
+    let mockdata = dir.path().join("mockdata");
+    std::fs::create_dir_all(&mockdata).unwrap();
+    // The mock driver is also a guard, and guards fail closed on a missing
+    // answer — give it an empty one by default.
+    std::fs::write(mockdata.join("guard.json"), r#"{"protected": []}"#).unwrap();
+    let config = format!(
+        "network = \"signet\"\n\n[providers.mock]\ndriver = \"mock\"\nnetwork = \"signet\"\nurl = \"file://{}\"\n",
+        mockdata.display()
+    );
+    std::fs::write(dir.path().join("config.toml"), config).unwrap();
+    mockdata
+}
+
 #[test]
 fn init_receive_balance_flow() {
     let dir = TempDir::new().unwrap();
@@ -92,7 +108,7 @@ fn wrong_password_is_rejected() {
 fn plan_with_no_funds_fails_cleanly() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
-    // Explicit --fee-rate keeps this fully offline (no esplora estimate).
+    write_mock_provider(&dir);
     sats(&dir)
         .args([
             "plan",
@@ -110,6 +126,7 @@ fn plan_with_no_funds_fails_cleanly() {
 fn plan_rejects_wrong_network_address() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
+    // No provider config needed: address validation runs before any IO.
     sats(&dir)
         .args([
             "plan",
@@ -121,6 +138,134 @@ fn plan_rejects_wrong_network_address() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("not valid for signet"));
+}
+
+#[test]
+fn plan_refuses_stale_state_when_sync_fails() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+    std::fs::write(mockdata.join("sync-error"), "indexer down").unwrap();
+    sats(&dir)
+        .args([
+            "plan",
+            "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
+            "25000",
+            "--fee-rate",
+            "2",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("refusing to plan on stale state"));
+}
+
+#[test]
+fn guard_failure_stops_planning() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+    // A configured guard that cannot answer must stop planning.
+    std::fs::remove_file(mockdata.join("guard.json")).unwrap();
+    sats(&dir)
+        .args([
+            "plan",
+            "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
+            "25000",
+            "--fee-rate",
+            "2",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to plan without the asset check",
+        ));
+}
+
+#[test]
+fn no_guards_flag_skips_the_asset_check() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+    std::fs::remove_file(mockdata.join("guard.json")).unwrap();
+    // With the explicit escape the pipeline proceeds past the guard and
+    // fails for the ordinary reason: an empty wallet.
+    sats(&dir)
+        .args([
+            "plan",
+            "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
+            "25000",
+            "--fee-rate",
+            "2",
+            "--no-guards",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Insufficient funds"));
+}
+
+#[test]
+fn provider_flag_overrides_config() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    // Config points at a mock that would fail; the CLI override replaces it
+    // with one that works.
+    let mockdata = write_mock_provider(&dir);
+    std::fs::write(mockdata.join("sync-error"), "config provider down").unwrap();
+    let override_data = dir.path().join("override-mockdata");
+    std::fs::create_dir_all(&override_data).unwrap();
+    let out = sats(&dir)
+        .args([
+            "balance",
+            "--json",
+            "--provider",
+            &format!("mock=file://{}", override_data.display()),
+        ])
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("json output");
+    assert_eq!(json["synced"], true);
+}
+
+#[test]
+fn provider_flag_rejects_bad_grammar() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args(["balance", "--provider", "mempool.space"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("KIND=URL"));
+}
+
+#[test]
+fn two_chain_providers_are_ambiguous() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args([
+            "balance",
+            "--provider",
+            "esplora=http://a.invalid",
+            "--provider",
+            "subfrost=http://b.invalid",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("multiple chain.sync providers"));
+}
+
+#[test]
+fn balance_tolerates_sync_failure_and_reports_it() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+    std::fs::write(mockdata.join("sync-error"), "chain offline").unwrap();
+    let out = sats(&dir).args(["balance", "--json"]).assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("json output");
+    assert_eq!(json["balance_sat"], 0);
+    assert_eq!(json["synced"], false);
 }
 
 #[test]

@@ -127,6 +127,7 @@ agent's very next call, even mid-session.
 | `sats receive` | Fresh receive address |
 | `sats plan <addr> <amount>` | Build an unsigned plan: amount / fee / total |
 | `sats send <addr> <amount>` | Plan → confirm → sign → broadcast |
+| | Both exclude asset-bearing UTXOs (`--allow-dust`, `--no-guards` to override) |
 | `sats sign [FILE]` | Sign the newest plan, a `--plan <id>`, or a PSBT file |
 | `sats broadcast` | Broadcast the newest signed plan (or `--tx <hex-file>`) |
 | `sats grant <agent>` | Grant a spending budget (`--budget --for --max-tx --max-fee`) |
@@ -135,8 +136,9 @@ agent's very next call, even mid-session.
 | `sats mcp --agent <name>` | Serve wallet tools to that agent over MCP stdio |
 
 Global flags: `--network mainnet|signet|testnet4|regtest`, `--json` on read
-commands. `SATS_PASSWORD` replaces the prompt for scripting; `SATS_DIR`
-relocates all state.
+commands, and `--provider KIND=URL` (repeatable) to override chain access
+for one invocation. `SATS_PASSWORD` replaces the prompt for scripting;
+`SATS_DIR` relocates all state.
 
 ## Trust model, honestly
 
@@ -157,9 +159,32 @@ relocates all state.
 
 Signet is the default — grab coins from a signet faucet and try the whole
 loop for free. Mainnet is an explicit choice: `sats init --network mainnet`.
-Wallets are namespaced per network and share one seed. Chain access is any
-Esplora endpoint (`mempool.space` by default, configurable in
-`~/.config/sats/config.toml`).
+Wallets are namespaced per network and share one seed.
+
+Chain access is a **provider**: a typed endpoint bound to one network,
+advertising capabilities — chain access (`chain.sync`, `chain.fees`,
+`chain.broadcast`) and metaprotocol UTXO guards (`guard.ord`,
+`guard.alkanes`). With nothing configured, sats uses `mempool.space`'s
+Esplora API. One aggregate endpoint can supply everything:
+
+```toml
+# ~/.config/sats/config.toml
+network = "mainnet"
+
+[providers.subfrost]
+driver  = "subfrost"                             # or "esplora"
+network = "mainnet"
+url     = "https://mainnet.subfrost.io/v4/jsonrpc"
+```
+
+Responsibilities can be split with `capabilities = ["chain"]` /
+`["guard"]` filters per provider; exactly one provider may supply
+`chain.sync` per network. `--provider esplora=URL` overrides everything
+for a single invocation. The legacy `[esplora]` config section keeps
+working. Guards make spending *more* conservative, never less: planning
+refuses to run when a configured guard cannot answer (`--no-guards` is
+the explicit, per-invocation escape), and it refuses to plan on stale
+chain state when sync fails.
 
 ## Development
 

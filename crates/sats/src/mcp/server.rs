@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commands::plan;
 use crate::config::{Config, network_name};
+use crate::provider;
 use crate::store::{Store, unix_now};
 use crate::{keys, walletd};
 
@@ -26,6 +27,9 @@ pub struct SatsMcp {
     dir: Option<PathBuf>,
     network: Network,
     agent: String,
+    /// CLI --provider overrides the server was launched with; every tool
+    /// call resolves providers the same way the CLI does.
+    providers: Vec<provider::CliProvider>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -139,11 +143,17 @@ impl SendResult {
 }
 
 impl SatsMcp {
-    pub fn new(dir: Option<PathBuf>, network: Network, agent: String) -> Self {
+    pub fn new(
+        dir: Option<PathBuf>,
+        network: Network,
+        agent: String,
+        providers: Vec<provider::CliProvider>,
+    ) -> Self {
         SatsMcp {
             dir,
             network,
             agent,
+            providers,
             tool_router: Self::tool_router(),
         }
     }
@@ -152,10 +162,17 @@ impl SatsMcp {
     async fn blocking<T, F>(&self, f: F) -> Result<T, ErrorData>
     where
         T: Send + 'static,
-        F: FnOnce(Option<PathBuf>, Network, String) -> Result<T> + Send + 'static,
+        F: FnOnce(Option<PathBuf>, Network, String, Vec<provider::CliProvider>) -> Result<T>
+            + Send
+            + 'static,
     {
-        let (dir, network, agent) = (self.dir.clone(), self.network, self.agent.clone());
-        tokio::task::spawn_blocking(move || f(dir, network, agent))
+        let (dir, network, agent, providers) = (
+            self.dir.clone(),
+            self.network,
+            self.agent.clone(),
+            self.providers.clone(),
+        );
+        tokio::task::spawn_blocking(move || f(dir, network, agent, providers))
             .await
             .map_err(|e| ErrorData::internal_error(format!("task failed: {e}"), None))?
             .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))
@@ -169,11 +186,12 @@ impl SatsMcp {
         chain could not be reached and the value is from cache."
     )]
     async fn get_balance(&self) -> Result<Json<BalanceResult>, ErrorData> {
-        self.blocking(|dir, network, _agent| {
+        self.blocking(|dir, network, _agent, providers| {
             let store = Store::open(dir.as_deref())?;
             let config = Config::load(&store)?;
-            let mut ctx = walletd::open(&store, &config, network)?;
-            let synced = ctx.sync().is_ok();
+            let services = provider::resolve(&config, &providers, network)?;
+            let mut ctx = walletd::open(&store, network)?;
+            let synced = services.sync_wallet(&mut ctx).is_ok();
             let balance = ctx.wallet.balance();
             Ok(BalanceResult {
                 balance_sat: (balance.confirmed + balance.trusted_pending).to_sat(),
@@ -188,10 +206,9 @@ impl SatsMcp {
 
     #[tool(description = "Get a fresh receive address for this wallet.")]
     async fn get_receive_address(&self) -> Result<Json<AddressResult>, ErrorData> {
-        self.blocking(|dir, network, _agent| {
+        self.blocking(|dir, network, _agent, _providers| {
             let store = Store::open(dir.as_deref())?;
-            let config = Config::load(&store)?;
-            let mut ctx = walletd::open(&store, &config, network)?;
+            let mut ctx = walletd::open(&store, network)?;
             let info = ctx
                 .wallet
                 .reveal_next_address(bdk_wallet::KeychainKind::External);
@@ -211,7 +228,7 @@ impl SatsMcp {
         per-tx caps, and expiry. Check this before sending."
     )]
     async fn get_grant(&self) -> Result<Json<GrantResult>, ErrorData> {
-        self.blocking(|dir, network, agent| {
+        self.blocking(|dir, network, agent, _providers| {
             let store = Store::open(dir.as_deref())?;
             let net_name = network_name(network);
             let now = unix_now();
@@ -261,10 +278,12 @@ impl SatsMcp {
         &self,
         Parameters(params): Parameters<SendParams>,
     ) -> Result<Json<SendResult>, ErrorData> {
-        self.blocking(move |dir, network, agent| {
+        self.blocking(move |dir, network, agent, providers| {
             let store = Store::open(dir.as_deref())?;
             let config = Config::load(&store)?;
-            Ok(execute_send(&store, &config, network, &agent, &params))
+            Ok(execute_send(
+                &store, &config, network, &agent, &providers, &params,
+            ))
         })
         .await
         .map(Json)
@@ -278,6 +297,7 @@ fn execute_send(
     config: &Config,
     network: Network,
     agent: &str,
+    providers: &[provider::CliProvider],
     params: &SendParams,
 ) -> SendResult {
     let net_name = network_name(network);
@@ -316,13 +336,16 @@ fn execute_send(
 
     // Plan the transaction to learn the real fee before any decision.
     let planned = (|| -> Result<_> {
-        let mut ctx = walletd::open(store, config, network)?;
-        ctx.sync().map_err(|e| anyhow!("cannot sync: {e:#}"))?;
-        let plan = plan::build(&mut ctx, &params.address, params.amount_sat, None)?;
+        let services = provider::resolve(config, providers, network)?;
+        let mut ctx = walletd::open(store, network)?;
+        // plan::build syncs internally and hard-fails on stale state; the
+        // agent request form carries no safety bypasses.
+        let request = plan::PlanRequest::for_agent(&params.address, params.amount_sat);
+        let plan = plan::build(&mut ctx, &services, &request)?;
         ctx.persist()?;
-        Ok((ctx, plan))
+        Ok((ctx, services, plan))
     })();
-    let (mut ctx, mut spend_plan) = match planned {
+    let (mut ctx, services, mut spend_plan) = match planned {
         Ok(v) => v,
         Err(e) => return SendResult::error(format!("{e:#}")),
     };
@@ -387,7 +410,7 @@ fn execute_send(
         Ok(tx) => tx,
         Err(e) => return SendResult::error(format!("{e:#}")),
     };
-    match ctx.broadcast(&tx) {
+    match services.broadcast(&mut ctx, &tx) {
         Ok(txid) => {
             spend_plan.status = PlanStatus::Broadcast;
             let _ = store.save_plan(net_name, &spend_plan);

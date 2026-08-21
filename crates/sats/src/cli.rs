@@ -14,6 +14,13 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NET")]
     pub network: Option<String>,
 
+    /// Provider override for the active network, repeatable:
+    /// --provider esplora=URL or --provider subfrost=URL.
+    /// Replaces every configured provider for this invocation.
+    #[arg(long, global = true, value_name = "KIND=URL",
+          value_parser = crate::provider::parse_cli_provider)]
+    pub provider: Vec<crate::provider::CliProvider>,
+
     /// Machine-readable JSON output
     #[arg(long, global = true)]
     pub json: bool,
@@ -52,6 +59,12 @@ pub enum Command {
         /// Fee rate in sat/vB (default: estimated for ~2 blocks)
         #[arg(long, value_name = "SAT_VB")]
         fee_rate: Option<u64>,
+        /// Spend UTXOs at inscription postage values (546/330 sats)
+        #[arg(long)]
+        allow_dust: bool,
+        /// Skip the configured metaprotocol guards, loudly
+        #[arg(long)]
+        no_guards: bool,
     },
     /// Send bitcoin: plan, confirm, sign, broadcast
     Send {
@@ -63,6 +76,12 @@ pub enum Command {
         /// Fee rate in sat/vB (default: estimated for ~2 blocks)
         #[arg(long, value_name = "SAT_VB")]
         fee_rate: Option<u64>,
+        /// Spend UTXOs at inscription postage values (546/330 sats)
+        #[arg(long)]
+        allow_dust: bool,
+        /// Skip the configured metaprotocol guards, loudly
+        #[arg(long)]
+        no_guards: bool,
         /// Skip the confirmation prompt
         #[arg(short, long)]
         yes: bool,

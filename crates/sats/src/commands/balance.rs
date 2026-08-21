@@ -1,21 +1,21 @@
 use anyhow::Result;
 use sats_core::bitcoin::Network;
 
-use crate::config::Config;
+use crate::provider::Services;
 use crate::store::Store;
 use crate::{ui, walletd};
 
 pub fn run(
     store: &Store,
-    config: &Config,
     network: Network,
+    services: &Services,
     offline: bool,
     json: bool,
 ) -> Result<()> {
-    let mut ctx = walletd::open(store, config, network)?;
+    let mut ctx = walletd::open(store, network)?;
     let mut synced = false;
     if !offline {
-        match ctx.sync() {
+        match services.sync_wallet(&mut ctx) {
             Ok(()) => synced = true,
             Err(err) => eprintln!("✗ sync failed — showing cached balance ({err:#})"),
         }

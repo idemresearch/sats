@@ -6,6 +6,7 @@ mod keys;
 #[cfg(feature = "mcp")]
 mod mcp;
 mod password;
+mod provider;
 mod store;
 mod ui;
 mod walletd;
@@ -34,30 +35,62 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let network = parse_network(&net_name)?;
     let json = cli.json;
 
+    // Chain access is resolved lazily per command: purely local commands
+    // (receive, sign, grants) never need provider configuration.
+    let overrides = cli.provider;
+    let services = |config: &Config| provider::resolve(config, &overrides, network);
+
     match cli.command {
         Command::Init { words } => commands::init::run(&store, config, network, words),
         Command::Balance { offline } => {
-            commands::balance::run(&store, &config, network, offline, json)
+            commands::balance::run(&store, network, &services(&config)?, offline, json)
         }
-        Command::Receive => commands::receive::run(&store, &config, network, json),
+        Command::Receive => commands::receive::run(&store, network, json),
         Command::Plan {
             address,
             amount,
             fee_rate,
-        } => commands::plan::run(&store, &config, network, &address, amount, fee_rate, json),
+            allow_dust,
+            no_guards,
+        } => commands::plan::run(
+            &store,
+            network,
+            &services(&config)?,
+            &commands::plan::PlanRequest {
+                address: &address,
+                amount,
+                fee_rate,
+                allow_dust,
+                no_guards,
+            },
+            json,
+        ),
         Command::Send {
             address,
             amount,
             fee_rate,
+            allow_dust,
+            no_guards,
             yes,
         } => commands::send::run(
-            &store, &config, network, &address, amount, fee_rate, yes, json,
+            &store,
+            network,
+            &services(&config)?,
+            &commands::plan::PlanRequest {
+                address: &address,
+                amount,
+                fee_rate,
+                allow_dust,
+                no_guards,
+            },
+            yes,
+            json,
         ),
         Command::Sign { psbt, plan } => {
             commands::sign::run(&store, network, plan, psbt.as_deref(), json)
         }
         Command::Broadcast { plan, tx } => {
-            commands::broadcast::run(&store, &config, network, plan, tx.as_deref(), json)
+            commands::broadcast::run(&store, network, &services(&config)?, plan, tx.as_deref(), json)
         }
         Command::Grant {
             agent,
@@ -71,6 +104,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Revoke { agent } => commands::revoke::run(&store, network, &agent, json),
         Command::Grants => commands::grants::run(&store, network, json),
         #[cfg(feature = "mcp")]
-        Command::Mcp { agent } => mcp::run(&store, &config, network, &agent),
+        Command::Mcp { agent } => mcp::run(&store, &config, network, &agent, overrides.clone()),
     }
 }

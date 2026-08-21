@@ -80,6 +80,33 @@ pub fn human_duration(secs: u64) -> String {
     }
 }
 
+/// A transient stderr status line, erased when the work finishes.
+pub struct StatusLine {
+    active: bool,
+    len: usize,
+}
+
+impl StatusLine {
+    pub fn start(msg: &str) -> StatusLine {
+        let active = std::io::stderr().is_terminal();
+        if active {
+            eprint!("{msg}");
+            let _ = std::io::stderr().flush();
+        }
+        StatusLine {
+            active,
+            len: msg.chars().count(),
+        }
+    }
+
+    pub fn finish(self) {
+        if self.active {
+            eprint!("\r{}\r", " ".repeat(self.len));
+            let _ = std::io::stderr().flush();
+        }
+    }
+}
+
 /// A bare `[Y/n]` confirmation. Returns the default on empty input; any
 /// non-tty stdin refuses (agents must go through grants, not prompts).
 pub fn confirm(prompt: &str, default_yes: bool) -> anyhow::Result<bool> {

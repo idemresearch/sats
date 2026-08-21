@@ -4,27 +4,20 @@ use sats_core::plan::PlanStatus;
 use sats_core::signer::{LocalSigner, Signer};
 
 use crate::commands::plan;
-use crate::config::Config;
+use crate::provider::Services;
 use crate::store::Store;
 use crate::{keys, ui, walletd};
 
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     store: &Store,
-    config: &Config,
     network: Network,
-    address: &str,
-    amount: u64,
-    fee_rate: Option<u64>,
+    services: &Services,
+    req: &plan::PlanRequest,
     yes: bool,
     json: bool,
 ) -> Result<()> {
-    let mut ctx = walletd::open(store, config, network)?;
-    if let Err(err) = ctx.sync() {
-        eprintln!("✗ sync failed — planning on cached state ({err:#})");
-    }
-
-    let mut plan = plan::build(&mut ctx, address, amount, fee_rate)?;
+    let mut ctx = walletd::open(store, network)?;
+    let mut plan = plan::build(&mut ctx, services, req)?;
     ctx.persist()?;
 
     if !json {
@@ -47,7 +40,7 @@ pub fn run(
     }
 
     let tx = plan.tx()?;
-    match ctx.broadcast(&tx) {
+    match services.broadcast(&mut ctx, &tx) {
         Ok(txid) => {
             plan.status = PlanStatus::Broadcast;
             store.save_plan(ctx.net_name, &plan)?;

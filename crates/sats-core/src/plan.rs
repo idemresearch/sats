@@ -27,6 +27,10 @@ pub struct Plan {
     pub status: PlanStatus,
     /// The PSBT, base64-encoded. Replaced by the signed PSBT after signing.
     pub psbt: String,
+    /// Wallet UTXOs excluded from coin selection (guards ∪ dust heuristic).
+    /// Zero for plans saved before exclusion existed.
+    #[serde(default)]
+    pub excluded_utxos: u64,
 }
 
 impl Plan {

@@ -39,6 +39,8 @@ directories = "6.0"
 anyhow = "1.0"
 humantime = "2.4"
 
+minreq = { version = "2.14", features = ["https-rustls", "json-using-serde"] }
+
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"

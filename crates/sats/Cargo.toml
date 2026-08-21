@@ -33,6 +33,8 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 directories = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
+minreq = { workspace = true }
 humantime = { workspace = true }
 hex = { workspace = true }
 zeroize = { workspace = true }
