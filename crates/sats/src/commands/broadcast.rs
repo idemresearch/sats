@@ -54,9 +54,7 @@ pub fn run(
         store.latest_transaction(ctx.net_name, TransactionStatus::Pending)?
     {
         record
-    } else if let Some(plan) =
-        store.latest_legacy_plan(ctx.net_name, LegacyPlanStatus::Signed)?
-    {
+    } else if let Some(plan) = store.latest_legacy_plan(ctx.net_name, LegacyPlanStatus::Signed)? {
         migrate_legacy_plan(store, ctx.net_name, plan)?
     } else {
         bail!("no pending transactions — run: sats send, or sats plan then sats sign");
@@ -69,10 +67,7 @@ pub fn run(
         }
     }
 
-    let tx = record.tx()?;
-    let txid = services.broadcast(&mut ctx, &tx)?;
-    record.mark_broadcast();
-    store.save_transaction(ctx.net_name, &record)?;
+    let txid = crate::spend::broadcast_record(store, &mut ctx, services, &mut record)?;
     report(json, &txid.to_string());
     Ok(())
 }

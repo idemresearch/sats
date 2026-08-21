@@ -7,6 +7,7 @@ mod keys;
 mod mcp;
 mod password;
 mod provider;
+mod spend;
 mod store;
 mod ui;
 mod walletd;

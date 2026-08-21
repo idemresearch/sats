@@ -250,7 +250,10 @@ impl Store {
         let plan: LegacyPlan = serde_json::from_slice(&bytes)
             .with_context(|| format!("corrupt legacy plan {}", path.display()))?;
         if plan.network != network {
-            bail!("legacy plan network {} does not match {network}", plan.network);
+            bail!(
+                "legacy plan network {} does not match {network}",
+                plan.network
+            );
         }
         Ok(plan)
     }
@@ -480,10 +483,7 @@ mod tests {
         assert!(json.contains("tx_hex"));
         assert!(!json.contains("psbt"));
         assert_eq!(
-            store
-                .load_transaction("signet", "session-id")
-                .unwrap()
-                .txid,
+            store.load_transaction("signet", "session-id").unwrap().txid,
             record.txid
         );
         assert_eq!(
@@ -497,7 +497,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
     }
 
@@ -507,15 +510,8 @@ mod tests {
         let store = Store::open(Some(dir.path())).unwrap();
         let tx = test_transaction();
         let psbt = Psbt::from_unsigned_tx(tx).unwrap();
-        let prepared = PreparedSpend::new(
-            "signet".into(),
-            "tb1ptest".into(),
-            1_000,
-            100,
-            42,
-            0,
-            psbt,
-        );
+        let prepared =
+            PreparedSpend::new("signet".into(), "tb1ptest".into(), 1_000, 100, 42, 0, psbt);
         let session = prepared.session();
 
         store.save_psbt_session("signet", &session).unwrap();
@@ -523,21 +519,14 @@ mod tests {
             .psbt_sessions_dir("signet")
             .join(format!("{}.json", session.id));
         assert_eq!(
-            store
-                .load_psbt_session("signet", &session.id)
-                .unwrap()
-                .id,
+            store.load_psbt_session("signet", &session.id).unwrap().id,
             session.id
         );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
-                fs::metadata(&session_path)
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
+                fs::metadata(&session_path).unwrap().permissions().mode() & 0o777,
                 0o600
             );
         }
@@ -567,11 +556,7 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
-                fs::metadata(legacy_path)
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
+                fs::metadata(legacy_path).unwrap().permissions().mode() & 0o777,
                 0o600
             );
         }

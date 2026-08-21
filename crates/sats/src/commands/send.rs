@@ -1,11 +1,10 @@
 use anyhow::{Result, bail};
 use sats_core::bitcoin::Network;
-use sats_core::signer::{LocalSigner, Signer};
 
 use crate::commands::plan;
 use crate::provider::Services;
 use crate::store::Store;
-use crate::{keys, ui, walletd};
+use crate::{keys, spend, ui, walletd};
 
 pub fn run(
     store: &Store,
@@ -27,12 +26,7 @@ pub fn run(
         return Ok(());
     }
 
-    let mut psbt = prepared.psbt().clone();
-    let mut signer = LocalSigner::new(keys::unlock(store)?, network);
-    if !signer.sign(&mut psbt)? {
-        bail!("signer produced an unfinalized transaction");
-    }
-    let mut record = prepared.into_transaction(psbt, None)?;
+    let mut record = spend::sign_to_record(prepared, keys::unlock(store)?, network, None)?;
     // Persist before any network call. A crash or lost provider response can
     // never strand the only copy of a signed transaction.
     store.save_transaction(ctx.net_name, &record)?;
@@ -40,11 +34,8 @@ pub fn run(
         ui::ok("signed");
     }
 
-    let tx = record.tx()?;
-    match services.broadcast(&mut ctx, &tx) {
+    match spend::broadcast_record(store, &mut ctx, services, &mut record) {
         Ok(txid) => {
-            record.mark_broadcast();
-            store.save_transaction(ctx.net_name, &record)?;
             if json {
                 println!(
                     "{}",

@@ -72,11 +72,7 @@ pub fn run(
 /// that can never succeed (bad address) fails before any network IO, and
 /// spending never plans on stale chain state — a failed sync is a hard
 /// error, as is a configured guard that cannot answer.
-pub fn build(
-    ctx: &mut WalletCtx,
-    services: &Services,
-    req: &PlanRequest,
-) -> Result<PreparedSpend> {
+pub fn build(ctx: &mut WalletCtx, services: &Services, req: &PlanRequest) -> Result<PreparedSpend> {
     let addr = Address::from_str(req.address)
         .map_err(|e| anyhow!("invalid address: {e}"))?
         .require_network(ctx.network)

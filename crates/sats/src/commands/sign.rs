@@ -64,12 +64,12 @@ pub fn run(
         }
     };
 
-    let mut psbt = prepared.psbt().clone();
-    let mut signer = LocalSigner::new(keys::unlock(store)?, network);
-    if !signer.sign(&mut psbt)? {
-        bail!("signer produced an unfinalized transaction");
-    }
-    let record = prepared.into_transaction(psbt, Some(source_id.clone()))?;
+    let record = crate::spend::sign_to_record(
+        prepared,
+        keys::unlock(store)?,
+        network,
+        Some(source_id.clone()),
+    )?;
     store.save_transaction(net_name, &record)?;
     match source {
         Source::Session => store.delete_psbt_session(net_name, &source_id)?,

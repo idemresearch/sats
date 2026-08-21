@@ -4,14 +4,13 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{ErrorData, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use sats_core::authz::{Decision, SpendRequest, authorize_spend};
 use sats_core::bitcoin::Network;
-use sats_core::signer::{LocalSigner, Signer};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -381,12 +380,7 @@ fn execute_send(
     // Sign with the grant-wrapped seed.
     let signed = (|| -> Result<_> {
         let mnemonic = keys::unlock_grant(&grant, net_name)?;
-        let mut psbt = prepared.psbt().clone();
-        let mut signer = LocalSigner::new(mnemonic, network);
-        if !signer.sign(&mut psbt)? {
-            return Err(anyhow!("signer produced an unfinalized transaction"));
-        }
-        Ok(psbt)
+        crate::spend::sign_psbt(&prepared, mnemonic, network)
     })();
     let psbt = match signed {
         Ok(psbt) => psbt,
@@ -407,21 +401,13 @@ fn execute_send(
         return SendResult::error(format!("cannot save signed transaction: {e:#}"));
     }
 
-    let tx = match record.tx() {
-        Ok(tx) => tx,
-        Err(e) => return SendResult::error(format!("{e:#}")),
-    };
-    match services.broadcast(&mut ctx, &tx) {
-        Ok(broadcast_txid) => {
-            record.mark_broadcast();
-            let _ = store.save_transaction(net_name, &record);
-            SendResult::sent(
-                broadcast_txid.to_string(),
-                request.amount_sat,
-                request.fee_sat,
-                grant.remaining_sat(),
-            )
-        }
+    match crate::spend::broadcast_record(store, &mut ctx, &services, &mut record) {
+        Ok(broadcast_txid) => SendResult::sent(
+            broadcast_txid.to_string(),
+            request.amount_sat,
+            request.fee_sat,
+            grant.remaining_sat(),
+        ),
         // Signed but not broadcast: budget stays reserved (the signed tx
         // is out of our hands), and a human can retry the saved transaction.
         Err(e) => SendResult::error(format!(
