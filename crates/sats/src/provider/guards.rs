@@ -4,7 +4,7 @@
 //! set. A guard never authorizes anything and never adds spendable UTXOs.
 //!
 //! Failure is fail-closed: a configured guard that cannot answer stops
-//! planning (see `docs/metaprotocols.md`). The per-invocation escape is the
+//! planning (see `docs/providers.md`). The per-invocation escape is the
 //! caller's `--no-guards`, which skips this module entirely.
 
 use std::collections::{BTreeMap, BTreeSet};

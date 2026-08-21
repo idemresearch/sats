@@ -24,7 +24,7 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo build --release --locked
 
-  # Guards the sats-core WASM-portability promise (docs/phone.md).
+  # Guards the portable-core boundary documented in docs/architecture.md.
   wasm-check:
     runs-on: ubuntu-latest
     steps:
