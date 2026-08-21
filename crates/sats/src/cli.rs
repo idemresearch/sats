@@ -14,6 +14,13 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NET")]
     pub network: Option<String>,
 
+    /// Provider override for the active network, repeatable:
+    /// --provider esplora=URL or --provider subfrost=URL.
+    /// Replaces every configured provider for this invocation.
+    #[arg(long, global = true, value_name = "KIND=URL",
+          value_parser = crate::provider::parse_cli_provider)]
+    pub provider: Vec<crate::provider::CliProvider>,
+
     /// Machine-readable JSON output
     #[arg(long, global = true)]
     pub json: bool,

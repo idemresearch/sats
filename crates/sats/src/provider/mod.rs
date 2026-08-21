@@ -136,6 +136,23 @@ pub struct CliProvider {
     pub url: String,
 }
 
+/// clap value parser for `--provider KIND=URL`. Splits on the first `=`
+/// only, so URLs carrying `=` (API keys) survive intact.
+pub fn parse_cli_provider(s: &str) -> Result<CliProvider, String> {
+    let (kind, url) = s
+        .split_once('=')
+        .ok_or_else(|| "expected KIND=URL (e.g. esplora=https://mempool.space/api)".to_string())?;
+    let kind = DriverKind::from_str(kind)
+        .ok_or_else(|| format!("unknown provider kind {kind:?} (use esplora or subfrost)"))?;
+    if url.is_empty() {
+        return Err("expected KIND=URL with a non-empty url".to_string());
+    }
+    Ok(CliProvider {
+        kind,
+        url: url.to_string(),
+    })
+}
+
 /// A validated provider entry: driver, network binding, capabilities.
 struct ProviderSpec {
     name: String,
@@ -674,6 +691,35 @@ mod tests {
             ChainSource::Esplora(e) => assert_eq!(e.url(), "http://cli.example/api"),
             _ => panic!("expected esplora"),
         }
+    }
+
+    #[test]
+    fn cli_provider_grammar() {
+        let p = parse_cli_provider("esplora=https://mempool.space/api").unwrap();
+        assert_eq!(p.kind, DriverKind::Esplora);
+        assert_eq!(p.url, "https://mempool.space/api");
+        // Only the first '=' splits: path keys containing '=' survive.
+        let p = parse_cli_provider("subfrost=https://x.example/v4/a=b/jsonrpc").unwrap();
+        assert_eq!(p.url, "https://x.example/v4/a=b/jsonrpc");
+        assert!(parse_cli_provider("mempool.space").is_err());
+        assert!(parse_cli_provider("carrier-pigeon=http://x").is_err());
+        assert!(parse_cli_provider("esplora=").is_err());
+    }
+
+    #[test]
+    fn two_cli_sync_providers_are_ambiguous() {
+        let cli = vec![
+            CliProvider {
+                kind: DriverKind::Esplora,
+                url: "http://a.example".into(),
+            },
+            CliProvider {
+                kind: DriverKind::Subfrost,
+                url: "http://b.example".into(),
+            },
+        ];
+        let err = resolve(&config_with(BTreeMap::new()), &cli, Network::Signet).unwrap_err();
+        assert!(matches!(err, ProviderError::Ambiguous { cap: "chain.sync", .. }));
     }
 
     #[test]

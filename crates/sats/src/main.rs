@@ -37,7 +37,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
     // Chain access is resolved lazily per command: purely local commands
     // (receive, sign, grants) never need provider configuration.
-    let services = |config: &Config| provider::resolve(config, &[], network);
+    let overrides = cli.provider;
+    let services = |config: &Config| provider::resolve(config, &overrides, network);
 
     match cli.command {
         Command::Init { words } => commands::init::run(&store, config, network, words),
@@ -103,6 +104,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Revoke { agent } => commands::revoke::run(&store, network, &agent, json),
         Command::Grants => commands::grants::run(&store, network, json),
         #[cfg(feature = "mcp")]
-        Command::Mcp { agent } => mcp::run(&store, &config, network, &agent),
+        Command::Mcp { agent } => mcp::run(&store, &config, network, &agent, overrides.clone()),
     }
 }

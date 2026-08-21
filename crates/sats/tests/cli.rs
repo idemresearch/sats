@@ -204,6 +204,58 @@ fn no_guards_flag_skips_the_asset_check() {
 }
 
 #[test]
+fn provider_flag_overrides_config() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    // Config points at a mock that would fail; the CLI override replaces it
+    // with one that works.
+    let mockdata = write_mock_provider(&dir);
+    std::fs::write(mockdata.join("sync-error"), "config provider down").unwrap();
+    let override_data = dir.path().join("override-mockdata");
+    std::fs::create_dir_all(&override_data).unwrap();
+    let out = sats(&dir)
+        .args([
+            "balance",
+            "--json",
+            "--provider",
+            &format!("mock=file://{}", override_data.display()),
+        ])
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("json output");
+    assert_eq!(json["synced"], true);
+}
+
+#[test]
+fn provider_flag_rejects_bad_grammar() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args(["balance", "--provider", "mempool.space"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("KIND=URL"));
+}
+
+#[test]
+fn two_chain_providers_are_ambiguous() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args([
+            "balance",
+            "--provider",
+            "esplora=http://a.invalid",
+            "--provider",
+            "subfrost=http://b.invalid",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("multiple chain.sync providers"));
+}
+
+#[test]
 fn balance_tolerates_sync_failure_and_reports_it() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);

@@ -15,7 +15,13 @@ use crate::store::{Store, unix_now};
 use crate::ui;
 use crate::walletd;
 
-pub fn run(store: &Store, config: &Config, network: Network, agent: &str) -> Result<()> {
+pub fn run(
+    store: &Store,
+    config: &Config,
+    network: Network,
+    agent: &str,
+    providers: Vec<crate::provider::CliProvider>,
+) -> Result<()> {
     let net_name = network_name(network);
 
     // Fail loudly at startup — `claude mcp add` time — not mid-conversation.
@@ -28,7 +34,7 @@ pub fn run(store: &Store, config: &Config, network: Network, agent: &str) -> Res
     }
     // The wallet must exist, and the provider config must resolve.
     walletd::open(store, network)?;
-    crate::provider::resolve(config, &[], network)?;
+    crate::provider::resolve(config, &providers, network)?;
 
     // stdout is the MCP transport; all logging goes to stderr.
     eprintln!(
@@ -41,6 +47,7 @@ pub fn run(store: &Store, config: &Config, network: Network, agent: &str) -> Res
         store.dir_override().map(|p| p.to_path_buf()),
         network,
         agent.to_string(),
+        providers,
     );
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
