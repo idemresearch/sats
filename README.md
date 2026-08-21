@@ -157,6 +157,8 @@ cargo clippy --workspace --all-targets  # lint
 The runtime grows outward from the same core: a bare `sats` wallet shell,
 `sats psbt inspect/create/finalize` as composable primitives,
 `sats-core.wasm` + `@sats/core` for browsers and apps, and hardware/passkey
-`Signer` backends.
+`Signer` backends. `sats-core` already compiles to `wasm32-unknown-unknown`;
+the phone-without-an-app plan and its priorities live in
+[docs/phone.md](docs/phone.md).
 
 **Not planned for V1:** Lightning, coin control, multi-wallet, RBF.

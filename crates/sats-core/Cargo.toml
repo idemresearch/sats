@@ -20,5 +20,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
+# On wasm32 the OS RNG comes from the browser: getrandom 0.3 (ours) needs the
+# `wasm_js` feature plus `--cfg getrandom_backend="wasm_js"` (see
+# .cargo/config.toml), and the 0.2 line (via bdk/secp/argon2) needs `js`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
 [dev-dependencies]
 bdk_wallet = { workspace = true, features = ["test-utils"] }
