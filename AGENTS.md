@@ -29,12 +29,13 @@ sats is an on-chain Bitcoin wallet with two native surfaces:
 - a human-operated CLI;
 - an MCP server operating under a named, human-created spending grant.
 
-Prepared spends are PSBTs. Normal sends keep them in memory; only an explicit
-staged workflow persists an unsigned PSBT session. Once signed, durable state
-contains private raw transaction hex rather than a signed PSBT. The persisted
-BDK wallet is watch-only. Human and agent sends share validation, sync,
-protection, fee estimation, and preparation. Agent sends add deterministic
-authorization before a signature is produced.
+Prepared spends are PSBTs. Normal sends keep them in memory; an explicit
+export writes the unsigned PSBT to a user-named file artifact, and stored
+PSBT sessions are read-only legacy state from older releases. Once signed,
+durable state contains private raw transaction hex rather than a signed
+PSBT. The persisted BDK wallet is watch-only. Human and agent sends share
+validation, sync, protection, fee estimation, and preparation. Agent sends
+add deterministic authorization before a signature is produced.
 
 Signet is the default. Mainnet must remain an explicit choice.
 

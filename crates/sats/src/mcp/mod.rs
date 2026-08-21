@@ -1,4 +1,4 @@
-//! `sats mcp` — serve wallet tools to an agent over MCP stdio.
+//! `sats agent serve` — serve wallet tools to an agent over MCP stdio.
 //!
 //! The only tokio in the binary lives here (rmcp requires a runtime);
 //! every human-facing command stays synchronous.

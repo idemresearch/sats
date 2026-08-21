@@ -46,23 +46,26 @@ sats init
 sats receive
 sats balance
 sats send tb1p... 25k
+sats status
+sats history
 ```
 
 `send` prepares the transaction, shows its amount and fee, asks for
 confirmation, signs locally, saves the finalized transaction, and broadcasts.
-An explicit PSBT session can run the same lifecycle step by step:
+`send --dry-run` prices the same spend without persisting anything. The
+explicit PSBT lifecycle runs on file artifacts, step by step:
 
 ```sh
-sats plan tb1p... 25k
-sats sign
-sats broadcast
+sats send tb1p... 25k --export-psbt spend.psbt
+sats psbt inspect spend.psbt
+sats psbt sign spend.psbt
+sats tx broadcast <txid>
 ```
 
-Explicit sessions are resumable until signing. After signing, sats removes
-the session and keeps private raw transaction hex for broadcast retry; it does
-not retain the signed PSBT. `sats sign tx.psbt` remains the explicit external
-PSBT-file path. Amounts are integer sats with shorthand: `25k` is 25,000 and
-`1.5m` is 1,500,000.
+After signing, sats keeps private raw transaction hex for broadcast retry; it
+does not retain the signed PSBT. `sats psbt sign tx.psbt` also signs external
+PSBTs from other wallets. Amounts are integer sats with shorthand: `25k` is
+25,000 and `1.5m` is 1,500,000.
 
 See the [CLI reference](docs/cli.md) for all commands, flags, configuration,
 and machine-readable output.
@@ -72,8 +75,8 @@ and machine-readable output.
 Create bounded spending authority, then launch the MCP server as that agent:
 
 ```sh
-sats grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
-claude mcp add sats -- sats mcp --agent claude
+sats agent grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
+claude mcp add sats -- sats agent serve claude
 ```
 
 The agent receives four tools: `get_balance`, `get_receive_address`,
@@ -89,9 +92,10 @@ authority the agent receives a deterministic refusal, not a signature.
 }
 ```
 
-`sats grants` shows current authority. `sats revoke claude` takes effect on
-the agent's next send call, including during an existing MCP session. See the
-[MCP guide](docs/mcp.md) for tool contracts and integration details.
+`sats agent list` shows current authority. `sats agent revoke claude` takes
+effect on the agent's next send call, including during an existing MCP
+session. See the [MCP guide](docs/mcp.md) for tool contracts and integration
+details.
 
 ## Safety model
 
@@ -120,10 +124,10 @@ network, clock, or async-runtime dependencies. `crates/sats` supplies native
 storage, providers, terminal output, the CLI, and the MCP server.
 
 PSBTs are the preparation and signer contract. They stay in memory for normal
-sends and are persisted only for an explicit `sats plan` session. Once fully
-signed, sats persists private raw transaction hex instead; a provider then
-broadcasts it. Agents use the same preparation and safety path as humans, with
-the grant check added before signing.
+sends and leave the wallet only as explicit `--export-psbt` file artifacts.
+Once fully signed, sats persists private raw transaction hex instead; a
+provider then broadcasts it. Agents use the same preparation and safety path
+as humans, with the grant check added before signing.
 
 See [Architecture](docs/architecture.md) for module ownership and end-to-end
 flows, or [AGENTS.md](AGENTS.md) for the implementation rules used by coding

@@ -31,7 +31,7 @@ own.
 |---|---|
 | `authz` | Grant model, spend request, deterministic allow/deny decision, reservation and refund |
 | `engine` | In-memory PSBT preparation and conservative UTXO exclusion |
-| `plan` | Prepared spends, explicit PSBT sessions, finalized transaction records, and legacy-plan conversion |
+| `plan` | Prepared spends, legacy PSBT sessions, finalized transaction records, and legacy-plan conversion |
 | `seed` | BIP-39 generation and parsing; BIP-86 public and private descriptors |
 | `seal` | Versioned Argon2id/XChaCha20-Poly1305 secret envelopes |
 | `signer` | Environment-neutral signer trait and local mnemonic signer |
@@ -68,7 +68,7 @@ isolated runs.
 | Configuration | `config.toml` | Default network and typed providers |
 | Master seed | `seed.sealed` | Password-sealed mnemonic |
 | Wallet | `<network>/wallet.sqlite` | Public descriptors and BDK changes only |
-| PSBT sessions | `<network>/psbts/<id>.json` | Private unsigned PSBT plus review metadata, created only by explicit `sats plan` |
+| PSBT sessions | `<network>/psbts/<id>.json` | Read-only legacy state from older releases' staged workflow; new exports are PSBT file artifacts |
 | Finalized transactions | `<network>/transactions/<txid>.json` | Private raw transaction hex, pending/broadcast status, and payment metadata |
 | Legacy plans | `<network>/plans/<id>.json` | Pre-refactor state; read, permission-hardened, and converted on sign/broadcast |
 | Grants | `<network>/grants/<agent>.json` | Limits, accounting, and grant-wrapped seed |

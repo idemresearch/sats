@@ -1,15 +1,16 @@
 # MCP and agent grants
 
-`sats mcp` exposes a deliberately small wallet surface to one named agent over
-Model Context Protocol stdio. The server does not grant authority by itself;
-it starts only when a human has already created a non-expired grant.
+`sats agent serve` exposes a deliberately small wallet surface to one named
+agent over Model Context Protocol stdio. The server does not grant authority
+by itself; it starts only when a human has already created a non-expired
+grant.
 
 ## Connect an agent
 
 Initialize and fund a wallet, then create a grant:
 
 ```sh
-sats grant claude \
+sats agent grant claude \
   --budget 50k \
   --for 24h \
   --max-tx 10k \
@@ -19,13 +20,13 @@ sats grant claude \
 Configure an MCP client to launch:
 
 ```sh
-sats mcp --agent claude
+sats agent serve claude
 ```
 
 For Claude Code, for example:
 
 ```sh
-claude mcp add sats -- sats mcp --agent claude
+claude mcp add sats -- sats agent serve claude
 ```
 
 Use the same `--network`, `--provider`, and `SATS_DIR` values that identify the
@@ -132,7 +133,7 @@ Operational failure:
 ```json
 {
   "status": "error",
-  "message": "broadcast failed after signing: ... — budget reserved; a human can retry with: sats broadcast --transaction <txid>"
+  "message": "broadcast failed after signing: ... — budget reserved; a human can retry with: sats tx broadcast <txid>"
 }
 ```
 
@@ -177,8 +178,8 @@ broadcast.
 ## Revocation and expiry
 
 ```sh
-sats grants
-sats revoke claude
+sats agent list
+sats agent revoke claude
 ```
 
 Every send reloads the grant from disk. Revocation therefore takes effect on

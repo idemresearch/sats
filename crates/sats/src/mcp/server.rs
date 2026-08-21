@@ -301,7 +301,7 @@ fn execute_send(
     let net_name = network_name(network);
     let now = unix_now();
 
-    // Re-read the grant on every send so `sats revoke` takes effect
+    // Re-read the grant on every send so `sats agent revoke` takes effect
     // immediately, even mid-session.
     let mut grant = match store.load_grant(net_name, agent) {
         Ok(Some(g)) => g,
