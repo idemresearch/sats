@@ -21,6 +21,7 @@ mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
 sats-core = { workspace = true }
 bdk_wallet = { workspace = true, features = ["rusqlite"] }
 bdk_esplora = { workspace = true }
+rusqlite = { workspace = true }
 clap = { workspace = true }
 rmcp = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }

@@ -7,8 +7,8 @@ use std::io::{IsTerminal, Write};
 use anyhow::{Context, Result, bail};
 use bdk_esplora::EsploraExt;
 use bdk_esplora::esplora_client::{self, BlockingClient};
-use bdk_wallet::rusqlite::Connection;
 use bdk_wallet::{PersistedWallet, Wallet};
+use rusqlite::Connection;
 use sats_core::bitcoin::{FeeRate, Network, Transaction, Txid};
 
 use crate::config::{Config, network_name};

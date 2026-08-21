@@ -19,9 +19,25 @@ Sign? [Y/n] y
 
 ## Install
 
+Prebuilt binaries are available for macOS and Linux on x86_64 and ARM64:
+
 ```sh
-curl -fsSL https://sats.sh/install | sh     # coming soon
-cargo install --path crates/sats            # today
+curl -fsSL https://raw.githubusercontent.com/jonatns/sats/main/setup.sh | sh
+```
+
+The installer verifies the release checksum, installs `sats` to
+`~/.local/bin`, and adds that directory to your shell PATH when needed.
+Pin a release or choose another install directory with environment variables:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jonatns/sats/main/setup.sh \
+  | SATS_VERSION=0.1.0 SATS_INSTALL_DIR="$HOME/bin" sh
+```
+
+To build from a checkout instead:
+
+```sh
+cargo install --locked --path crates/sats
 ```
 
 ## The runtime
@@ -151,6 +167,9 @@ Esplora endpoint (`mempool.space` by default, configurable in
 cargo test --workspace                  # offline: unit + CLI + MCP smoke tests
 cargo clippy --workspace --all-targets  # lint
 ```
+
+Stable `vMAJOR.MINOR.PATCH` tags publish release archives automatically; see
+[docs/releasing.md](docs/releasing.md).
 
 ## Next
 
