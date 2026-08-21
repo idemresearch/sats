@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import "./globals.css";
 
@@ -12,6 +12,14 @@ export const metadata: Metadata = {
   icons: {
     icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23141412'/%3E%3Ccircle cx='24' cy='8' r='3' fill='%23f7931a'/%3E%3Cpath d='M9 10.5h10v3H9zm0 5.5h10v3H9z' fill='white'/%3E%3C/svg%3E",
   },
+};
+
+export const viewport: Viewport = {
+  colorScheme: "dark light",
+  themeColor: [
+    { media: "(prefers-color-scheme: dark)", color: "#0b0b0a" },
+    { media: "(prefers-color-scheme: light)", color: "#f6f6f2" },
+  ],
 };
 
 export default function RootLayout({
