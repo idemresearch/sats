@@ -1,4 +1,4 @@
-mod amount;
+use sats_core::amount;
 mod cli;
 mod commands;
 mod config;

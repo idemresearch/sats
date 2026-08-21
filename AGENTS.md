@@ -57,6 +57,8 @@ Signet is the default. Mainnet must remain an explicit choice.
 | `crates/sats/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
 | `crates/sats/src/mcp/` | MCP transport, schemas, and granted agent workflows |
 | `crates/sats/tests/` | Native CLI and MCP integration tests |
+| `crates/sats-web/src/lib.rs` | Browser playground: wasm bindings over sats-core and the simulated chain |
+| `website/` | Project website, including the interactive playground terminal |
 
 `main.rs` is a composition root. Do not put feature logic there.
 
@@ -210,7 +212,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
 cargo build --release --locked
 cargo check -p sats-core --target wasm32-unknown-unknown
+cargo check -p sats-web --target wasm32-unknown-unknown
 ```
+
+After changing `sats-core` or `sats-web`, regenerate the committed playground
+module with `sh scripts/build-playground.sh` (see
+[Development](docs/development.md)).
 
 For user-facing changes, also run the freshly built binary through at least
 one relevant happy path using an isolated `SATS_DIR`. Never claim a change is

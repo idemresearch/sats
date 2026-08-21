@@ -34,3 +34,4 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p sats-core --target wasm32-unknown-unknown
+      - run: cargo check -p sats-web --target wasm32-unknown-unknown

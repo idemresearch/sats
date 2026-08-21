@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/sats-core", "crates/sats"]
+members = ["crates/sats-core", "crates/sats", "crates/sats-web"]
 
 [workspace.package]
 version = "0.1.0"
@@ -40,6 +40,10 @@ anyhow = "1.0"
 humantime = "2.4"
 
 minreq = { version = "2.14", features = ["https-rustls", "json-using-serde"] }
+
+# Pinned so scripts/build-playground.sh can fetch the exact matching
+# prebuilt wasm-bindgen CLI.
+wasm-bindgen = "=0.2.127"
 
 tempfile = "3"
 assert_cmd = "2"
