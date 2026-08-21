@@ -25,7 +25,7 @@ hold the explicit advanced workflows.
 
 | Command | Behavior |
 |---|---|
-| `sats init [--words 12|24]` | Create the sealed seed and the watch-only wallet for the selected network |
+| `sats init [--words 12\|24]` | Create the sealed seed and the watch-only wallet for the selected network |
 | `sats balance [--offline]` | Sync and show confirmed/trusted and pending balances; `--offline` uses cached state |
 | `sats receive` | Reveal and persist the next external receive address |
 | `sats send <address> <amount>` | Prepare, confirm, sign, privately persist raw finalized transaction hex, then broadcast |
