@@ -26,8 +26,9 @@ pub fn run(store: &Store, config: &Config, network: Network, agent: &str) -> Res
         store.delete_grant(net_name, agent)?;
         bail!("grant for {agent:?} has expired — run: sats grant {agent} --budget <sats>");
     }
-    // The wallet must exist too.
-    walletd::open(store, config, network)?;
+    // The wallet must exist, and the provider config must resolve.
+    walletd::open(store, network)?;
+    crate::provider::resolve(config, &[], network)?;
 
     // stdout is the MCP transport; all logging goes to stderr.
     eprintln!(

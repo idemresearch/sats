@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::commands::plan;
 use crate::config::{Config, network_name};
+use crate::provider;
 use crate::store::{Store, unix_now};
 use crate::{keys, walletd};
 
@@ -172,8 +173,9 @@ impl SatsMcp {
         self.blocking(|dir, network, _agent| {
             let store = Store::open(dir.as_deref())?;
             let config = Config::load(&store)?;
-            let mut ctx = walletd::open(&store, &config, network)?;
-            let synced = ctx.sync().is_ok();
+            let services = provider::resolve(&config, &[], network)?;
+            let mut ctx = walletd::open(&store, network)?;
+            let synced = services.sync_wallet(&mut ctx).is_ok();
             let balance = ctx.wallet.balance();
             Ok(BalanceResult {
                 balance_sat: (balance.confirmed + balance.trusted_pending).to_sat(),
@@ -190,8 +192,7 @@ impl SatsMcp {
     async fn get_receive_address(&self) -> Result<Json<AddressResult>, ErrorData> {
         self.blocking(|dir, network, _agent| {
             let store = Store::open(dir.as_deref())?;
-            let config = Config::load(&store)?;
-            let mut ctx = walletd::open(&store, &config, network)?;
+            let mut ctx = walletd::open(&store, network)?;
             let info = ctx
                 .wallet
                 .reveal_next_address(bdk_wallet::KeychainKind::External);
@@ -316,13 +317,16 @@ fn execute_send(
 
     // Plan the transaction to learn the real fee before any decision.
     let planned = (|| -> Result<_> {
-        let mut ctx = walletd::open(store, config, network)?;
-        ctx.sync().map_err(|e| anyhow!("cannot sync: {e:#}"))?;
-        let plan = plan::build(&mut ctx, &params.address, params.amount_sat, None)?;
+        let services = provider::resolve(config, &[], network)?;
+        let mut ctx = walletd::open(store, network)?;
+        services
+            .sync_wallet(&mut ctx)
+            .map_err(|e| anyhow!("cannot sync: {e:#}"))?;
+        let plan = plan::build(&mut ctx, &services, &params.address, params.amount_sat, None)?;
         ctx.persist()?;
-        Ok((ctx, plan))
+        Ok((ctx, services, plan))
     })();
-    let (mut ctx, mut spend_plan) = match planned {
+    let (mut ctx, services, mut spend_plan) = match planned {
         Ok(v) => v,
         Err(e) => return SendResult::error(format!("{e:#}")),
     };
@@ -387,7 +391,7 @@ fn execute_send(
         Ok(tx) => tx,
         Err(e) => return SendResult::error(format!("{e:#}")),
     };
-    match ctx.broadcast(&tx) {
+    match services.broadcast(&mut ctx, &tx) {
         Ok(txid) => {
             spend_plan.status = PlanStatus::Broadcast;
             let _ = store.save_plan(net_name, &spend_plan);

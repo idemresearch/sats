@@ -5,25 +5,26 @@ use sats_core::bitcoin::{Address, Amount, FeeRate, Network};
 use sats_core::engine;
 use sats_core::plan::Plan;
 
-use crate::config::Config;
+use crate::provider::Services;
 use crate::store::{Store, unix_now};
 use crate::walletd::WalletCtx;
 use crate::{ui, walletd};
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     store: &Store,
-    config: &Config,
     network: Network,
+    services: &Services,
     address: &str,
     amount: u64,
     fee_rate: Option<u64>,
     json: bool,
 ) -> Result<()> {
-    let mut ctx = walletd::open(store, config, network)?;
-    if let Err(err) = ctx.sync() {
+    let mut ctx = walletd::open(store, network)?;
+    if let Err(err) = services.sync_wallet(&mut ctx) {
         eprintln!("✗ sync failed — planning on cached state ({err:#})");
     }
-    let plan = build(&mut ctx, address, amount, fee_rate)?;
+    let plan = build(&mut ctx, services, address, amount, fee_rate)?;
     ctx.persist()?;
     store.save_plan(ctx.net_name, &plan)?;
 
@@ -50,6 +51,7 @@ pub fn run(
 /// Parse, estimate, and build — shared by `plan` and `send`.
 pub fn build(
     ctx: &mut WalletCtx,
+    services: &Services,
     address: &str,
     amount: u64,
     fee_rate: Option<u64>,
@@ -63,7 +65,7 @@ pub fn build(
             let sat_vb = u32::try_from(sat_vb).unwrap_or(u32::MAX).max(1);
             FeeRate::from_sat_per_vb_u32(sat_vb)
         }
-        None => ctx
+        None => services
             .estimate_fee_rate(2)
             .context("cannot estimate fee — pass --fee-rate")?,
     };

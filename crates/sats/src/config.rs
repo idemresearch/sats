@@ -10,29 +10,49 @@ use crate::store::{Store, write_atomic};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub network: String,
-    #[serde(default = "default_esplora")]
+    /// Legacy per-network esplora URLs. Still honored (as a chain provider
+    /// below any `[providers.*]` entry), never written by new installs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub esplora: BTreeMap<String, String>,
+    /// Typed providers: endpoints advertising capabilities. See
+    /// `crate::provider` for resolution rules.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub providers: BTreeMap<String, ProviderConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderConfig {
+    /// Driver kind: "esplora" | "subfrost".
+    pub driver: String,
+    /// The one network this endpoint serves.
+    pub network: String,
+    pub url: String,
+    /// Restrict what this provider is used for. Tokens are capability names
+    /// ("chain.sync", "guard.ord", ...) or the group aliases "chain" and
+    /// "guard". Absent = everything the driver offers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthConfig {
+    /// Sent as `Authorization: Bearer <token>` on REST providers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             network: "signet".into(),
-            esplora: default_esplora(),
+            esplora: BTreeMap::new(),
+            providers: BTreeMap::new(),
         }
     }
-}
-
-fn default_esplora() -> BTreeMap<String, String> {
-    BTreeMap::from([
-        ("mainnet".into(), "https://mempool.space/api".into()),
-        ("signet".into(), "https://mempool.space/signet/api".into()),
-        (
-            "testnet4".into(),
-            "https://mempool.space/testnet4/api".into(),
-        ),
-        ("regtest".into(), "http://localhost:3002".into()),
-    ])
 }
 
 impl Config {
@@ -51,14 +71,19 @@ impl Config {
         write_atomic(&store.config_path(), text.as_bytes(), false)
     }
 
-    pub fn esplora_url(&self, network: &str) -> Result<String> {
-        match self.esplora.get(network) {
-            Some(url) => Ok(url.clone()),
-            None => default_esplora()
-                .get(network)
-                .cloned()
-                .with_context(|| format!("no esplora url configured for {network}")),
-        }
+    /// Built-in esplora fallback for a network, used only when neither
+    /// `[providers.*]` nor the legacy `[esplora]` map covers it.
+    pub fn builtin_esplora_url(network: &str) -> Option<String> {
+        Some(
+            match network {
+                "mainnet" => "https://mempool.space/api",
+                "signet" => "https://mempool.space/signet/api",
+                "testnet4" => "https://mempool.space/testnet4/api",
+                "regtest" => "http://localhost:3002",
+                _ => return None,
+            }
+            .to_string(),
+        )
     }
 }
 

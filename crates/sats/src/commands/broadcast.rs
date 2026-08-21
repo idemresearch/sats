@@ -5,19 +5,19 @@ use anyhow::{Context, Result, anyhow, bail};
 use sats_core::bitcoin::{Network, Transaction, consensus};
 use sats_core::plan::PlanStatus;
 
-use crate::config::Config;
+use crate::provider::Services;
 use crate::store::Store;
 use crate::{ui, walletd};
 
 pub fn run(
     store: &Store,
-    config: &Config,
     network: Network,
+    services: &Services,
     plan_id: Option<String>,
     tx_file: Option<&Path>,
     json: bool,
 ) -> Result<()> {
-    let mut ctx = walletd::open(store, config, network)?;
+    let mut ctx = walletd::open(store, network)?;
 
     if let Some(file) = tx_file {
         let text =
@@ -25,7 +25,7 @@ pub fn run(
         let bytes = hex::decode(text.trim()).map_err(|e| anyhow!("not valid tx hex: {e}"))?;
         let tx: Transaction = consensus::encode::deserialize(&bytes)
             .map_err(|e| anyhow!("not a valid transaction: {e}"))?;
-        let txid = ctx.broadcast(&tx)?;
+        let txid = services.broadcast(&mut ctx, &tx)?;
         report(json, &txid.to_string());
         return Ok(());
     }
@@ -43,7 +43,7 @@ pub fn run(
     }
 
     let tx = plan.tx()?;
-    let txid = ctx.broadcast(&tx)?;
+    let txid = services.broadcast(&mut ctx, &tx)?;
     plan.status = PlanStatus::Broadcast;
     store.save_plan(ctx.net_name, &plan)?;
     report(json, &txid.to_string());
