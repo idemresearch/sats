@@ -2,6 +2,14 @@
 set -eu
 
 repo_root=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
+
+# The copy served from https://sats.sh/setup.sh must stay byte-for-byte
+# identical to the audited repository installer (docs/releasing.md).
+if ! cmp -s "$repo_root/setup.sh" "$repo_root/website/public/setup.sh"; then
+    printf 'website/public/setup.sh differs from setup.sh; run: cp setup.sh website/public/setup.sh\n' >&2
+    exit 1
+fi
+
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/sats-installer-test.XXXXXX")
 cleanup() {
     rm -rf "$tmp_dir"

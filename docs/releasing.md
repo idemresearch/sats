@@ -48,4 +48,6 @@ Before announcing a release:
 
 The installer source served from any project domain must remain byte-for-byte
 identical to the repository's `setup.sh`, leaving one implementation to audit
-and test.
+and test. The copy served at `https://sats.sh/setup.sh` is the committed
+`website/public/setup.sh`; `scripts/test-setup.sh` fails when it drifts from
+`setup.sh`, so update both files together.

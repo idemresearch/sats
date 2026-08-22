@@ -3,7 +3,7 @@ import Playground from "@/components/Playground";
 import CopyButton from "@/components/CopyButton";
 
 const INSTALL_CMD =
-  "curl -fsSL https://raw.githubusercontent.com/jonatns/sats/main/setup.sh | sh";
+  "curl -fsSL https://sats.sh/setup.sh | sh";
 
 const humanCommands = [
   "sats init",
