@@ -18,6 +18,40 @@ sats status
 Signet is the default. `init` prints the new mnemonic once; back it up before
 continuing. Mainnet requires `--network mainnet` explicitly.
 
+`init` is the single setup entry point: run bare on a terminal it asks
+whether to create a new wallet or restore one from a mnemonic backup;
+`--restore` and `--words` skip the question.
+
+## Restoring a wallet
+
+```sh
+sats init --restore [--network <NET>]
+```
+
+Restore consumes the mnemonic backup and rebuilds everything else: the
+phrase is entered with hidden input (never as a CLI argument), validated
+against the BIP-39 checksum before anything touches disk, sealed with a new
+password, and the first sync rediscovers the wallet's history on chain via a
+full scan. A parse failure names the mistyped word position when it can;
+nothing is stored until the phrase validates.
+
+Behavior to know before restoring:
+
+- Restore requires an empty data directory. A machine that already holds a
+  seed extends to new networks through plain `sats init` instead.
+- sats derives BIP-86 taproot addresses only (`bc1p…`/`tb1p…`). A phrase
+  from a wallet holding funds on other address types restores successfully
+  but shows those coins as invisible, not gone.
+- The wallet restores onto the selected network — signet unless
+  `--network mainnet` is given.
+- Mainnet restore turns the backup into hot key material that agent grants
+  can draw on, so it requires typing an explicit confirmation phrase. To
+  only watch funds, do not restore a seed onto an online machine.
+- Local records from the old machine — grants, finalized transaction hex,
+  PSBT sessions — are not part of the seed and do not come back; on-chain
+  history does.
+- Non-interactive use reads the phrase from stdin, for scripted recovery.
+
 ## Commands
 
 Everyday commands express intent; the `psbt`, `tx`, and `agent` namespaces
@@ -25,7 +59,7 @@ hold the explicit advanced workflows.
 
 | Command | Behavior |
 |---|---|
-| `sats init [--words 12\|24]` | Create the sealed seed and the watch-only wallet for the selected network |
+| `sats init [--words 12\|24] [--restore]` | Set up the wallet for the selected network: create a new sealed seed, or restore one from a mnemonic backup |
 | `sats balance [--offline]` | Sync and show confirmed/trusted and pending balances; `--offline` uses cached state |
 | `sats receive` | Reveal and persist the next external receive address |
 | `sats send <address> <amount>` | Prepare, confirm, sign, privately persist raw finalized transaction hex, then broadcast |

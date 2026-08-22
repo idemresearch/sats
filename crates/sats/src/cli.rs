@@ -35,11 +35,15 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Create a new wallet
+    /// Set up the wallet: create a new one, or restore from a mnemonic backup
     Init {
-        /// Mnemonic length (12 or 24 words)
-        #[arg(long, default_value_t = 12, value_parser = clap::value_parser!(u8).range(12..=24))]
-        words: u8,
+        /// Mnemonic length for a new wallet (12 or 24 words; implies create)
+        #[arg(long, value_parser = clap::value_parser!(u8).range(12..=24),
+              conflicts_with = "restore")]
+        words: Option<u8>,
+        /// Restore an existing wallet from its mnemonic backup
+        #[arg(long)]
+        restore: bool,
     },
     /// Show the wallet balance
     Balance {

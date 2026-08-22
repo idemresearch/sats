@@ -46,6 +46,114 @@ fn init_refuses_existing_wallet() {
         .stderr(predicate::str::contains("already exists"));
 }
 
+/// Pull the mnemonic out of `sats init`'s stdout (indented six-word rows).
+fn mnemonic_from_init(stdout: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stdout);
+    let words: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("  "))
+        .flat_map(|line| line.split_whitespace())
+        .collect();
+    assert_eq!(words.len(), 12, "expected a 12-word mnemonic in: {text}");
+    words.join(" ")
+}
+
+#[test]
+fn restore_recovers_the_same_wallet() {
+    let original = TempDir::new().unwrap();
+    let out = sats(&original)
+        .arg("init")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let mnemonic = mnemonic_from_init(&out);
+    let addr = sats(&original)
+        .args(["receive", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let addr: serde_json::Value = serde_json::from_slice(&addr).unwrap();
+
+    let restored = TempDir::new().unwrap();
+    sats(&restored)
+        .args(["init", "--restore"])
+        .write_stdin(format!("{mnemonic}\n"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("phrase is valid"))
+        .stdout(predicate::str::contains("wallet restored  signet"));
+    let restored_addr = sats(&restored)
+        .args(["receive", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let restored_addr: serde_json::Value = serde_json::from_slice(&restored_addr).unwrap();
+    assert_eq!(addr["address"], restored_addr["address"]);
+}
+
+#[test]
+fn restore_names_the_mistyped_word() {
+    let dir = TempDir::new().unwrap();
+    sats(&dir)
+        .args(["init", "--restore"])
+        .write_stdin("abandon abandon zzzz abandon abandon abandon abandon abandon abandon abandon abandon about\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("word 3"))
+        .stderr(predicate::str::contains("Nothing was stored"));
+}
+
+#[test]
+fn restore_explains_a_checksum_failure() {
+    let dir = TempDir::new().unwrap();
+    sats(&dir)
+        .args(["init", "--restore"])
+        .write_stdin(format!("{}\n", ["abandon"; 12].join(" ")))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("checksum"))
+        .stderr(predicate::str::contains("cannot affect your funds"));
+}
+
+#[test]
+fn restore_refuses_existing_seed() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args(["init", "--restore"])
+        .write_stdin("ignored\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}
+
+#[test]
+fn mainnet_restore_requires_typed_confirmation() {
+    let dir = TempDir::new().unwrap();
+    sats(&dir)
+        .args(["init", "--restore", "--network", "mainnet"])
+        .write_stdin("y\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cancelled"));
+
+    let confirmed = TempDir::new().unwrap();
+    sats(&confirmed)
+        .args(["init", "--restore", "--network", "mainnet"])
+        .write_stdin(
+            "hot wallet\nabandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about\n",
+        )
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("wallet restored  mainnet"));
+}
+
 #[test]
 fn init_extends_seed_to_second_network() {
     let dir = TempDir::new().unwrap();
