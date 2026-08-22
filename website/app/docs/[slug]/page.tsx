@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import DocMarkdown from "@/components/DocMarkdown";
-import { docTitle, listDocSlugs, readDoc } from "@/lib/docs";
+import { docDescription, docTitle, listDocSlugs, readDoc } from "@/lib/docs";
 
 export const dynamicParams = false;
 
@@ -15,7 +15,13 @@ export async function generateMetadata({
   params: Promise<{ slug: string }>;
 }): Promise<Metadata> {
   const { slug } = await params;
-  return { title: docTitle(readDoc(slug), slug) };
+  const markdown = readDoc(slug);
+  const title = docTitle(markdown, slug);
+  const description = docDescription(
+    markdown,
+    "Documentation for the sats Bitcoin wallet."
+  );
+  return { title, description };
 }
 
 export default async function DocPage({

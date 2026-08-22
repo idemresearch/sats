@@ -1,17 +1,45 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
+import { siteUrl } from "@/lib/site";
 import "@xterm/xterm/css/xterm.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
+  metadataBase: siteUrl(),
   title: {
     default: "sats — a tiny Bitcoin wallet",
     template: "%s · sats",
   },
   description:
     "A tiny on-chain Bitcoin wallet for humans and agents. Keys stay local and agent spending stays inside human-set limits.",
+  alternates: {
+    canonical: "./",
+  },
+  openGraph: {
+    type: "website",
+    siteName: "sats",
+    url: "./",
+    images: [
+      {
+        url: "/og.png",
+        width: 1200,
+        height: 630,
+        alt: "sats — Bitcoin for humans and agents",
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+  },
   icons: {
-    icon: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23141412'/%3E%3Ccircle cx='24' cy='8' r='3' fill='%23f7931a'/%3E%3Cpath d='M9 10.5h10v3H9zm0 5.5h10v3H9z' fill='white'/%3E%3C/svg%3E",
+    icon: [
+      {
+        url: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23141412'/%3E%3Ccircle cx='24' cy='8' r='3' fill='%23f7931a'/%3E%3Cpath d='M9 10.5h10v3H9zm0 5.5h10v3H9z' fill='white'/%3E%3C/svg%3E",
+        type: "image/svg+xml",
+      },
+      { url: "/favicon.png", sizes: "32x32", type: "image/png" },
+    ],
+    apple: "/apple-touch-icon.png",
   },
 };
 
