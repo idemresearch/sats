@@ -302,8 +302,9 @@ fn execute_send(
     let now = unix_now();
 
     // Re-read the grant on every send so `sats agent revoke` takes effect
-    // immediately, even mid-session.
-    let mut grant = match store.load_grant(net_name, agent) {
+    // immediately, even mid-session. This copy is only for the cheap
+    // precheck; the authoritative read happens under the grant lock below.
+    let grant = match store.load_grant(net_name, agent) {
         Ok(Some(g)) => g,
         Ok(None) => {
             return SendResult::denied(
@@ -348,6 +349,27 @@ fn execute_send(
         Err(e) => return SendResult::error(format!("{e:#}")),
     };
 
+    // The budget decision must be atomic with its persistence: hold the
+    // grant lock across re-read → authorize → reserve → save (and any
+    // refund) so concurrent sends cannot double-draw the budget.
+    let grant_lock = match store.lock_grants(net_name) {
+        Ok(lock) => lock,
+        Err(e) => return SendResult::error(format!("cannot lock grant: {e:#}")),
+    };
+    let mut grant = match store.load_grant(net_name, agent) {
+        Ok(Some(g)) => g,
+        Ok(None) => {
+            return SendResult::denied(
+                "revoked",
+                "human authorization required: the grant was revoked".to_string(),
+            );
+        }
+        Err(e) => return SendResult::error(format!("{e:#}")),
+    };
+
+    // Fresh clock for the authoritative decision: preparation synced the
+    // chain and may have taken long enough for the grant to expire.
+    let now = unix_now();
     let request = SpendRequest {
         amount_sat: prepared.amount_sat,
         fee_sat: prepared.fee_sat,
@@ -391,6 +413,8 @@ fn execute_send(
             return SendResult::error(format!("signing failed: {e:#}"));
         }
     };
+    // A signature exists: the reservation is final, no more grant writes.
+    drop(grant_lock);
 
     let mut record = match prepared.into_transaction(psbt, None) {
         Ok(record) => record,

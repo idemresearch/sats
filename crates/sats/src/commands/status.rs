@@ -91,10 +91,8 @@ pub fn run(
     json: bool,
 ) -> Result<()> {
     let mut ctx = walletd::open(store, network)?;
-    if !offline {
-        if let Err(err) = services.sync_wallet(&mut ctx) {
-            eprintln!("✗ sync failed — confirmation state may be stale ({err:#})");
-        }
+    if !offline && let Err(err) = services.sync_wallet(&mut ctx) {
+        eprintln!("✗ sync failed — confirmation state may be stale ({err:#})");
     }
 
     if let Some(id) = txid {

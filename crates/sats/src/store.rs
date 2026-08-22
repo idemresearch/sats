@@ -28,6 +28,11 @@ pub fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Exclusive hold on a network's grant state; released on drop.
+pub struct GrantLock {
+    _file: fs::File,
+}
+
 pub struct Store {
     config_dir: PathBuf,
     data_dir: PathBuf,
@@ -223,6 +228,24 @@ impl Store {
         Ok(())
     }
 
+    /// Take the per-network advisory grant lock. Blocks until any
+    /// concurrent holder releases it. Grant budgets are read-modify-write
+    /// state: every reserve, refund, replacement, or revocation must happen
+    /// under this lock so concurrent sends cannot double-draw a budget and
+    /// a revoked grant cannot be resurrected by an in-flight save. The
+    /// underlying flock-style lock contends between separate opens even
+    /// within one process, so it also serializes sends inside one server.
+    pub fn lock_grants(&self, network: &str) -> Result<GrantLock> {
+        let dir = self.grants_dir(network);
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        let path = dir.join(".lock");
+        let file = fs::File::create(&path)
+            .with_context(|| format!("cannot open grant lock {}", path.display()))?;
+        file.lock()
+            .with_context(|| format!("cannot lock {}", path.display()))?;
+        Ok(GrantLock { _file: file })
+    }
+
     pub fn save_grant(&self, network: &str, grant: &Grant) -> Result<()> {
         let path = self
             .grants_dir(network)
@@ -405,6 +428,21 @@ mod tests {
             None,
             &tx,
         )
+    }
+
+    #[test]
+    fn grant_lock_excludes_a_second_holder() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let held = store.lock_grants("signet").unwrap();
+        // A separate open of the lock file must contend, even in-process.
+        let second = fs::File::create(store.grants_dir("signet").join(".lock")).unwrap();
+        assert!(
+            second.try_lock().is_err(),
+            "lock must exclude concurrent holders"
+        );
+        drop(held);
+        second.try_lock().expect("lock must be free after drop");
     }
 
     #[test]

@@ -286,10 +286,10 @@ fn address_or_script(script: &ScriptBuf, network: Network) -> String {
 }
 
 fn parse_psbt(bytes: &[u8]) -> Result<Psbt> {
-    if let Ok(text) = std::str::from_utf8(bytes) {
-        if let Ok(psbt) = Psbt::from_str(text.trim()) {
-            return Ok(psbt);
-        }
+    if let Ok(text) = std::str::from_utf8(bytes)
+        && let Ok(psbt) = Psbt::from_str(text.trim())
+    {
+        return Ok(psbt);
     }
     Psbt::deserialize(bytes).map_err(|e| anyhow!("not a valid PSBT: {e}"))
 }

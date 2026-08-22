@@ -74,7 +74,12 @@ pub fn run(
         wrapped_seed,
         grant_key,
     };
-    store.save_grant(net_name, &grant)?;
+    // Under the grant lock so an in-flight agent send cannot interleave
+    // its budget write with this replacement.
+    {
+        let _lock = store.lock_grants(net_name)?;
+        store.save_grant(net_name, &grant)?;
+    }
 
     if json {
         println!(

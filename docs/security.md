@@ -84,6 +84,12 @@ signing fails and no signature exists, the reservation is refunded. Once a
 signature exists, the reservation remains even if saving or broadcast fails:
 the transaction is already spendable outside sats.
 
+The decision, reservation, and persistence happen under an advisory
+per-network grant lock, shared with grant creation and revocation.
+Concurrent sends — in one server or across processes — therefore serialize
+their budget decisions instead of double-drawing, and a revocation cannot
+be undone by an in-flight send's write.
+
 The grant file is reloaded for every send. Deleting it with `sats agent revoke`
 therefore takes effect on the next send call, even in an existing MCP session.
 

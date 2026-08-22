@@ -25,6 +25,14 @@ const M_KIB: u32 = 65536;
 const T_COST: u32 = 3;
 const P_COST: u32 = 1;
 
+/// Upper bounds accepted when opening a blob. The KDF parameters are read
+/// from the (unauthenticated) blob header, so without a cap a tampered
+/// file could demand an unbounded allocation before decryption ever runs.
+/// Generous relative to the write-side defaults above.
+const MAX_M_KIB: u32 = 1 << 20; // 1 GiB
+const MAX_T_COST: u32 = 64;
+const MAX_P_COST: u32 = 16;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SealedBlob {
     pub v: u32,
@@ -86,6 +94,11 @@ pub fn open(
     check_version(blob)?;
     if blob.kdf != KDF_ARGON2ID {
         return Err(SealError::UnsupportedKdf(blob.kdf.clone()));
+    }
+    if blob.m_kib > MAX_M_KIB || blob.t > MAX_T_COST || blob.p > MAX_P_COST {
+        return Err(SealError::Malformed(
+            "argon2 parameters out of range".into(),
+        ));
     }
     let salt = b64_field(&blob.salt, "salt")?;
     let key = derive_key(password, &salt, blob.m_kib, blob.t, blob.p)?;
@@ -240,6 +253,17 @@ mod tests {
         assert!(matches!(
             open_with_key(&blob2, &key, AAD),
             Err(SealError::UnsupportedKdf(_))
+        ));
+    }
+
+    #[test]
+    fn oversized_kdf_parameters_rejected() {
+        // A tampered header must not reach key derivation.
+        let mut blob = seal(b"x", b"pw", AAD).unwrap();
+        blob.m_kib = u32::MAX;
+        assert!(matches!(
+            open(&blob, b"pw", AAD),
+            Err(SealError::Malformed(_))
         ));
     }
 
