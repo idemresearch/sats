@@ -55,6 +55,31 @@ export function docTitle(markdown: string, fallback: string): string {
   return match ? match[1].trim() : fallback;
 }
 
+export function docDescription(markdown: string, fallback: string): string {
+  const lines = markdown.split("\n");
+  let index = lines.findIndex((line) => /^#\s/.test(line)) + 1;
+  const paragraph: string[] = [];
+  for (; index < lines.length; index++) {
+    const line = lines[index].trim();
+    if (line === "") {
+      if (paragraph.length > 0) break;
+      continue;
+    }
+    if (/^(#{1,6}\s|[-*]\s|```|\||>)/.test(line)) break;
+    paragraph.push(line);
+  }
+  const text = paragraph
+    .join(" ")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (text === "") return fallback;
+  if (text.length <= 160) return text;
+  return text.slice(0, 157).replace(/\s+\S*$/, "") + "…";
+}
+
 export function rewriteHref(href: string): string {
   if (/^[a-z][a-z0-9+.-]*:/i.test(href) || href.startsWith("#")) return href;
   const [target, fragment] = href.split("#");
