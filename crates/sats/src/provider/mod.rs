@@ -264,10 +264,10 @@ pub fn resolve(
             if candidates.is_empty() {
                 return Ok(fallback.as_ref().filter(|s| s.caps.contains(&cap)));
             }
-            if let Some(name) = prefer {
-                if let Some(spec) = candidates.iter().find(|s| s.name == name) {
-                    return Ok(Some(spec));
-                }
+            if let Some(name) = prefer
+                && let Some(spec) = candidates.iter().find(|s| s.name == name)
+            {
+                return Ok(Some(spec));
             }
             match candidates.len() {
                 1 => Ok(Some(candidates[0])),

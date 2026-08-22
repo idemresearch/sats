@@ -59,7 +59,7 @@ impl PreparedSpend {
     }
 
     pub fn total_sat(&self) -> u64 {
-        self.amount_sat + self.fee_sat
+        self.amount_sat.saturating_add(self.fee_sat)
     }
 
     pub fn psbt(&self) -> &Psbt {
@@ -127,7 +127,9 @@ pub struct PsbtSession {
 
 impl PsbtSession {
     pub fn total_sat(&self) -> u64 {
-        self.amount_sat + self.fee_sat
+        // Saturating: sessions are deserialized state, so the fields are
+        // not trusted to stay within range (matches authz arithmetic).
+        self.amount_sat.saturating_add(self.fee_sat)
     }
 
     pub fn into_prepared(self) -> Result<PreparedSpend, PlanError> {
@@ -212,7 +214,7 @@ impl TransactionRecord {
     }
 
     pub fn total_sat(&self) -> u64 {
-        self.amount_sat + self.fee_sat
+        self.amount_sat.saturating_add(self.fee_sat)
     }
 
     pub fn tx(&self) -> Result<Transaction, PlanError> {
@@ -238,6 +240,43 @@ impl TransactionRecord {
 
     pub fn mark_broadcast(&mut self) {
         self.status = TransactionStatus::Broadcast;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deserialized state is untrusted: extreme values must not overflow.
+    #[test]
+    fn total_saturates_on_deserialized_extremes() {
+        let session = PsbtSession {
+            format_version: FORMAT_VERSION,
+            id: "x".into(),
+            network: "signet".into(),
+            recipient: "tb1p".into(),
+            amount_sat: u64::MAX,
+            fee_sat: 1,
+            created_at: 0,
+            psbt: String::new(),
+            excluded_utxos: 0,
+        };
+        assert_eq!(session.total_sat(), u64::MAX);
+
+        let record = TransactionRecord {
+            format_version: FORMAT_VERSION,
+            txid: String::new(),
+            network: "signet".into(),
+            recipient: "tb1p".into(),
+            amount_sat: 1,
+            fee_sat: u64::MAX,
+            created_at: 0,
+            status: TransactionStatus::Pending,
+            tx_hex: String::new(),
+            excluded_utxos: 0,
+            source_id: None,
+        };
+        assert_eq!(record.total_sat(), u64::MAX);
     }
 }
 
