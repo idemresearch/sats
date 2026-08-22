@@ -18,7 +18,7 @@ every agent spend is checked against human-set limits before signing.
 Prebuilt binaries are available for macOS and Linux on x86_64 and ARM64:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jonatns/sats/main/setup.sh | sh
+curl -fsSL https://sats.sh/setup.sh | sh
 ```
 
 The installer verifies the release checksum, installs `sats` to
@@ -26,7 +26,7 @@ The installer verifies the release checksum, installs `sats` to
 Pin a release or choose another install directory with environment variables:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jonatns/sats/main/setup.sh \
+curl -fsSL https://sats.sh/setup.sh \
   | SATS_VERSION=0.1.0 SATS_INSTALL_DIR="$HOME/bin" sh
 ```
 
