@@ -29,6 +29,31 @@ pub fn parse_mnemonic(s: &str) -> Result<Mnemonic, SeedError> {
     Ok(Mnemonic::parse_in_normalized(Language::English, s.trim())?)
 }
 
+/// A human-actionable reason a backup phrase failed to parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MnemonicProblem {
+    /// 1-based position of a word that is not on the BIP-39 English list.
+    UnknownWord(usize),
+    /// The phrase has this many words; a backup has 12, 15, 18, 21, or 24.
+    WordCount(usize),
+    /// Every word is valid but the checksum fails: one word is wrong or
+    /// two are swapped.
+    Checksum,
+}
+
+/// Classify a [`parse_mnemonic`] failure for user-facing guidance.
+pub fn mnemonic_problem(err: &SeedError) -> Option<MnemonicProblem> {
+    match err {
+        SeedError::Mnemonic(e) => match e {
+            bip39::Error::UnknownWord(index) => Some(MnemonicProblem::UnknownWord(index + 1)),
+            bip39::Error::BadWordCount(count) => Some(MnemonicProblem::WordCount(*count)),
+            bip39::Error::InvalidChecksum => Some(MnemonicProblem::Checksum),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Ephemeral wallet holding private keys, for signing only. Never persisted.
 pub fn signing_wallet(mnemonic: &Mnemonic, network: Network) -> Result<Wallet, SeedError> {
     let seed = Zeroizing::new(mnemonic.to_seed(""));
@@ -120,6 +145,26 @@ mod tests {
                 .to_string(),
             "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr"
         );
+    }
+
+    #[test]
+    fn mnemonic_problems_are_classified() {
+        let unknown = parse_mnemonic("abandon abandon zzzz abandon abandon abandon abandon abandon abandon abandon abandon about").unwrap_err();
+        assert_eq!(
+            mnemonic_problem(&unknown),
+            Some(MnemonicProblem::UnknownWord(3))
+        );
+
+        let count = parse_mnemonic("abandon abandon abandon").unwrap_err();
+        assert_eq!(
+            mnemonic_problem(&count),
+            Some(MnemonicProblem::WordCount(3))
+        );
+
+        let checksum = parse_mnemonic(&["abandon"; 12].join(" ")).unwrap_err();
+        assert_eq!(mnemonic_problem(&checksum), Some(MnemonicProblem::Checksum));
+
+        assert_eq!(mnemonic_problem(&SeedError::BadWordCount), None);
     }
 
     #[test]

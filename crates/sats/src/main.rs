@@ -42,7 +42,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let services = |config: &Config| provider::resolve(config, &overrides, network);
 
     match cli.command {
-        Command::Init { words } => commands::init::run(&store, config, network, words),
+        Command::Init { words, restore } => {
+            commands::init::run(&store, config, network, words, restore, &overrides)
+        }
         Command::Balance { offline } => {
             commands::balance::run(&store, network, &services(&config)?, offline, json)
         }
