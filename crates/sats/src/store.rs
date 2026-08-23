@@ -405,6 +405,78 @@ impl Store {
         write_atomic(&path, &serde_json::to_vec_pretty(request)?, true)
     }
 
+    /// Every agent request for a network, newest first, across agents.
+    /// An unreadable or unsupported file is skipped with a warning rather
+    /// than failing the listing.
+    pub fn list_agent_requests(&self, network: &str) -> Result<Vec<AgentRequest>> {
+        let root = self.agent_requests_dir(network);
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut requests = Vec::new();
+        for agent_entry in fs::read_dir(&root)? {
+            let agent_dir = agent_entry?.path();
+            if !agent_dir.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(&agent_dir)? {
+                let path = entry?.path();
+                if path.extension().is_none_or(|e| e != "json") {
+                    continue;
+                }
+                let readable = fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<AgentRequest>(&bytes).ok());
+                match readable {
+                    Some(request) if request.version_supported() => requests.push(request),
+                    _ => eprintln!("⚠ skipping unreadable agent request {}", path.display()),
+                }
+            }
+        }
+        requests.sort_by_key(|request| std::cmp::Reverse(request.created_at));
+        Ok(requests)
+    }
+
+    /// Resolve one agent request by exact id or unique prefix, across all
+    /// agents. Ambiguity is an explicit error.
+    pub fn find_agent_request(&self, network: &str, id_or_prefix: &str) -> Result<AgentRequest> {
+        let mut matches: Vec<AgentRequest> = self
+            .list_agent_requests(network)?
+            .into_iter()
+            .filter(|request| request.id.starts_with(id_or_prefix))
+            .collect();
+        if let Some(exact) = matches.iter().position(|r| r.id == id_or_prefix) {
+            return Ok(matches.remove(exact));
+        }
+        match matches.len() {
+            0 => bail!("no agent request {id_or_prefix}"),
+            1 => Ok(matches.remove(0)),
+            _ => bail!("request id {id_or_prefix} is ambiguous"),
+        }
+    }
+
+    /// The event log in append order. A torn or unreadable line — a crash
+    /// can leave one at the tail — is skipped with a warning.
+    pub fn list_events(&self, network: &str) -> Result<Vec<AgentEvent>> {
+        let path = self.events_dir(network).join("log.jsonl");
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let contents =
+            fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
+        let mut events = Vec::new();
+        for line in contents.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<AgentEvent>(line) {
+                Ok(event) if event.version_supported() => events.push(event),
+                _ => eprintln!("⚠ skipping unreadable event log line"),
+            }
+        }
+        Ok(events)
+    }
+
     /// Append one event to the network's causal log: single line of JSON,
     /// fsynced, under the log's own lock. Log order is the audit order.
     pub fn append_event(&self, network: &str, event: &AgentEvent) -> Result<()> {

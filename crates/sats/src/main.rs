@@ -93,6 +93,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 commands::revoke::run(&store, network, &name, json)
             }
             cli::AgentCommand::List => commands::grants::run(&store, network, json),
+            cli::AgentCommand::Requests { all } => {
+                commands::requests::run(&store, network, all, json)
+            }
+            cli::AgentCommand::Log { limit, request } => {
+                commands::agent_log::run(&store, network, limit, request.as_deref(), json)
+            }
             #[cfg(feature = "mcp")]
             cli::AgentCommand::Serve { name } => {
                 mcp::run(&store, &config, network, &name, overrides.clone())

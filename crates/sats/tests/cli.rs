@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{init_wallet, sats, write_mock_provider};
+use common::{init_wallet, json_stdout, sats, write_mock_provider};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -586,4 +586,162 @@ fn missing_wallet_points_to_init() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("run: sats init"));
+}
+
+#[test]
+fn agent_requests_lists_pending_denials() {
+    let dir = TempDir::new().unwrap();
+    let requests_dir = dir.path().join("signet/agent-requests/claude");
+    std::fs::create_dir_all(&requests_dir).unwrap();
+    // Fabricate records the way the MCP server writes them: one denied
+    // (pending review), one already sent.
+    let denied = serde_json::json!({
+        "format_version": 1,
+        "id": "k-big-1",
+        "network": "signet",
+        "agent": "claude",
+        "client_request_id": "big-1",
+        "recipient": common::ADDRESS,
+        "amount_sat": 20_000,
+        "intent_digest": "d".repeat(64),
+        "created_at": 1_000,
+        "updated_at": 1_001,
+        "outcome": {
+            "status": "denied",
+            "deny": { "reason": "over_max_tx", "requested_sat": 20_000, "max_tx_sat": 10_000 },
+            "resolved_at": 1_001,
+        },
+    });
+    let sent = serde_json::json!({
+        "format_version": 1,
+        "id": "r-aa00bb11",
+        "network": "signet",
+        "agent": "claude",
+        "recipient": common::ADDRESS,
+        "amount_sat": 4_500,
+        "intent_digest": "e".repeat(64),
+        "created_at": 900,
+        "updated_at": 950,
+        "outcome": { "status": "sent", "txid": "ab".repeat(32), "fee_sat": 281, "resolved_at": 950 },
+    });
+    std::fs::write(requests_dir.join("k-big-1.json"), denied.to_string()).unwrap();
+    std::fs::write(requests_dir.join("r-aa00bb11.json"), sent.to_string()).unwrap();
+    std::fs::write(requests_dir.join("garbage.json"), b"not json").unwrap();
+
+    // Default view: pending denials only; unreadable files warn, not fail.
+    let pending = json_stdout(
+        sats(&dir)
+            .args(["agent", "requests", "--json"])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("skipping unreadable")),
+    );
+    let pending = pending.as_array().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["id"], "k-big-1");
+    assert_eq!(pending[0]["outcome"]["deny"]["reason"], "over_max_tx");
+
+    // --all includes the resolved one.
+    let all = json_stdout(
+        sats(&dir)
+            .args(["agent", "requests", "--all", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(all.as_array().unwrap().len(), 2);
+
+    // The human table names the pending request.
+    sats(&dir)
+        .args(["agent", "requests"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("k-big-1"))
+        .stdout(predicate::str::contains("denied over_max_tx"));
+}
+
+#[test]
+fn agent_log_renders_events_and_filters_by_request() {
+    let dir = TempDir::new().unwrap();
+    let events_dir = dir.path().join("signet/events");
+    std::fs::create_dir_all(&events_dir).unwrap();
+    let line = |request_id: &str, event: serde_json::Value| {
+        let mut object = serde_json::json!({
+            "format_version": 1,
+            "at": 1_000,
+            "network": "signet",
+            "agent": "claude",
+            "request_id": request_id,
+            "intent_digest": "d".repeat(64),
+        });
+        object
+            .as_object_mut()
+            .unwrap()
+            .extend(event.as_object().unwrap().clone());
+        object.to_string()
+    };
+    let log = [
+        line(
+            "k-big-1",
+            serde_json::json!({ "event": "request_received", "recipient": common::ADDRESS, "amount_sat": 20_000 }),
+        ),
+        line(
+            "k-big-1",
+            serde_json::json!({ "event": "denied", "stage": "precheck",
+                "deny": { "reason": "over_max_tx", "requested_sat": 20_000, "max_tx_sat": 10_000 } }),
+        ),
+        line("r-aa00bb11", serde_json::json!({ "event": "replayed" })),
+        // A torn tail line, as a crash mid-append would leave.
+        "{\"format_version\":1,\"at\":1".to_string(),
+    ]
+    .join("\n");
+    std::fs::write(events_dir.join("log.jsonl"), log).unwrap();
+    // The --request filter resolves ids through the request records.
+    let requests_dir = dir.path().join("signet/agent-requests/claude");
+    std::fs::create_dir_all(&requests_dir).unwrap();
+    std::fs::write(
+        requests_dir.join("k-big-1.json"),
+        serde_json::json!({
+            "format_version": 1, "id": "k-big-1", "network": "signet",
+            "agent": "claude", "recipient": common::ADDRESS, "amount_sat": 20_000,
+            "intent_digest": "d".repeat(64), "created_at": 1_000, "updated_at": 1_000,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let events = json_stdout(
+        sats(&dir)
+            .args(["agent", "log", "--json"])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("skipping unreadable event")),
+    );
+    assert_eq!(events.as_array().unwrap().len(), 3);
+
+    let filtered = json_stdout(
+        sats(&dir)
+            .args(["agent", "log", "--request", "k-big", "--json"])
+            .assert()
+            .success(),
+    );
+    let filtered = filtered.as_array().unwrap();
+    assert_eq!(filtered.len(), 2);
+    assert!(filtered.iter().all(|e| e["request_id"] == "k-big-1"));
+
+    // Human render: one line per event with the typed denial code.
+    sats(&dir)
+        .args(["agent", "log"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("over_max_tx at precheck"));
+
+    // --limit keeps the newest events.
+    let limited = json_stdout(
+        sats(&dir)
+            .args(["agent", "log", "--limit", "1", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(limited.as_array().unwrap().len(), 1);
+    assert_eq!(limited.as_array().unwrap()[0]["event"], "replayed");
 }

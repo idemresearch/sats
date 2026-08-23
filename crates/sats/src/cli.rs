@@ -178,6 +178,21 @@ pub enum AgentCommand {
     },
     /// List active grants
     List,
+    /// Review agent send requests (denied ones await a human decision)
+    Requests {
+        /// Include resolved and dismissed requests, not only pending ones
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show the causal log of agent activity, oldest first
+    Log {
+        /// Maximum events to show (the newest N)
+        #[arg(long, default_value_t = 50, value_name = "N")]
+        limit: usize,
+        /// Only events for one request, by id or unique prefix
+        #[arg(long, value_name = "ID")]
+        request: Option<String>,
+    },
     /// Run an MCP server exposing wallet tools as this agent
     #[cfg(feature = "mcp")]
     Serve {

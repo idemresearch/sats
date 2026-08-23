@@ -73,6 +73,8 @@ hold the explicit advanced workflows.
 | `sats agent grant <name>` | Create bounded unattended signing authority |
 | `sats agent revoke <name>` | Delete an agent grant immediately |
 | `sats agent list` | List non-expired grants and remaining budgets |
+| `sats agent requests [--all]` | Review agent send requests; denied ones await a human decision |
+| `sats agent log [--limit N] [--request ID]` | Show the causal event log of agent activity |
 | `sats agent serve <name>` | Serve the four wallet tools for one granted agent over MCP stdio |
 
 ## Global flags
@@ -201,6 +203,25 @@ an active MCP server observes the deletion on its next send call.
 `sats agent serve <name>` runs the MCP server as that agent. See
 [MCP and agent grants](mcp.md) for the tool-level contract.
 
+## Reviewing agent activity
+
+Every agent send is recorded as a durable request, and every state
+transition appends to a per-network event log:
+
+```sh
+sats agent requests            # pending: denied requests awaiting a decision
+sats agent requests --all      # every recorded request, newest first
+sats agent log                 # the causal event chain, oldest first
+sats agent log --request k-big-1
+```
+
+`requests` shows each request's id, agent, recipient, amount, outcome,
+age, and approval state; `--json` returns the full records. `log` renders
+one line per event — received, denied, reserved, signed, broadcast,
+refunded, replayed — and `--request` accepts an id or unique prefix.
+Unreadable records and torn log lines are skipped with a warning; both
+surfaces are purely local and never touch a provider.
+
 ## JSON output
 
 `--json` is implemented for:
@@ -215,7 +236,9 @@ an active MCP server observes the deletion on its next send call.
 - `tx broadcast`;
 - `agent grant`;
 - `agent revoke`;
-- `agent list`.
+- `agent list`;
+- `agent requests`;
+- `agent log`.
 
 JSON field names are compatibility surfaces. Scripts should branch on
 documented status and reason fields rather than human-readable messages.
