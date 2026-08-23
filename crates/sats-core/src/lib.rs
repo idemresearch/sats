@@ -10,6 +10,7 @@ pub mod authz;
 pub mod engine;
 pub mod error;
 pub mod fmt;
+pub mod intent;
 pub mod plan;
 pub mod seal;
 pub mod seed;
