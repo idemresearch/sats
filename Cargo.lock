@@ -1352,6 +1352,7 @@ dependencies = [
  "bdk_wallet",
  "clap",
  "directories",
+ "getrandom 0.3.4",
  "hex",
  "humantime",
  "minreq",
@@ -1360,6 +1361,7 @@ dependencies = [
  "rmcp",
  "rpassword",
  "rusqlite",
+ "sats-alkanes",
  "sats-core",
  "schemars",
  "serde",
@@ -1369,6 +1371,17 @@ dependencies = [
  "tokio",
  "toml",
  "zeroize",
+]
+
+[[package]]
+name = "sats-alkanes"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "sats-core",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

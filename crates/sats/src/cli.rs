@@ -85,6 +85,49 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Alkanes contract tools (experimental, signet-first)
+    Alkanes {
+        #[command(subcommand)]
+        command: AlkanesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AlkanesCommand {
+    /// Fetch a contract's bytecode and show its code hash
+    Inspect {
+        /// Alkane id (e.g. 2:1)
+        #[arg(value_name = "BLOCK:TX")]
+        id: String,
+    },
+    /// Simulate a contract call and show the interpreted result
+    Simulate {
+        /// Alkane id (e.g. 2:1)
+        #[arg(value_name = "BLOCK:TX")]
+        id: String,
+        /// Calldata words (the first is conventionally the opcode)
+        #[arg(value_name = "INPUTS")]
+        inputs: Vec<u128>,
+    },
+    /// Execute a contract call: simulate, confirm, sign, broadcast.
+    /// Refuses mainnet in this release
+    Execute {
+        /// Alkane id (e.g. 2:1)
+        #[arg(value_name = "BLOCK:TX")]
+        id: String,
+        /// Calldata words (the first is conventionally the opcode)
+        #[arg(value_name = "INPUTS")]
+        inputs: Vec<u128>,
+        /// Fee rate in sat/vB (default: estimated for ~2 blocks)
+        #[arg(long, value_name = "SAT_VB")]
+        fee_rate: Option<u64>,
+        /// Sats carried by the pointer output the call's assets land on
+        #[arg(long, value_name = "SATS", default_value_t = 546)]
+        postage: u64,
+        /// Skip the confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -178,6 +221,38 @@ pub enum AgentCommand {
     },
     /// List active grants
     List,
+    /// Approve one denied request exactly once (password required)
+    Approve {
+        /// Request id or unique prefix (see: sats agent requests)
+        id: String,
+        /// Fee ceiling in sats for the approved send (default: twice the
+        /// fee the denial recorded, when it recorded one)
+        #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+        max_fee: Option<u64>,
+        /// Approval lifetime (e.g. 1h, 30m)
+        #[arg(long = "for", default_value = "1h", value_name = "DURATION")]
+        duration: String,
+    },
+    /// Dismiss a request and revoke its unconsumed approval
+    Deny {
+        /// Request id or unique prefix
+        id: String,
+    },
+    /// Review agent send requests (denied ones await a human decision)
+    Requests {
+        /// Include resolved and dismissed requests, not only pending ones
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show the causal log of agent activity, oldest first
+    Log {
+        /// Maximum events to show (the newest N)
+        #[arg(long, default_value_t = 50, value_name = "N")]
+        limit: usize,
+        /// Only events for one request, by id or unique prefix
+        #[arg(long, value_name = "ID")]
+        request: Option<String>,
+    },
     /// Run an MCP server exposing wallet tools as this agent
     #[cfg(feature = "mcp")]
     Serve {

@@ -41,6 +41,9 @@ pub enum Capability {
     GuardOrd,
     GuardAlkanes,
     GuardNative,
+    /// Alkanes contract views: bytecode fetch and call simulation. Read
+    /// only — a view can inform a human, never authorize a spend.
+    AlkanesView,
 }
 
 impl Capability {
@@ -52,6 +55,7 @@ impl Capability {
             Capability::GuardOrd => "guard.ord",
             Capability::GuardAlkanes => "guard.alkanes",
             Capability::GuardNative => "guard.native",
+            Capability::AlkanesView => "alkanes.view",
         }
     }
 
@@ -82,6 +86,9 @@ impl Capability {
             "guard.ord" => vec![Capability::GuardOrd],
             "guard.alkanes" => vec![Capability::GuardAlkanes],
             "guard.native" => vec![Capability::GuardNative],
+            // Exact name only, deliberately outside the "guard" alias: a
+            // view reads contracts, a guard protects UTXOs.
+            "alkanes.view" => vec![Capability::AlkanesView],
             _ => return None,
         })
     }
@@ -118,12 +125,14 @@ impl DriverKind {
                 Capability::ChainBroadcast,
                 Capability::GuardOrd,
                 Capability::GuardAlkanes,
+                Capability::AlkanesView,
             ],
             DriverKind::Mock => &[
                 Capability::ChainSync,
                 Capability::ChainFees,
                 Capability::ChainBroadcast,
                 Capability::GuardNative,
+                Capability::AlkanesView,
             ],
         }
     }
@@ -190,14 +199,21 @@ pub enum BroadcastSource {
     Mock(MockProvider),
 }
 
+#[derive(Debug)]
+pub enum AlkanesSource {
+    Subfrost(SubfrostClient),
+    Mock(MockProvider),
+}
+
 /// The resolved service set for one network: at most one source per chain
-/// capability, any number of guards.
+/// capability, at most one alkanes view, any number of guards.
 #[derive(Debug)]
 pub struct Services {
     network: Network,
     sync: Option<ChainSource>,
     fees: Option<FeeSource>,
     broadcast: Option<BroadcastSource>,
+    alkanes: Option<AlkanesSource>,
     guards: Vec<UtxoGuard>,
 }
 
@@ -287,6 +303,9 @@ pub fn resolve(
     let sync_name = sync_spec.map(|s| s.name.clone());
     let fees_spec = pick(Capability::ChainFees, sync_name.as_deref())?;
     let broadcast_spec = pick(Capability::ChainBroadcast, sync_name.as_deref())?;
+    // Never from the fallback tiers: like guards, an alkanes view is an
+    // explicit trust decision (the esplora fallback cannot offer it).
+    let alkanes_spec = pick(Capability::AlkanesView, sync_name.as_deref())?;
 
     let guards = specs
         .iter()
@@ -315,6 +334,11 @@ pub fn resolve(
             Driver::Esplora(e) => BroadcastSource::Esplora(e.clone()),
             Driver::Subfrost(c) => BroadcastSource::Subfrost(c.clone()),
             Driver::Mock(m) => BroadcastSource::Mock(m.clone()),
+        }),
+        alkanes: alkanes_spec.and_then(|s| match &s.driver {
+            Driver::Subfrost(c) => Some(AlkanesSource::Subfrost(c.clone())),
+            Driver::Mock(m) => Some(AlkanesSource::Mock(m.clone())),
+            Driver::Esplora(_) => None,
         }),
         guards,
     })
@@ -509,6 +533,43 @@ impl Services {
 
     pub fn has_guards(&self) -> bool {
         !self.guards.is_empty()
+    }
+
+    /// Contract bytecode for an alkane id. Validates the endpoint's
+    /// network before trusting its answer.
+    pub fn alkanes_bytecode(&self, block: u128, tx: u128) -> Result<Vec<u8>, ProviderError> {
+        match self
+            .alkanes
+            .as_ref()
+            .ok_or_else(|| self.no_provider(Capability::AlkanesView))?
+        {
+            AlkanesSource::Subfrost(c) => {
+                c.check_network(self.network)?;
+                c.alkanes_bytecode(block, tx)
+            }
+            AlkanesSource::Mock(m) => m.alkanes_bytecode(block, tx),
+        }
+    }
+
+    /// Simulate a contract call; the result is the endpoint's verbatim
+    /// JSON. Advisory only — a simulation never authorizes anything.
+    pub fn alkanes_simulate(
+        &self,
+        block: u128,
+        tx: u128,
+        inputs: &[u128],
+    ) -> Result<serde_json::Value, ProviderError> {
+        match self
+            .alkanes
+            .as_ref()
+            .ok_or_else(|| self.no_provider(Capability::AlkanesView))?
+        {
+            AlkanesSource::Subfrost(c) => {
+                c.check_network(self.network)?;
+                c.alkanes_simulate(block, tx, inputs)
+            }
+            AlkanesSource::Mock(m) => m.alkanes_simulate(),
+        }
     }
 
     /// Ask every configured guard which of these outpoints are protected.

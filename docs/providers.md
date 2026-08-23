@@ -4,9 +4,13 @@ sats treats every external Bitcoin service as a typed provider bound to one
 network. Providers advertise audited capabilities; commands ask for a
 capability rather than depending directly on a particular API.
 
-Metaprotocol data remains external. sats does not parse inscriptions,
-runestones, alkanes, or other asset protocols. A guard answers only which of
-the wallet's outpoints should be excluded from automatic coin selection.
+Guard decisions remain presence-only: sats never interprets protocol
+values when deciding which outpoints to exclude from coin selection, and
+it does not parse inscriptions, runestones, or other asset protocols.
+The one deliberate exception is the explicit `sats alkanes` command
+family, a minimal Alkanes client: sats encodes only call envelopes it
+constructs itself (in the `sats-alkanes` crate, against the published
+reference encoding) and displays view results without trusting them.
 
 ## Capabilities
 
@@ -18,21 +22,26 @@ the wallet's outpoints should be excluded from automatic coin selection.
 | `guard.ord` | Excluding outpoints reported by an ord-compatible view |
 | `guard.alkanes` | Excluding outpoints reported with alkanes balances |
 | `guard.native` | Deterministic native guard contract used by tests |
+| `alkanes.view` | Contract bytecode fetch and call simulation for `sats alkanes` |
 
 Configuration accepts exact names and the aliases `chain` and `guard`.
-Without a `capabilities` filter, a driver advertises every capability it
-implements.
+`alkanes.view` is deliberately outside the `guard` alias — a view reads
+contracts, a guard protects UTXOs. Without a `capabilities` filter, a
+driver advertises every capability it implements.
 
 ## Drivers
 
-| Driver | Chain capabilities | Guard capabilities |
-|---|---|---|
-| `esplora` | sync, fees, broadcast | none |
-| `subfrost` | sync, fees, broadcast | ord, alkanes |
+| Driver | Chain capabilities | Guard capabilities | Views |
+|---|---|---|---|
+| `esplora` | sync, fees, broadcast | none | none |
+| `subfrost` | sync, fees, broadcast | ord, alkanes | alkanes.view |
 
 The Subfrost driver maps the provider's namespaced JSON-RPC methods onto the
 fixed sats capability contract. Guard answers are presence-only; protocol
-values are not interpreted by sats.
+values are not interpreted by sats. Like guards, `alkanes.view` never
+resolves from the legacy or built-in fallback tiers: configuring one is an
+explicit trust decision, and the endpoint's network is validated before any
+view result is used.
 
 ## Default behavior
 

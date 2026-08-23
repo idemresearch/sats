@@ -6,7 +6,7 @@ of feature.
 
 ## Requirements
 
-- Rust 1.85 or newer;
+- Rust 1.89 or newer (the workspace MSRV in `Cargo.toml`);
 - `rustfmt` and Clippy;
 - the `wasm32-unknown-unknown` target;
 - a POSIX shell for installer checks.
@@ -64,8 +64,8 @@ run the full gate before reporting the work ready.
 | Core unit tests | `crates/sats-core/src/` | Preparation, finalized records, authorization, sealing, seed derivation, signing, serialization, amount shorthand |
 | Native unit tests | `crates/sats/src/` | Config, providers, storage, and helpers |
 | Playground unit tests | `crates/sats-web/src/` | Simulated-chain wallet loop, grant lifecycle, denial shapes |
-| CLI integration | `crates/sats/tests/cli.rs` | Isolated wallet flows, failures, providers, guards, and grant lifecycle |
-| MCP integration | `crates/sats/tests/mcp.rs` | Tool schemas, granted sends, startup refusal, and live revocation |
+| CLI integration | `crates/sats/tests/{cli,flow,alkanes}.rs` | Isolated wallet flows, failures, providers, guards, grants, request review, and the alkanes commands |
+| MCP integration | `crates/sats/tests/mcp.rs` | Tool schemas, granted sends, idempotent retries, the approval loop, startup refusal, and live revocation |
 | Installer | `scripts/test-setup.sh` | Targets, checksums, version pinning, PATH edits, and atomic replacement |
 | WASM portability | CI `wasm-check` | `sats-core` and `sats-web` remain buildable for `wasm32-unknown-unknown` |
 

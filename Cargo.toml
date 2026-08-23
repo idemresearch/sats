@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/sats-core", "crates/sats", "crates/sats-web"]
+members = [
+    "crates/sats-core",
+    "crates/sats",
+    "crates/sats-alkanes",
+    "crates/sats-web",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +17,7 @@ rust-version = "1.89"
 
 [workspace.dependencies]
 sats-core = { path = "crates/sats-core" }
+sats-alkanes = { path = "crates/sats-alkanes" }
 
 bdk_wallet = { version = "=3.1.0", features = ["keys-bip39"] }
 bdk_esplora = { version = "0.22.2", default-features = false, features = ["std", "blocking-https-rustls"] }

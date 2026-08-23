@@ -79,7 +79,13 @@ pub fn run(
         return Ok(());
     }
 
-    let mut record = spend::sign_to_record(prepared, keys::unlock(store)?, network, None)?;
+    let mut record = spend::sign_to_record(prepared, keys::unlock(store)?, network, None)?
+        .with_origin(sats_core::plan::TxOrigin {
+            surface: "cli".into(),
+            agent: None,
+            request_id: None,
+            intent_digest: None,
+        });
     // Persist before any network call. A crash or lost provider response can
     // never strand the only copy of a signed transaction.
     store.save_transaction(ctx.net_name, &record)?;

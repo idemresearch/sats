@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use sats_core::authz::Grant;
+use sats_core::event::AgentEvent;
 use sats_core::plan::{LegacyPlan, PsbtSession, TransactionRecord};
+use sats_core::request::AgentRequest;
 use sats_core::seal::SealedBlob;
 
 /// AAD binding the master seed blob to its purpose.
@@ -30,6 +32,14 @@ pub fn unix_now() -> u64 {
 
 /// Exclusive hold on a network's grant state; released on drop.
 pub struct GrantLock {
+    _file: fs::File,
+}
+
+/// Exclusive hold on one agent request's execution; released on drop.
+/// The lock lives in a sibling `.lock` file, never the record itself:
+/// `write_atomic` renames over the record path, which would silently
+/// detach a lock held on it.
+pub struct RequestClaim {
     _file: fs::File,
 }
 
@@ -95,6 +105,14 @@ impl Store {
 
     pub fn grants_dir(&self, network: &str) -> PathBuf {
         self.data_dir.join(network).join("grants")
+    }
+
+    pub fn agent_requests_dir(&self, network: &str) -> PathBuf {
+        self.data_dir.join(network).join("agent-requests")
+    }
+
+    pub fn events_dir(&self, network: &str) -> PathBuf {
+        self.data_dir.join(network).join("events")
     }
 
     pub fn seed_exists(&self) -> bool {
@@ -232,9 +250,11 @@ impl Store {
     /// concurrent holder releases it. Grant budgets are read-modify-write
     /// state: every reserve, refund, replacement, or revocation must happen
     /// under this lock so concurrent sends cannot double-draw a budget and
-    /// a revoked grant cannot be resurrected by an in-flight save. The
-    /// underlying flock-style lock contends between separate opens even
-    /// within one process, so it also serializes sends inside one server.
+    /// a revoked grant cannot be resurrected by an in-flight save. Agent
+    /// request rewrites — outcomes and approvals — share it, so budget and
+    /// approval state serialize as one history. The underlying flock-style
+    /// lock contends between separate opens even within one process, so it
+    /// also serializes sends inside one server.
     pub fn lock_grants(&self, network: &str) -> Result<GrantLock> {
         let dir = self.grants_dir(network);
         fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
@@ -299,6 +319,187 @@ impl Store {
         }
         grants.sort_by(|a, b| a.agent.cmp(&b.agent));
         Ok(grants)
+    }
+
+    /// Atomically create an agent request record and take its execution
+    /// lock. `Ok(None)` means a record with this id already exists — the
+    /// idempotency-hit signal; nothing is written in that case.
+    pub fn create_agent_request(
+        &self,
+        network: &str,
+        request: &AgentRequest,
+    ) -> Result<Option<RequestClaim>> {
+        let dir = self.agent_requests_dir(network).join(&request.agent);
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        let path = dir.join(format!("{}.json", request.id));
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+            Err(err) => {
+                return Err(err).with_context(|| format!("cannot create {}", path.display()));
+            }
+        };
+        // Owner-only before any bytes land: requests carry payment metadata.
+        set_secret_perms(&file, true)?;
+        file.write_all(&serde_json::to_vec_pretty(request)?)?;
+        file.sync_all()?;
+        let claim = self
+            .claim_agent_request(network, &request.agent, &request.id)?
+            .context("freshly created request is already executing")?;
+        Ok(Some(claim))
+    }
+
+    /// Take an existing request's execution lock without blocking.
+    /// `Ok(None)` means another execution holds it right now.
+    pub fn claim_agent_request(
+        &self,
+        network: &str,
+        agent: &str,
+        id: &str,
+    ) -> Result<Option<RequestClaim>> {
+        let dir = self.agent_requests_dir(network).join(agent);
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        let path = dir.join(format!("{id}.lock"));
+        let file = fs::File::create(&path)
+            .with_context(|| format!("cannot open request lock {}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(RequestClaim { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(err)) => {
+                Err(err).with_context(|| format!("cannot lock {}", path.display()))
+            }
+        }
+    }
+
+    pub fn load_agent_request(
+        &self,
+        network: &str,
+        agent: &str,
+        id: &str,
+    ) -> Result<Option<AgentRequest>> {
+        let path = self
+            .agent_requests_dir(network)
+            .join(agent)
+            .join(format!("{id}.json"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path)?;
+        let request: AgentRequest = serde_json::from_slice(&bytes)
+            .with_context(|| format!("corrupt agent request {}", path.display()))?;
+        Ok(Some(request))
+    }
+
+    /// Rewrite a request record. Callers must hold the grant lock: request
+    /// rewrites share it with grant writes so approvals, outcomes, and
+    /// budget decisions serialize as one history.
+    pub fn save_agent_request(&self, network: &str, request: &AgentRequest) -> Result<()> {
+        let path = self
+            .agent_requests_dir(network)
+            .join(&request.agent)
+            .join(format!("{}.json", request.id));
+        write_atomic(&path, &serde_json::to_vec_pretty(request)?, true)
+    }
+
+    /// Every agent request for a network, newest first, across agents.
+    /// An unreadable or unsupported file is skipped with a warning rather
+    /// than failing the listing.
+    pub fn list_agent_requests(&self, network: &str) -> Result<Vec<AgentRequest>> {
+        let root = self.agent_requests_dir(network);
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut requests = Vec::new();
+        for agent_entry in fs::read_dir(&root)? {
+            let agent_dir = agent_entry?.path();
+            if !agent_dir.is_dir() {
+                continue;
+            }
+            for entry in fs::read_dir(&agent_dir)? {
+                let path = entry?.path();
+                if path.extension().is_none_or(|e| e != "json") {
+                    continue;
+                }
+                let readable = fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<AgentRequest>(&bytes).ok());
+                match readable {
+                    Some(request) if request.version_supported() => requests.push(request),
+                    _ => eprintln!("⚠ skipping unreadable agent request {}", path.display()),
+                }
+            }
+        }
+        requests.sort_by_key(|request| std::cmp::Reverse(request.created_at));
+        Ok(requests)
+    }
+
+    /// Resolve one agent request by exact id or unique prefix, across all
+    /// agents. Ambiguity is an explicit error.
+    pub fn find_agent_request(&self, network: &str, id_or_prefix: &str) -> Result<AgentRequest> {
+        let mut matches: Vec<AgentRequest> = self
+            .list_agent_requests(network)?
+            .into_iter()
+            .filter(|request| request.id.starts_with(id_or_prefix))
+            .collect();
+        if let Some(exact) = matches.iter().position(|r| r.id == id_or_prefix) {
+            return Ok(matches.remove(exact));
+        }
+        match matches.len() {
+            0 => bail!("no agent request {id_or_prefix}"),
+            1 => Ok(matches.remove(0)),
+            _ => bail!("request id {id_or_prefix} is ambiguous"),
+        }
+    }
+
+    /// The event log in append order. A torn or unreadable line — a crash
+    /// can leave one at the tail — is skipped with a warning.
+    pub fn list_events(&self, network: &str) -> Result<Vec<AgentEvent>> {
+        let path = self.events_dir(network).join("log.jsonl");
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let contents =
+            fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
+        let mut events = Vec::new();
+        for line in contents.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<AgentEvent>(line) {
+                Ok(event) if event.version_supported() => events.push(event),
+                _ => eprintln!("⚠ skipping unreadable event log line"),
+            }
+        }
+        Ok(events)
+    }
+
+    /// Append one event to the network's causal log: single line of JSON,
+    /// fsynced, under the log's own lock. Log order is the audit order.
+    pub fn append_event(&self, network: &str, event: &AgentEvent) -> Result<()> {
+        let dir = self.events_dir(network);
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        let lock = fs::File::create(dir.join(".lock"))
+            .with_context(|| format!("cannot open event lock in {}", dir.display()))?;
+        lock.lock()
+            .with_context(|| format!("cannot lock event log in {}", dir.display()))?;
+        let path = dir.join("log.jsonl");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("cannot open {}", path.display()))?;
+        // The log names recipients and amounts: owner-only, every open.
+        set_secret_perms(&file, true)?;
+        let mut line = serde_json::to_vec(event)?;
+        line.push(b'\n');
+        let mut file = file;
+        file.write_all(&line)?;
+        file.sync_all()?;
+        Ok(())
     }
 
     pub fn read_seed(&self) -> Result<SealedBlob> {
@@ -443,6 +644,105 @@ mod tests {
         );
         drop(held);
         second.try_lock().expect("lock must be free after drop");
+    }
+
+    fn agent_request(id: &str) -> AgentRequest {
+        AgentRequest {
+            format_version: sats_core::request::REQUEST_FORMAT_VERSION,
+            id: id.into(),
+            network: "signet".into(),
+            agent: "claude".into(),
+            client_request_id: None,
+            recipient: "tb1ptest".into(),
+            amount_sat: 1_000,
+            intent_digest: "d".repeat(64),
+            created_at: 42,
+            updated_at: 42,
+            outcome: None,
+            approval: None,
+            dismissed_at: None,
+        }
+    }
+
+    #[test]
+    fn agent_request_claim_is_exclusive_and_private() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let request = agent_request("k-job-1");
+
+        let claim = store
+            .create_agent_request("signet", &request)
+            .unwrap()
+            .expect("first create claims");
+        // A second create of the same id signals the idempotency hit.
+        assert!(
+            store
+                .create_agent_request("signet", &request)
+                .unwrap()
+                .is_none()
+        );
+        // The execution lock is held: a concurrent claim must not succeed.
+        assert!(
+            store
+                .claim_agent_request("signet", "claude", "k-job-1")
+                .unwrap()
+                .is_none()
+        );
+        drop(claim);
+        let reclaim = store
+            .claim_agent_request("signet", "claude", "k-job-1")
+            .unwrap();
+        assert!(reclaim.is_some(), "released lock must be claimable");
+
+        let loaded = store
+            .load_agent_request("signet", "claude", "k-job-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.id, "k-job-1");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = store
+                .agent_requests_dir("signet")
+                .join("claude")
+                .join("k-job-1.json");
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn event_log_appends_lines_privately() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let event = sats_core::event::AgentEvent {
+            format_version: sats_core::event::EVENT_FORMAT_VERSION,
+            at: 1,
+            network: "signet".into(),
+            agent: "claude".into(),
+            request_id: "k-job-1".into(),
+            intent_digest: "d".repeat(64),
+            kind: sats_core::event::EventKind::Replayed,
+        };
+        store.append_event("signet", &event).unwrap();
+        store.append_event("signet", &event).unwrap();
+        let path = store.events_dir("signet").join("log.jsonl");
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 2);
+        for line in contents.lines() {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(value["event"], "replayed");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
     }
 
     #[test]

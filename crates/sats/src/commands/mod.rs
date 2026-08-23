@@ -1,4 +1,8 @@
+pub mod agent_log;
+pub mod alkanes;
+pub mod approve;
 pub mod balance;
+pub mod deny;
 pub mod grant;
 pub mod grants;
 pub mod history;
@@ -6,6 +10,7 @@ pub mod init;
 pub mod prepare;
 pub mod psbt;
 pub mod receive;
+pub mod requests;
 pub mod revoke;
 pub mod send;
 pub mod status;

@@ -93,10 +93,47 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 commands::revoke::run(&store, network, &name, json)
             }
             cli::AgentCommand::List => commands::grants::run(&store, network, json),
+            cli::AgentCommand::Approve {
+                id,
+                max_fee,
+                duration,
+            } => commands::approve::run(&store, network, &id, max_fee, &duration, json),
+            cli::AgentCommand::Deny { id } => commands::deny::run(&store, network, &id, json),
+            cli::AgentCommand::Requests { all } => {
+                commands::requests::run(&store, network, all, json)
+            }
+            cli::AgentCommand::Log { limit, request } => {
+                commands::agent_log::run(&store, network, limit, request.as_deref(), json)
+            }
             #[cfg(feature = "mcp")]
             cli::AgentCommand::Serve { name } => {
                 mcp::run(&store, &config, network, &name, overrides.clone())
             }
+        },
+        Command::Alkanes { command } => match command {
+            cli::AlkanesCommand::Inspect { id } => {
+                commands::alkanes::inspect(&services(&config)?, &id, json)
+            }
+            cli::AlkanesCommand::Simulate { id, inputs } => {
+                commands::alkanes::simulate(&services(&config)?, &id, &inputs, json)
+            }
+            cli::AlkanesCommand::Execute {
+                id,
+                inputs,
+                fee_rate,
+                postage,
+                yes,
+            } => commands::alkanes::execute(
+                &store,
+                network,
+                &services(&config)?,
+                &id,
+                &inputs,
+                fee_rate,
+                postage,
+                yes,
+                json,
+            ),
         },
     }
 }

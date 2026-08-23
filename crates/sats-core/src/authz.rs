@@ -119,12 +119,71 @@ pub enum DenyReason {
     IntentNotGranted {
         intent: String,
     },
+    ApprovalFeeExceeded {
+        fee_sat: u64,
+        max_fee_sat: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow,
     Deny(DenyReason),
+}
+
+/// A one-time human exception bound to an exact intent digest.
+///
+/// An approval can lift only the grant's quantitative caps (per-tx
+/// amount, per-tx fee, budget). It never survives revocation (the grant
+/// file, and with it the signing key, is gone) and never outranks grant
+/// expiry. Consumption is permanent: one approval authorizes at most one
+/// signature, ever.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntentApproval {
+    /// Digest of the exact [`crate::intent::SendIntent`] the human saw.
+    pub intent_digest: String,
+    pub approved_at: u64,
+    /// Inclusive, matching the grant convention: now >= expires_at is
+    /// expired.
+    pub expires_at: u64,
+    /// Fee ceiling for the approved send. The amount is bound exactly by
+    /// the digest, so this is equivalently a total ceiling.
+    pub max_fee_sat: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumed_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumed_by_request: Option<String>,
+}
+
+impl IntentApproval {
+    pub fn is_expired(&self, now_unix: u64) -> bool {
+        now_unix >= self.expires_at
+    }
+
+    /// Whether this approval can authorize the given intent right now:
+    /// same digest, never consumed, not expired.
+    pub fn is_valid_for(&self, intent_digest: &str, now_unix: u64) -> bool {
+        self.consumed_at.is_none()
+            && !self.is_expired(now_unix)
+            && self.intent_digest == intent_digest
+    }
+}
+
+/// The decision of [`authorize_intent_with_approval`]: an allow records
+/// which authority it drew on, so callers consume the approval only when
+/// it was actually needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    AllowByGrant,
+    AllowByApproval,
+    Deny(DenyReason),
+}
+
+/// Which authority a successful reservation drew on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveVia {
+    Grant,
+    Approval,
 }
 
 /// PURE. Send-shaped view of [`authorize_intent`], for callers that only
@@ -179,6 +238,46 @@ pub fn authorize_intent(grant: &Grant, req: &IntentRequest, now_unix: u64) -> De
     Decision::Allow
 }
 
+/// PURE. [`authorize_intent`] extended with a one-time approval.
+///
+/// The plain decision runs first, unchanged — when it allows, the grant
+/// alone carries the spend and the approval is untouched. A valid
+/// approval (digest match, unconsumed, unexpired) can lift only the
+/// quantitative cap denials — per-tx amount, per-tx fee, budget —
+/// subject to its own fee ceiling. It never lifts grant expiry (the
+/// human's kill switch outranks any earlier exception) and never grants
+/// authority for an intent kind the grant does not carry.
+pub fn authorize_intent_with_approval(
+    grant: &Grant,
+    req: &IntentRequest,
+    intent_digest: &str,
+    approval: Option<&IntentApproval>,
+    now_unix: u64,
+) -> ApprovalDecision {
+    let reason = match authorize_intent(grant, req, now_unix) {
+        Decision::Allow => return ApprovalDecision::AllowByGrant,
+        Decision::Deny(reason) => reason,
+    };
+    match reason {
+        DenyReason::Expired { .. } | DenyReason::IntentNotGranted { .. } => {
+            ApprovalDecision::Deny(reason)
+        }
+        _ => match approval {
+            Some(approval) if approval.is_valid_for(intent_digest, now_unix) => {
+                if req.fee_sat() > approval.max_fee_sat {
+                    ApprovalDecision::Deny(DenyReason::ApprovalFeeExceeded {
+                        fee_sat: req.fee_sat(),
+                        max_fee_sat: approval.max_fee_sat,
+                    })
+                } else {
+                    ApprovalDecision::AllowByApproval
+                }
+            }
+            _ => ApprovalDecision::Deny(reason),
+        },
+    }
+}
+
 impl Grant {
     pub fn remaining_sat(&self) -> u64 {
         self.budget_sat.saturating_sub(self.spent_sat)
@@ -201,6 +300,41 @@ impl Grant {
         }
     }
 
+    /// [`Grant::reserve`] extended with a one-time approval: re-check via
+    /// [`authorize_intent_with_approval`], then draw down. On the approval
+    /// path the draw may exceed the budget — `spent_sat` grows past
+    /// `budget_sat` and `remaining_sat` saturates to zero — and the
+    /// approval is marked consumed. Callers must persist the approval's
+    /// holder before the grant, and the grant before signing.
+    pub fn reserve_with_approval(
+        &mut self,
+        req: &SpendRequest,
+        intent_digest: &str,
+        approval: Option<&mut IntentApproval>,
+        now_unix: u64,
+    ) -> Result<ReserveVia, DenyReason> {
+        let decision = authorize_intent_with_approval(
+            self,
+            &IntentRequest::Send(*req),
+            intent_digest,
+            approval.as_deref(),
+            now_unix,
+        );
+        let via = match decision {
+            ApprovalDecision::AllowByGrant => ReserveVia::Grant,
+            ApprovalDecision::AllowByApproval => {
+                if let Some(approval) = approval {
+                    approval.consumed_at = Some(now_unix);
+                }
+                ReserveVia::Approval
+            }
+            ApprovalDecision::Deny(reason) => return Err(reason),
+        };
+        self.spent_sat = self.spent_sat.saturating_add(req.total_sat());
+        self.tx_count += 1;
+        Ok(via)
+    }
+
     /// Return a reservation whose signing failed. Never refund after a
     /// signature exists — a signed transaction is spendable regardless of
     /// whether the broadcast succeeded.
@@ -218,6 +352,7 @@ impl DenyReason {
             DenyReason::OverMaxFee { .. } => "over_max_fee",
             DenyReason::OverBudget { .. } => "over_budget",
             DenyReason::IntentNotGranted { .. } => "intent_not_granted",
+            DenyReason::ApprovalFeeExceeded { .. } => "approval_fee_exceeded",
         }
     }
 
@@ -253,6 +388,14 @@ impl DenyReason {
             DenyReason::IntentNotGranted { intent } => {
                 format!("grant does not authorize {intent}")
             }
+            DenyReason::ApprovalFeeExceeded {
+                fee_sat,
+                max_fee_sat,
+            } => format!(
+                "fee           {} sat\napproved max  {} sat",
+                format_sats(*fee_sat),
+                format_sats(*max_fee_sat)
+            ),
         }
     }
 }
@@ -516,5 +659,224 @@ mod tests {
         assert_eq!(back.budget_sat, 50_000);
         assert_eq!(back.spent_sat, 12_412);
         assert_eq!(back.remaining_sat(), 37_588);
+    }
+
+    const DIGEST: &str = "d1";
+
+    fn approval(max_fee: u64) -> IntentApproval {
+        IntentApproval {
+            intent_digest: DIGEST.into(),
+            approved_at: NOW - 100,
+            expires_at: 1_900,
+            max_fee_sat: max_fee,
+            consumed_at: None,
+            consumed_by_request: None,
+        }
+    }
+
+    fn decide(
+        g: &Grant,
+        amount: u64,
+        fee: u64,
+        approval: Option<&IntentApproval>,
+    ) -> ApprovalDecision {
+        authorize_intent_with_approval(
+            g,
+            &IntentRequest::Send(req(amount, fee)),
+            DIGEST,
+            approval,
+            NOW,
+        )
+    }
+
+    #[test]
+    fn approval_overrides_each_quantitative_cap() {
+        let a = approval(10_000);
+        // Over max-tx.
+        let g = grant(50_000, 0, Some(10_000), None);
+        assert_eq!(
+            decide(&g, 20_000, 100, Some(&a)),
+            ApprovalDecision::AllowByApproval
+        );
+        // Over max-fee.
+        let g = grant(50_000, 0, None, Some(100));
+        assert_eq!(
+            decide(&g, 1_000, 500, Some(&a)),
+            ApprovalDecision::AllowByApproval
+        );
+        // Over budget.
+        let g = grant(1_000, 0, None, None);
+        assert_eq!(
+            decide(&g, 5_000, 100, Some(&a)),
+            ApprovalDecision::AllowByApproval
+        );
+    }
+
+    #[test]
+    fn approval_never_overrides_expiry() {
+        let g = grant(50_000, 0, Some(10), None);
+        let a = IntentApproval {
+            expires_at: 10_000,
+            ..approval(10_000)
+        };
+        assert!(matches!(
+            authorize_intent_with_approval(
+                &g,
+                &IntentRequest::Send(req(20_000, 100)),
+                DIGEST,
+                Some(&a),
+                5_000, // grant expired at 2_000
+            ),
+            ApprovalDecision::Deny(DenyReason::Expired { .. })
+        ));
+    }
+
+    #[test]
+    fn approval_never_overrides_intent_authority() {
+        let g = grant(50_000, 0, None, None);
+        let a = approval(10_000);
+        assert!(matches!(
+            authorize_intent_with_approval(&g, &swap(1_000, 100), DIGEST, Some(&a), NOW),
+            ApprovalDecision::Deny(DenyReason::IntentNotGranted { .. })
+        ));
+    }
+
+    #[test]
+    fn spent_or_stale_approval_does_not_apply() {
+        let g = grant(50_000, 0, Some(10_000), None);
+        // Consumed.
+        let consumed = IntentApproval {
+            consumed_at: Some(NOW - 10),
+            ..approval(10_000)
+        };
+        assert!(matches!(
+            decide(&g, 20_000, 100, Some(&consumed)),
+            ApprovalDecision::Deny(DenyReason::OverMaxTx { .. })
+        ));
+        // Expired — inclusive boundary, like the grant.
+        let expired = IntentApproval {
+            expires_at: NOW,
+            ..approval(10_000)
+        };
+        assert!(matches!(
+            decide(&g, 20_000, 100, Some(&expired)),
+            ApprovalDecision::Deny(DenyReason::OverMaxTx { .. })
+        ));
+        assert!(expired.is_expired(NOW));
+        // Wrong digest.
+        let other = IntentApproval {
+            intent_digest: "other".into(),
+            ..approval(10_000)
+        };
+        assert!(matches!(
+            decide(&g, 20_000, 100, Some(&other)),
+            ApprovalDecision::Deny(DenyReason::OverMaxTx { .. })
+        ));
+    }
+
+    #[test]
+    fn approval_fee_ceiling_denies_with_typed_code() {
+        let g = grant(50_000, 0, Some(10_000), None);
+        let a = approval(50);
+        let ApprovalDecision::Deny(reason) = decide(&g, 20_000, 51, Some(&a)) else {
+            panic!("expected a denial");
+        };
+        assert_eq!(
+            reason,
+            DenyReason::ApprovalFeeExceeded {
+                fee_sat: 51,
+                max_fee_sat: 50
+            }
+        );
+        assert_eq!(reason.code(), "approval_fee_exceeded");
+        let json = serde_json::to_value(&reason).unwrap();
+        assert_eq!(json["reason"], "approval_fee_exceeded");
+        assert_eq!(json["fee_sat"], 51);
+        assert_eq!(json["max_fee_sat"], 50);
+        // At the ceiling: allowed, matching every other inclusive cap.
+        assert_eq!(
+            decide(&g, 20_000, 50, Some(&a)),
+            ApprovalDecision::AllowByApproval
+        );
+    }
+
+    #[test]
+    fn grant_allow_leaves_approval_unconsumed() {
+        let mut g = grant(50_000, 0, None, None);
+        let mut a = approval(10_000);
+        assert_eq!(
+            decide(&g, 1_000, 100, Some(&a)),
+            ApprovalDecision::AllowByGrant
+        );
+        let via = g
+            .reserve_with_approval(&req(1_000, 100), DIGEST, Some(&mut a), NOW)
+            .unwrap();
+        assert_eq!(via, ReserveVia::Grant);
+        assert!(a.consumed_at.is_none(), "grant path must not consume");
+        assert_eq!(g.spent_sat, 1_100);
+        assert_eq!(g.tx_count, 1);
+    }
+
+    #[test]
+    fn approval_reserve_consumes_and_may_overspend() {
+        let mut g = grant(1_000, 0, None, None);
+        let mut a = approval(10_000);
+        let via = g
+            .reserve_with_approval(&req(5_000, 100), DIGEST, Some(&mut a), NOW)
+            .unwrap();
+        assert_eq!(via, ReserveVia::Approval);
+        assert_eq!(a.consumed_at, Some(NOW));
+        assert_eq!(g.spent_sat, 5_100, "draw exceeds the budget");
+        assert_eq!(g.remaining_sat(), 0, "remaining saturates");
+        // The consumed approval is spent: an identical retry denies.
+        assert!(matches!(
+            g.reserve_with_approval(&req(5_000, 100), DIGEST, Some(&mut a), NOW),
+            Err(DenyReason::OverBudget { .. })
+        ));
+        // And an ordinary in-budget send now denies over_budget too.
+        assert!(matches!(
+            g.reserve(&req(100, 1), NOW),
+            Err(DenyReason::OverBudget { .. })
+        ));
+    }
+
+    #[test]
+    fn refund_after_approval_reserve_restores_spent() {
+        let mut g = grant(1_000, 0, None, None);
+        let mut a = approval(10_000);
+        let r = req(5_000, 100);
+        g.reserve_with_approval(&r, DIGEST, Some(&mut a), NOW)
+            .unwrap();
+        g.refund(&r);
+        assert_eq!(g.spent_sat, 0);
+        assert_eq!(g.tx_count, 0);
+        // The approval stays consumed: refund restores budget, not the
+        // exception. Re-arming takes a fresh human approval.
+        assert_eq!(a.consumed_at, Some(NOW));
+    }
+
+    #[test]
+    fn wrapped_decision_agrees_with_authorize_intent_when_no_approval() {
+        let g = grant(50_000, 45_412, Some(10_000), Some(1_000));
+        for (amount, fee) in [(4_500, 88), (4_500, 89), (10_001, 0), (0, 1_001), (0, 0)] {
+            let plain = authorize_intent(&g, &IntentRequest::Send(req(amount, fee)), NOW);
+            let wrapped = decide(&g, amount, fee, None);
+            match (plain, wrapped) {
+                (Decision::Allow, ApprovalDecision::AllowByGrant) => {}
+                (Decision::Deny(a), ApprovalDecision::Deny(b)) if a == b => {}
+                (plain, wrapped) => {
+                    panic!("diverged for amount {amount} fee {fee}: {plain:?} vs {wrapped:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn approval_json_round_trip() {
+        let a = approval(10_000);
+        let json = serde_json::to_value(&a).unwrap();
+        assert!(json.get("consumed_at").is_none(), "None fields are omitted");
+        let back: IntentApproval = serde_json::from_value(json).unwrap();
+        assert_eq!(back, a);
     }
 }

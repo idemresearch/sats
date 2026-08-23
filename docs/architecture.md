@@ -57,6 +57,15 @@ adapters.
 `main.rs` is the composition root. Leaf feature logic belongs in the owning
 module, not in dispatch.
 
+### `sats-alkanes`
+
+Pure Alkanes protocol composition: alkane ids, LEB128 varints, cellpack
+call encoding, the protostone/runestone OP_RETURN envelope, bytecode
+code-hashing, and tolerant simulation-result views. Byte encodings are
+derived from the published alkanes-rs reference and frozen by unit
+vectors. Environment-agnostic like `sats-core`: chain access, funding,
+and signing stay with the `sats` crate.
+
 ### `sats-web`
 
 The website playground: `sats-core` compiled to WebAssembly behind a small
@@ -82,6 +91,8 @@ isolated runs.
 | Finalized transactions | `<network>/transactions/<txid>.json` | Private raw transaction hex, pending/broadcast status, and payment metadata |
 | Legacy plans | `<network>/plans/<id>.json` | Pre-refactor state; read, permission-hardened, and converted on sign/broadcast |
 | Grants | `<network>/grants/<agent>.json` | Limits, accounting, and grant-wrapped seed |
+| Agent requests | `<network>/agent-requests/<agent>/<id>.json` | One durable record per agent send: canonical intent digest, idempotency key, and resolved outcome |
+| Event log | `<network>/events/log.jsonl` | Append-only causal record of the agent path: one JSON line per state transition |
 
 Wallet state, sessions, transactions, legacy plans, and grants are namespaced
 by Bitcoin network. The sealed master seed is shared so each network derives
@@ -126,13 +137,15 @@ sequenceDiagram
     participant P as Preparation
     participant Z as Authorization
     participant S as Store
-    A->>M: send address, amount
+    A->>M: send address, amount, request_id
+    M->>S: resolve request id, claim request record
     M->>S: reload active grant
     M->>Z: cheap amount precheck
     M->>P: shared safe preparation
     M->>Z: authorize amount plus fee
     M->>S: reserve and persist budget
-    M->>M: sign, save finalized tx, broadcast
+    M->>M: sign, save attributed tx, broadcast
+    M->>S: record outcome and causal events
     M-->>A: sent, denied, or error
 ```
 
@@ -141,6 +154,12 @@ network access. Final authorization uses the prepared fee. Budget is
 persisted before signing; it is refunded only if signing fails before a
 signature exists. Broadcast failure leaves both the finalized transaction
 record and budget reservation intact.
+
+Every agent send is a durable request record: a keyed retry replays a
+signed outcome instead of paying twice, and each state transition —
+received, denied, reserved, signed, broadcast, refunded — appends to the
+per-network event log. Finalized transactions carry an `origin` naming the
+surface, agent, request, and canonical intent digest.
 
 ## Provider model
 
@@ -151,7 +170,8 @@ A provider is bound to one network and advertises audited capabilities:
 - `chain.broadcast`;
 - `guard.ord`;
 - `guard.alkanes`;
-- `guard.native` for deterministic tests.
+- `guard.native` for deterministic tests;
+- `alkanes.view` for the explicit `sats alkanes` contract tools.
 
 Provider resolution is configuration work and performs no network I/O.
 Operations validate the selected network when they execute. See

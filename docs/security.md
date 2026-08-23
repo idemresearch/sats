@@ -93,6 +93,64 @@ be undone by an in-flight send's write.
 The grant file is reloaded for every send. Deleting it with `sats agent revoke`
 therefore takes effect on the next send call, even in an existing MCP session.
 
+## Agent requests, idempotency, and the event log
+
+Every agent send is recorded as a durable request under
+`<network>/agent-requests/<agent>/`, keyed by the agent's optional
+`request_id`, carrying the canonical intent digest (network, agent,
+normalized recipient, amount — never the fee) and the resolved outcome.
+Retrying a key whose earlier execution signed a transaction replays the
+recorded outcome; it can never sign twice. Reusing a key for a different
+intent is a typed error that mutates nothing. Denials are side-effect
+free, so a keyed retry after a denial re-evaluates the same request.
+
+Each state transition of the agent path — request received, denial,
+reservation, refund, signature, broadcast — appends one line to the
+per-network event log at `<network>/events/log.jsonl`, linked by request id
+and intent digest. Finalized transaction records carry an `origin` field
+naming the surface, agent, request, and digest, so an agent-signed
+transaction is attributable after the fact. Request records and the event
+log contain recipients and amounts; both are written owner-only (0600),
+like the transaction records beside them. The log is append-only and never
+pruned by sats.
+
+The event log also makes the one irreducible crash window visible: a
+`reserved` event with no following `signed` or `refunded` means the process
+died between persisting the budget draw and signing — budget is held for a
+transaction that never existed, and a human resolves it by re-granting or
+accepting the drawdown.
+
+## One-time approvals
+
+`sats agent approve` converts one denied request into a single-use
+exception. Its trust model:
+
+- the approval binds the request's canonical intent digest — network,
+  agent, normalized recipient, amount — so it authorizes exactly the send
+  the human reviewed, nothing adjacent;
+- the fee is not part of the digest (it varies per preparation), so the
+  approval carries its own explicit fee ceiling instead, shown before the
+  password prompt; a prepared fee above it is the typed denial
+  `approval_fee_exceeded`;
+- creating an approval requires the wallet password — the prompt is the
+  authorization, exactly as for grant creation. Dismissing a request and
+  revoking its approval (`sats agent deny`) needs no password: reducing
+  authority stays cheap;
+- an approval lifts only the grant's quantitative caps (per-transaction
+  amount, fee, budget). It never overrides grant expiry or revocation:
+  those are the kill switches that withdraw all authority at once, and an
+  exception issued earlier must not survive them — mechanically it cannot,
+  because the signing key lives inside the grant file;
+- consumption is single-use and persisted before the budget draw, under
+  the same per-network lock as every grant write. A crash between the two
+  writes burns the approval without signing — the failing direction is
+  always toward less authority. A signing failure refunds budget but never
+  re-arms the approval; only a fresh `sats agent approve` does.
+
+A stolen approval file entry is inert: it names no key material, binds one
+exact intent, and spends nothing without a live grant. A replayed approval
+is refused by its `consumed_at` mark under the grant lock.
+
 ## MCP boundary
 
 The MCP server starts only when the named agent has a non-expired grant and
@@ -140,6 +198,27 @@ a redacted origin in errors and debug output. Esplora authentication is
 expected in the configured bearer header; its endpoint URL may be displayed
 in diagnostics. Do not embed Esplora credentials in URL paths or queries.
 
+## Alkanes execution
+
+`sats alkanes execute` is human-only and deliberately narrow:
+
+- the OP_RETURN envelope is encoded locally by the `sats-alkanes` crate,
+  against the published reference encoding, frozen by byte-vector tests —
+  the provider composes nothing;
+- simulation and inspection results are advisory display from the
+  configured `alkanes.view` endpoint, never an authorization, and the
+  endpoint's network is validated before any result is shown;
+- the transaction pipeline is the ordinary send tail: dust and guard
+  exclusions with no escape flags, confirmation, password unlock, private
+  persistence before broadcast;
+- mainnet is refused in this release, and no agent surface exists — the
+  MCP server cannot reach any alkanes operation, and no grant can carry
+  alkanes authority.
+
+The wire dialect for the view calls has not been verified against a live
+endpoint; a wrong dialect fails closed as a view error rather than
+composing a transaction from misread data.
+
 ## PSBT and finalized-transaction boundary
 
 PSBTs are the preparation and signer contract. A normal human or agent send
@@ -172,6 +251,7 @@ That is reported as partial rather than treated as a broadcastable success.
 | Malicious asset guard | Restrictive-only result | Can hide funds; incomplete results can miss assets |
 | Broadcast failure | Finalized raw transaction saved before the attempt; agent budget remains reserved | Manual retry or reconciliation is required |
 | Wrong Bitcoin network | Address and provider network validation | Misconfigured third-party responses remain possible |
+| Malicious alkanes view endpoint | Advisory display only; local encoding; mainnet refused | Can mislead the human reviewing a signet call |
 
 ## Operational guidance
 

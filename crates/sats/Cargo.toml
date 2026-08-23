@@ -19,6 +19,7 @@ mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
 
 [dependencies]
 sats-core = { workspace = true }
+sats-alkanes = { workspace = true }
 bdk_wallet = { workspace = true, features = ["rusqlite"] }
 bdk_esplora = { workspace = true }
 rusqlite = { workspace = true }
@@ -38,6 +39,8 @@ minreq = { workspace = true }
 humantime = { workspace = true }
 hex = { workspace = true }
 zeroize = { workspace = true }
+# Random ids for keyless agent requests.
+getrandom = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
