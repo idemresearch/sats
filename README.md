@@ -88,9 +88,17 @@ authority the agent receives a deterministic refusal, not a signature.
 {
   "status": "denied",
   "reason": "over_max_tx",
-  "message": "human authorization required: requested 20,000 sat; max tx 10,000 sat"
+  "message": "human authorization required: requested 20,000 sat; max tx 10,000 sat; a human can approve exactly this request once with: sats agent approve k-invoice-7012",
+  "request_id": "k-invoice-7012"
 }
 ```
+
+A denial is not a dead end: every agent request is recorded, `sats agent
+requests` shows what was denied, and `sats agent approve <id>` authorizes
+exactly that send once — digest-bound, single-use, password-gated. Sends
+carry an idempotency key, so a retried request can never pay twice, and
+`sats agent log` keeps the full causal chain from request through decision
+to transaction.
 
 `sats agent list` shows current authority. `sats agent revoke claude` takes
 effect on the agent's next send call, including during an existing MCP
