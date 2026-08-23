@@ -120,6 +120,37 @@ died between persisting the budget draw and signing — budget is held for a
 transaction that never existed, and a human resolves it by re-granting or
 accepting the drawdown.
 
+## One-time approvals
+
+`sats agent approve` converts one denied request into a single-use
+exception. Its trust model:
+
+- the approval binds the request's canonical intent digest — network,
+  agent, normalized recipient, amount — so it authorizes exactly the send
+  the human reviewed, nothing adjacent;
+- the fee is not part of the digest (it varies per preparation), so the
+  approval carries its own explicit fee ceiling instead, shown before the
+  password prompt; a prepared fee above it is the typed denial
+  `approval_fee_exceeded`;
+- creating an approval requires the wallet password — the prompt is the
+  authorization, exactly as for grant creation. Dismissing a request and
+  revoking its approval (`sats agent deny`) needs no password: reducing
+  authority stays cheap;
+- an approval lifts only the grant's quantitative caps (per-transaction
+  amount, fee, budget). It never overrides grant expiry or revocation:
+  those are the kill switches that withdraw all authority at once, and an
+  exception issued earlier must not survive them — mechanically it cannot,
+  because the signing key lives inside the grant file;
+- consumption is single-use and persisted before the budget draw, under
+  the same per-network lock as every grant write. A crash between the two
+  writes burns the approval without signing — the failing direction is
+  always toward less authority. A signing failure refunds budget but never
+  re-arms the approval; only a fresh `sats agent approve` does.
+
+A stolen approval file entry is inert: it names no key material, binds one
+exact intent, and spends nothing without a live grant. A replayed approval
+is refused by its `consumed_at` mark under the grant lock.
+
 ## MCP boundary
 
 The MCP server starts only when the named agent has a non-expired grant and

@@ -178,6 +178,23 @@ pub enum AgentCommand {
     },
     /// List active grants
     List,
+    /// Approve one denied request exactly once (password required)
+    Approve {
+        /// Request id or unique prefix (see: sats agent requests)
+        id: String,
+        /// Fee ceiling in sats for the approved send (default: twice the
+        /// fee the denial recorded, when it recorded one)
+        #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+        max_fee: Option<u64>,
+        /// Approval lifetime (e.g. 1h, 30m)
+        #[arg(long = "for", default_value = "1h", value_name = "DURATION")]
+        duration: String,
+    },
+    /// Dismiss a request and revoke its unconsumed approval
+    Deny {
+        /// Request id or unique prefix
+        id: String,
+    },
     /// Review agent send requests (denied ones await a human decision)
     Requests {
         /// Include resolved and dismissed requests, not only pending ones

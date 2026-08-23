@@ -745,3 +745,110 @@ fn agent_log_renders_events_and_filters_by_request() {
     assert_eq!(limited.as_array().unwrap().len(), 1);
     assert_eq!(limited.as_array().unwrap()[0]["event"], "replayed");
 }
+
+fn fabricate_denied_request(dir: &TempDir, id: &str) {
+    let requests_dir = dir.path().join("signet/agent-requests/claude");
+    std::fs::create_dir_all(&requests_dir).unwrap();
+    let request = serde_json::json!({
+        "format_version": 1,
+        "id": id,
+        "network": "signet",
+        "agent": "claude",
+        "recipient": common::ADDRESS,
+        "amount_sat": 20_000,
+        "intent_digest": "d".repeat(64),
+        "created_at": 1_000,
+        "updated_at": 1_001,
+        "outcome": {
+            "status": "denied",
+            "deny": { "reason": "over_max_tx", "requested_sat": 20_000, "max_tx_sat": 10_000 },
+            "resolved_at": 1_001,
+        },
+    });
+    std::fs::write(requests_dir.join(format!("{id}.json")), request.to_string()).unwrap();
+}
+
+#[test]
+fn approve_requires_the_password_and_arms_a_single_use_exception() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    fabricate_denied_request(&dir, "k-big-1");
+
+    // The wrong password is a hard failure that writes no approval.
+    sats(&dir)
+        .env("SATS_PASSWORD", "wrong")
+        .args(["agent", "approve", "k-big-1", "--max-fee", "500"])
+        .assert()
+        .failure();
+    let request: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("signet/agent-requests/claude/k-big-1.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(request.get("approval").is_none());
+
+    // This denial recorded no fee estimate, so the ceiling is explicit.
+    sats(&dir)
+        .args(["agent", "approve", "k-big-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--max-fee"));
+
+    let approved = json_stdout(
+        sats(&dir)
+            .args(["agent", "approve", "k-big-1", "--max-fee", "500", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(approved["id"], "k-big-1");
+    assert_eq!(approved["max_fee_sat"], 500);
+    assert_eq!(approved["replaced"], false);
+    let request: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("signet/agent-requests/claude/k-big-1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(request["approval"]["max_fee_sat"], 500);
+    assert_eq!(request["approval"]["intent_digest"], "d".repeat(64));
+
+    // An ambiguous prefix refuses rather than guessing.
+    fabricate_denied_request(&dir, "k-big-2");
+    sats(&dir)
+        .args(["agent", "approve", "k-big", "--max-fee", "500"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ambiguous"));
+}
+
+#[test]
+fn deny_dismisses_and_revokes_the_unconsumed_approval() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    fabricate_denied_request(&dir, "k-big-1");
+    sats(&dir)
+        .args(["agent", "approve", "k-big-1", "--max-fee", "500"])
+        .assert()
+        .success();
+
+    let denied = json_stdout(
+        sats(&dir)
+            .args(["agent", "deny", "k-big-1", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(denied["dismissed"], true);
+    assert_eq!(denied["approval_revoked"], true);
+    let request: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("signet/agent-requests/claude/k-big-1.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(request.get("approval").is_none());
+    assert!(request["dismissed_at"].is_u64());
+
+    // Dismissed requests leave the default review queue.
+    let pending = json_stdout(
+        sats(&dir)
+            .args(["agent", "requests", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(pending.as_array().unwrap().len(), 0);
+}

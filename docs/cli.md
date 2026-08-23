@@ -74,6 +74,8 @@ hold the explicit advanced workflows.
 | `sats agent revoke <name>` | Delete an agent grant immediately |
 | `sats agent list` | List non-expired grants and remaining budgets |
 | `sats agent requests [--all]` | Review agent send requests; denied ones await a human decision |
+| `sats agent approve <id>` | Authorize one denied request exactly once (password required) |
+| `sats agent deny <id>` | Dismiss a request and revoke its unconsumed approval |
 | `sats agent log [--limit N] [--request ID]` | Show the causal event log of agent activity |
 | `sats agent serve <name>` | Serve the four wallet tools for one granted agent over MCP stdio |
 
@@ -222,6 +224,25 @@ refunded, replayed — and `--request` accepts an id or unique prefix.
 Unreadable records and torn log lines are skipped with a warning; both
 surfaces are purely local and never touch a provider.
 
+## Approving one request
+
+```sh
+sats agent approve <id> [--max-fee <SATS>] [--for <DURATION>]
+sats agent deny <id>
+```
+
+`approve` turns one denied request into a single-use exception bound to
+exactly the intent the denial recorded — same agent, recipient, and
+amount. It shows the full recipient and amounts, then requires the wallet
+password: the prompt is the authorization, as with grant creation. The
+approval carries a fee ceiling — `--max-fee`, defaulting to twice the fee
+the denial recorded when one exists — and a lifetime (`--for`, default
+`1h`). The agent's next matching send consumes it; a consumed approval
+never authorizes a second signature, and approvals never survive grant
+revocation or expiry. `deny` dismisses the request and revokes an
+unconsumed approval without a password: reducing authority stays cheap.
+Both accept a request id or unique prefix and support `--json`.
+
 ## JSON output
 
 `--json` is implemented for:
@@ -238,6 +259,8 @@ surfaces are purely local and never touch a provider.
 - `agent revoke`;
 - `agent list`;
 - `agent requests`;
+- `agent approve`;
+- `agent deny`;
 - `agent log`.
 
 JSON field names are compatibility surfaces. Scripts should branch on

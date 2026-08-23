@@ -393,3 +393,174 @@ fn revocation_takes_effect_mid_session() {
     assert_eq!(denial["status"], "denied");
     assert_eq!(denial["reason"], "revoked");
 }
+
+#[test]
+fn approval_loop_end_to_end() {
+    let dir = TempDir::new().unwrap();
+    funded_setup(
+        &dir,
+        &["--budget", "50000", "--max-tx", "10000"],
+        &[100_000],
+    );
+
+    let mut mcp = McpSession::start(&dir, "claude");
+    handshake(&mut mcp);
+    let params = serde_json::json!({
+        "address": ADDRESS, "amount_sat": 20_000, "request_id": "big-1",
+    });
+
+    // Denied over the per-tx cap; the message points the human at the
+    // exact one-time approval command.
+    let denied = mcp.call_tool(2, "send", params.clone());
+    assert_eq!(denied["status"], "denied");
+    assert_eq!(denied["reason"], "over_max_tx");
+    assert_eq!(denied["request_id"], "k-big-1");
+    assert!(
+        denied["message"]
+            .as_str()
+            .unwrap()
+            .contains("sats agent approve k-big-1"),
+        "got: {denied}"
+    );
+
+    // The human approves exactly this request, once.
+    run_sats(&dir, &["agent", "approve", "k-big-1", "--max-fee", "5000"]);
+
+    // The same keyed retry now succeeds, via the approval.
+    let sent = mcp.call_tool(3, "send", params);
+    assert_eq!(sent["status"], "sent", "got: {sent}");
+    assert_eq!(sent["via_approval"], true);
+    let request = read_json(&dir.path().join("signet/agent-requests/claude/k-big-1.json"));
+    assert!(request["approval"]["consumed_at"].is_u64());
+    assert_eq!(request["approval"]["consumed_by_request"], "k-big-1");
+
+    // Single use: the same over-cap send under a fresh key denies again.
+    let again = mcp.call_tool(
+        4,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 20_000, "request_id": "big-2" }),
+    );
+    assert_eq!(again["status"], "denied", "got: {again}");
+    assert_eq!(again["reason"], "over_max_tx");
+}
+
+#[test]
+fn approval_fee_ceiling_denies_typed() {
+    let dir = TempDir::new().unwrap();
+    funded_setup(
+        &dir,
+        &["--budget", "50000", "--max-tx", "10000"],
+        &[100_000],
+    );
+
+    let mut mcp = McpSession::start(&dir, "claude");
+    handshake(&mut mcp);
+    let params = serde_json::json!({
+        "address": ADDRESS, "amount_sat": 20_000, "request_id": "cap-1",
+    });
+    let denied = mcp.call_tool(2, "send", params.clone());
+    assert_eq!(denied["status"], "denied");
+
+    // A one-sat ceiling can never cover a real fee.
+    run_sats(&dir, &["agent", "approve", "k-cap-1", "--max-fee", "1"]);
+    let over = mcp.call_tool(3, "send", params);
+    assert_eq!(over["status"], "denied", "got: {over}");
+    assert_eq!(over["reason"], "approval_fee_exceeded");
+    // The ceiling check ran before consumption: the approval survives.
+    let request = read_json(&dir.path().join("signet/agent-requests/claude/k-cap-1.json"));
+    assert!(request["approval"]["consumed_at"].is_null());
+}
+
+#[test]
+fn approval_does_not_override_revocation() {
+    let dir = TempDir::new().unwrap();
+    run_sats(&dir, &["init"]);
+    run_sats(
+        &dir,
+        &[
+            "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
+        ],
+    );
+
+    let mut mcp = McpSession::start(&dir, "claude");
+    handshake(&mut mcp);
+    let params = serde_json::json!({
+        "address": ADDRESS, "amount_sat": 20_000, "request_id": "rev-1",
+    });
+    let denied = mcp.call_tool(2, "send", params.clone());
+    assert_eq!(denied["status"], "denied");
+    run_sats(&dir, &["agent", "approve", "k-rev-1", "--max-fee", "5000"]);
+    run_sats(&dir, &["agent", "revoke", "claude"]);
+
+    let after = mcp.call_tool(3, "send", params);
+    assert_eq!(after["status"], "denied", "got: {after}");
+    assert_eq!(after["reason"], "revoked");
+}
+
+#[test]
+fn approval_does_not_override_grant_expiry() {
+    let dir = TempDir::new().unwrap();
+    run_sats(&dir, &["init"]);
+    run_sats(
+        &dir,
+        &[
+            "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
+        ],
+    );
+
+    let mut mcp = McpSession::start(&dir, "claude");
+    handshake(&mut mcp);
+    let params = serde_json::json!({
+        "address": ADDRESS, "amount_sat": 20_000, "request_id": "exp-1",
+    });
+    let denied = mcp.call_tool(2, "send", params.clone());
+    assert_eq!(denied["status"], "denied");
+    run_sats(&dir, &["agent", "approve", "k-exp-1", "--max-fee", "5000"]);
+
+    // Force the grant past its expiry; the armed approval must not save it.
+    let grant_path = dir.path().join("signet/grants/claude.json");
+    let mut grant = read_json(&grant_path);
+    grant["expires_at"] = serde_json::json!(1);
+    std::fs::write(&grant_path, grant.to_string()).unwrap();
+
+    let after = mcp.call_tool(3, "send", params);
+    assert_eq!(after["status"], "denied", "got: {after}");
+    assert_eq!(after["reason"], "expired");
+}
+
+#[test]
+fn keyed_retry_consumes_an_approval_held_by_a_keyless_request() {
+    let dir = TempDir::new().unwrap();
+    funded_setup(
+        &dir,
+        &["--budget", "50000", "--max-tx", "10000"],
+        &[100_000],
+    );
+
+    let mut mcp = McpSession::start(&dir, "claude");
+    handshake(&mut mcp);
+    // A keyless request gets denied and holds the approval.
+    let denied = mcp.call_tool(
+        2,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 20_000 }),
+    );
+    assert_eq!(denied["status"], "denied");
+    let holder_id = denied["request_id"].as_str().unwrap().to_string();
+    run_sats(&dir, &["agent", "approve", &holder_id, "--max-fee", "5000"]);
+
+    // A keyed retry of the same intent finds and consumes it.
+    let sent = mcp.call_tool(
+        3,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 20_000, "request_id": "big-9" }),
+    );
+    assert_eq!(sent["status"], "sent", "got: {sent}");
+    assert_eq!(sent["via_approval"], true);
+    let holder = read_json(
+        &dir.path()
+            .join("signet/agent-requests/claude")
+            .join(format!("{holder_id}.json")),
+    );
+    assert_eq!(holder["approval"]["consumed_by_request"], "k-big-9");
+}

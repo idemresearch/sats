@@ -93,6 +93,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 commands::revoke::run(&store, network, &name, json)
             }
             cli::AgentCommand::List => commands::grants::run(&store, network, json),
+            cli::AgentCommand::Approve {
+                id,
+                max_fee,
+                duration,
+            } => commands::approve::run(&store, network, &id, max_fee, &duration, json),
+            cli::AgentCommand::Deny { id } => commands::deny::run(&store, network, &id, json),
             cli::AgentCommand::Requests { all } => {
                 commands::requests::run(&store, network, all, json)
             }

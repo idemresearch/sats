@@ -1,5 +1,7 @@
 pub mod agent_log;
+pub mod approve;
 pub mod balance;
+pub mod deny;
 pub mod grant;
 pub mod grants;
 pub mod history;

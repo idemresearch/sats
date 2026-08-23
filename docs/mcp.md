@@ -186,9 +186,29 @@ Supported reason codes are:
 | `over_max_fee` | Planned fee exceeds the fee cap |
 | `over_budget` | Amount plus fee exceeds remaining budget |
 | `revoked` | The grant file no longer exists |
+| `approval_fee_exceeded` | The prepared fee exceeds a one-time approval's ceiling |
 
-An agent should relay the denial to its human and stop. Retrying the same
-request cannot expand authority.
+An agent should relay the denial — including its `request_id` — to its
+human and stop. Retrying the same request unchanged cannot expand
+authority; what can change the answer is a human decision.
+
+## One-time approvals
+
+A cap denial (`over_max_tx`, `over_max_fee`, `over_budget`) is not a dead
+end: the denied request persists, and its message names the exact command —
+`sats agent approve <request-id>` — that lets a human authorize precisely
+that send, once. The approval binds the request's canonical intent digest
+(network, agent, recipient, amount), carries its own fee ceiling and
+expiry, and is consumed by the first matching send. After the human
+approves, the agent retries the identical send — same address, same
+amount, ideally the same `request_id` — and the result carries
+`via_approval: true`.
+
+Approvals never override revocation or grant expiry: those are the human's
+kill switches, and an exception issued earlier does not survive them. A
+consumed approval never authorizes a second signature; re-running
+`sats agent approve` is a fresh human decision. `sats agent deny <id>`
+dismisses a request and revokes its unconsumed approval.
 
 ## Send lifecycle
 

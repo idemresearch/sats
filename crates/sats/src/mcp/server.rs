@@ -120,6 +120,10 @@ pub struct SendResult {
     /// request_id_conflict, request_in_flight, request_incomplete.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// True when this send was authorized by a one-time human approval
+    /// rather than the grant's standing caps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via_approval: Option<bool>,
 }
 
 impl SendResult {
@@ -135,6 +139,7 @@ impl SendResult {
             message: None,
             request_id: None,
             error_code: None,
+            via_approval: None,
         }
     }
 
@@ -150,6 +155,7 @@ impl SendResult {
             message: Some(message),
             request_id: None,
             error_code: None,
+            via_approval: None,
         }
     }
 
@@ -165,6 +171,7 @@ impl SendResult {
             message: Some(message),
             request_id: None,
             error_code: None,
+            via_approval: None,
         }
     }
 
@@ -197,6 +204,63 @@ fn valid_request_key(key: &str) -> bool {
         && key
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// A denial the human can act on: cap denials name the exact one-time
+/// exception command; expiry and revocation cannot be approved away.
+fn denial_with_hint(reason: &DenyReason, request_id: &str) -> SendResult {
+    let mut result = denial(reason);
+    let approvable = matches!(
+        reason,
+        DenyReason::OverMaxTx { .. }
+            | DenyReason::OverMaxFee { .. }
+            | DenyReason::OverBudget { .. }
+            | DenyReason::ApprovalFeeExceeded { .. }
+    );
+    if approvable && let Some(message) = &mut result.message {
+        message.push_str(&format!(
+            "; a human can approve exactly this request once with: sats agent approve {request_id}"
+        ));
+    }
+    result.with_request(request_id)
+}
+
+/// The one approval that can authorize this intent right now, and a fresh
+/// read of the record holding it. The executing request's own approval
+/// wins; otherwise the lexicographically smallest holder, so concurrent
+/// lookups pick the same one.
+fn current_approval(
+    store: &Store,
+    net_name: &str,
+    agent: &str,
+    digest: &str,
+    executing_id: &str,
+    now: u64,
+) -> Option<(sats_core::authz::IntentApproval, AgentRequest)> {
+    if let Ok(Some(own)) = store.load_agent_request(net_name, agent, executing_id)
+        && let Some(approval) = own.approval.clone()
+        && approval.is_valid_for(digest, now)
+    {
+        return Some((approval, own));
+    }
+    let Ok(all) = store.list_agent_requests(net_name) else {
+        return None;
+    };
+    let mut holders: Vec<AgentRequest> = all
+        .into_iter()
+        .filter(|record| record.agent == agent && record.id != executing_id)
+        .filter(|record| {
+            record
+                .approval
+                .as_ref()
+                .is_some_and(|approval| approval.is_valid_for(digest, now))
+        })
+        .collect();
+    holders.sort_by(|a, b| a.id.cmp(&b.id));
+    holders
+        .into_iter()
+        .next()
+        .and_then(|holder| holder.approval.clone().map(|approval| (approval, holder)))
 }
 
 impl SatsMcp {
@@ -691,9 +755,10 @@ fn execute_send(
         amount_sat: params.amount_sat,
         fee_sat: 0,
     });
-    let approval = request.approval.clone();
+    let precheck_approval =
+        current_approval(store, net_name, agent, &digest, &request.id, now).map(|(a, _)| a);
     if let ApprovalDecision::Deny(reason) =
-        authorize_intent_with_approval(&grant, &precheck, &digest, approval.as_ref(), now)
+        authorize_intent_with_approval(&grant, &precheck, &digest, precheck_approval.as_ref(), now)
     {
         record_outcome(
             store,
@@ -713,7 +778,7 @@ fn execute_send(
                 stage: "precheck".into(),
             },
         );
-        return denial(&reason).with_request(&request.id);
+        return denial_with_hint(&reason, &request.id);
     }
 
     // Prepare the transaction to learn the real fee before any decision.
@@ -788,9 +853,10 @@ fn execute_send(
     // Fresh clock and a fresh approval read under the lock: preparation
     // synced the chain and may have taken long enough for either to move.
     let now = unix_now();
-    let mut approval = match store.load_agent_request(net_name, agent, &request.id) {
-        Ok(Some(current)) => current.approval,
-        _ => request.approval.clone(),
+    let holder = current_approval(store, net_name, agent, &digest, &request.id, now);
+    let (mut approval, mut holder_record) = match holder {
+        Some((approval, holder_record)) => (Some(approval), Some(holder_record)),
+        None => (None, None),
     };
     let spend = SpendRequest {
         amount_sat: prepared.amount_sat,
@@ -821,20 +887,31 @@ fn execute_send(
                     stage: "authorize".into(),
                 },
             );
-            return denial(&reason).with_request(&request.id);
+            return denial_with_hint(&reason, &request.id);
         }
     };
     if let sats_core::authz::ReserveVia::Approval = via {
-        // Consume-before-reserve: the burned approval must hit disk before
-        // the budget draw, so a crash burns the exception, never doubles it.
+        // Consume-before-reserve: the burned approval must hit disk on its
+        // holder before the budget draw, so a crash burns the exception,
+        // never doubles it.
         if let Some(consumed) = &mut approval {
             consumed.consumed_by_request = Some(request.id.clone());
         }
-        request.approval = approval.clone();
-        request.updated_at = now;
-        if let Err(e) = store.save_agent_request(net_name, &request) {
+        let Some(mut holder_record) = holder_record.take() else {
+            // Unreachable: an approval reservation implies a holder.
+            return SendResult::error("internal: approval without a holder record".into())
+                .with_request(&request.id);
+        };
+        holder_record.approval = approval.clone();
+        holder_record.updated_at = now;
+        if let Err(e) = store.save_agent_request(net_name, &holder_record) {
             return SendResult::error(format!("cannot consume approval: {e:#}"))
                 .with_request(&request.id);
+        }
+        if holder_record.id == request.id {
+            // Keep the in-memory executing record current so later outcome
+            // writes cannot resurrect the unconsumed approval.
+            request.approval = approval.clone();
         }
     }
     if let Err(e) = store.save_grant(net_name, &grant) {
@@ -998,13 +1075,17 @@ fn execute_send(
                     resolved_at: unix_now(),
                 },
             );
-            SendResult::sent(
+            let mut result = SendResult::sent(
                 broadcast_txid.to_string(),
                 spend.amount_sat,
                 spend.fee_sat,
                 grant.remaining_sat(),
             )
-            .with_request(&request.id)
+            .with_request(&request.id);
+            if let sats_core::authz::ReserveVia::Approval = via {
+                result.via_approval = Some(true);
+            }
+            result
         }
         // Signed but not broadcast: budget stays reserved (the signed tx
         // is out of our hands), and a human can retry the saved transaction.
@@ -1046,8 +1127,11 @@ impl ServerHandler for SatsMcp {
              human-authorized spending grant. All amounts are integer satoshis. send() is \
              enforced deterministically against the grant's budget, per-transaction cap, fee \
              cap, and expiry; status='denied' means human authorization is required — relay \
-             the message to your human instead of retrying. Use get_grant() to see the \
-             remaining budget before sending.",
+             the message and request_id to your human instead of retrying unchanged. If the \
+             human approves the request (sats agent approve), retry the identical send with \
+             the same request_id: the one-time approval is consumed by exactly that intent. \
+             Pass request_id on every send so retries can never pay twice. Use get_grant() \
+             to see the remaining budget before sending.",
             self.agent,
             network_name(self.network),
         ))
