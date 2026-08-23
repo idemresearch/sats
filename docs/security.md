@@ -93,6 +93,33 @@ be undone by an in-flight send's write.
 The grant file is reloaded for every send. Deleting it with `sats agent revoke`
 therefore takes effect on the next send call, even in an existing MCP session.
 
+## Agent requests, idempotency, and the event log
+
+Every agent send is recorded as a durable request under
+`<network>/agent-requests/<agent>/`, keyed by the agent's optional
+`request_id`, carrying the canonical intent digest (network, agent,
+normalized recipient, amount — never the fee) and the resolved outcome.
+Retrying a key whose earlier execution signed a transaction replays the
+recorded outcome; it can never sign twice. Reusing a key for a different
+intent is a typed error that mutates nothing. Denials are side-effect
+free, so a keyed retry after a denial re-evaluates the same request.
+
+Each state transition of the agent path — request received, denial,
+reservation, refund, signature, broadcast — appends one line to the
+per-network event log at `<network>/events/log.jsonl`, linked by request id
+and intent digest. Finalized transaction records carry an `origin` field
+naming the surface, agent, request, and digest, so an agent-signed
+transaction is attributable after the fact. Request records and the event
+log contain recipients and amounts; both are written owner-only (0600),
+like the transaction records beside them. The log is append-only and never
+pruned by sats.
+
+The event log also makes the one irreducible crash window visible: a
+`reserved` event with no following `signed` or `refunded` means the process
+died between persisting the budget draw and signing — budget is held for a
+transaction that never existed, and a human resolves it by re-granting or
+accepting the drawdown.
+
 ## MCP boundary
 
 The MCP server starts only when the named agent has a non-expired grant and

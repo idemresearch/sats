@@ -1352,6 +1352,7 @@ dependencies = [
  "bdk_wallet",
  "clap",
  "directories",
+ "getrandom 0.3.4",
  "hex",
  "humantime",
  "minreq",

@@ -1,7 +1,10 @@
-//! MCP server smoke test: raw JSON-RPC over the child process's stdio.
-//! Fully offline — exercises startup validation, tool listing, the grant
-//! snapshot, and a deterministic denial.
+//! MCP server integration tests: raw JSON-RPC over the child process's
+//! stdio. Fully offline — the spend tests run against the file-driven mock
+//! provider with a directly funded wallet, exercising the full agent path:
+//! send, attribution, idempotent retry, and persisted denials.
 #![cfg(feature = "mcp")]
+
+mod common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -85,6 +88,187 @@ impl Drop for McpSession {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+fn handshake(mcp: &mut McpSession) {
+    mcp.send(serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": { "name": "smoke-test", "version": "0" },
+        },
+    }));
+    mcp.recv();
+    mcp.send(serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+}
+
+/// A wallet the served process can actually spend from: mock provider
+/// config plus directly seeded confirmed UTXOs.
+fn funded_setup(dir: &TempDir, grant_args: &[&str], values_sat: &[u64]) -> std::path::PathBuf {
+    run_sats(dir, &["init"]);
+    let mockdata = common::write_mock_provider(dir);
+    let mut args = vec!["agent", "grant", "claude"];
+    args.extend_from_slice(grant_args);
+    run_sats(dir, &args);
+    common::fund_wallet(dir, values_sat);
+    mockdata
+}
+
+fn read_json(path: &std::path::Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap())
+        .unwrap_or_else(|e| panic!("bad json at {}: {e}", path.display()))
+}
+
+fn event_kinds(dir: &TempDir) -> Vec<String> {
+    let log = std::fs::read_to_string(dir.path().join("signet/events/log.jsonl")).unwrap();
+    log.lines()
+        .map(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["event"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn mcp_send_succeeds_and_is_attributed() {
+    let dir = TempDir::new().unwrap();
+    let mockdata = funded_setup(
+        &dir,
+        &["--budget", "50000", "--max-tx", "30000"],
+        &[100_000],
+    );
+
+    let mut mcp = McpSession::start(&dir, "claude");
+    handshake(&mut mcp);
+    let sent = mcp.call_tool(
+        2,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 25_000, "request_id": "job-1" }),
+    );
+    assert_eq!(sent["status"], "sent", "got: {sent}");
+    assert_eq!(sent["amount_sat"], 25_000);
+    assert_eq!(sent["request_id"], "k-job-1");
+    let txid = sent["txid"].as_str().unwrap().to_string();
+
+    // The transaction reached the mock chain and its record names the
+    // agent, the request, and the intent.
+    let broadcasts = std::fs::read_to_string(mockdata.join("broadcasts.log")).unwrap();
+    assert_eq!(broadcasts.lines().count(), 1);
+    let record = read_json(
+        &dir.path()
+            .join("signet/transactions")
+            .join(format!("{txid}.json")),
+    );
+    assert_eq!(record["status"], "broadcast");
+    assert_eq!(record["origin"]["surface"], "mcp");
+    assert_eq!(record["origin"]["agent"], "claude");
+    assert_eq!(record["origin"]["request_id"], "k-job-1");
+    assert_eq!(
+        record["origin"]["intent_digest"].as_str().unwrap().len(),
+        64
+    );
+
+    // The request record resolved to the same truth.
+    let request = read_json(&dir.path().join("signet/agent-requests/claude/k-job-1.json"));
+    assert_eq!(request["outcome"]["status"], "sent");
+    assert_eq!(request["outcome"]["txid"], txid.as_str());
+    assert_eq!(request["client_request_id"], "job-1");
+
+    // And the causal chain is complete.
+    assert_eq!(
+        event_kinds(&dir),
+        ["request_received", "reserved", "signed", "broadcast"]
+    );
+}
+
+#[test]
+fn mcp_send_same_key_replays_without_double_spend() {
+    let dir = TempDir::new().unwrap();
+    let mockdata = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+
+    let mut mcp = McpSession::start(&dir, "claude");
+    handshake(&mut mcp);
+    let params = serde_json::json!({
+        "address": ADDRESS, "amount_sat": 25_000, "request_id": "job-1",
+    });
+    let first = mcp.call_tool(2, "send", params.clone());
+    assert_eq!(first["status"], "sent", "got: {first}");
+
+    // The identical retry replays the recorded outcome: same txid, no new
+    // broadcast, no second budget draw.
+    let second = mcp.call_tool(3, "send", params);
+    assert_eq!(second["status"], "sent", "got: {second}");
+    assert_eq!(second["txid"], first["txid"]);
+    assert_eq!(
+        second["remaining_budget_sat"],
+        first["remaining_budget_sat"]
+    );
+    let broadcasts = std::fs::read_to_string(mockdata.join("broadcasts.log")).unwrap();
+    assert_eq!(broadcasts.lines().count(), 1, "no double broadcast");
+    let transactions = std::fs::read_dir(dir.path().join("signet/transactions"))
+        .unwrap()
+        .count();
+    assert_eq!(transactions, 1, "no second transaction");
+    let grant = mcp.call_tool(4, "get_grant", serde_json::json!({}));
+    assert_eq!(grant["remaining_sat"], first["remaining_budget_sat"]);
+
+    // The same key for a different send is a typed conflict, not a spend.
+    let conflict = mcp.call_tool(
+        5,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 26_000, "request_id": "job-1" }),
+    );
+    assert_eq!(conflict["status"], "error", "got: {conflict}");
+    assert_eq!(conflict["error_code"], "request_id_conflict");
+}
+
+#[test]
+fn mcp_denial_carries_request_id_and_persists_request() {
+    let dir = TempDir::new().unwrap();
+    run_sats(&dir, &["init"]);
+    run_sats(
+        &dir,
+        &[
+            "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
+        ],
+    );
+
+    let mut mcp = McpSession::start(&dir, "claude");
+    handshake(&mut mcp);
+    let denial = mcp.call_tool(
+        2,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 20_000, "request_id": "big-1" }),
+    );
+    assert_eq!(denial["status"], "denied");
+    assert_eq!(denial["reason"], "over_max_tx");
+    assert_eq!(denial["request_id"], "k-big-1");
+
+    // The denied request is on disk for the human review queue.
+    let request = read_json(&dir.path().join("signet/agent-requests/claude/k-big-1.json"));
+    assert_eq!(request["outcome"]["status"], "denied");
+    assert_eq!(request["outcome"]["deny"]["reason"], "over_max_tx");
+    assert_eq!(event_kinds(&dir), ["request_received", "denied"]);
+}
+
+#[test]
+fn mcp_keyless_sends_never_replay() {
+    let dir = TempDir::new().unwrap();
+    let mockdata = funded_setup(&dir, &["--budget", "60000"], &[100_000]);
+
+    let mut mcp = McpSession::start(&dir, "claude");
+    handshake(&mut mcp);
+    let params = serde_json::json!({ "address": ADDRESS, "amount_sat": 25_000 });
+    let first = mcp.call_tool(2, "send", params.clone());
+    let second = mcp.call_tool(3, "send", params);
+    assert_eq!(first["status"], "sent", "got: {first}");
+    assert_eq!(second["status"], "sent", "got: {second}");
+    assert_ne!(first["txid"], second["txid"]);
+    let broadcasts = std::fs::read_to_string(mockdata.join("broadcasts.log")).unwrap();
+    assert_eq!(broadcasts.lines().count(), 2);
 }
 
 #[test]
