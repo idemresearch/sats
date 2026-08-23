@@ -1373,6 +1373,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sats-alkanes"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "sats-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "sats-core"
 version = "0.1.0"
 dependencies = [
