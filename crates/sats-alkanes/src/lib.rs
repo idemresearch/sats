@@ -15,6 +15,7 @@
 //! `crates/alkanes-support` (cellpacks). Frozen byte-vector unit tests
 //! pin every layer; changing any constant must fail them.
 
+pub mod build;
 pub mod call;
 pub mod delta;
 pub mod id;

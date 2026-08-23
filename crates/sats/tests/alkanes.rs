@@ -123,3 +123,135 @@ fn ambiguous_view_providers_are_rejected() {
         .failure()
         .stderr(predicate::str::contains("multiple alkanes.view providers"));
 }
+
+#[test]
+fn execute_composes_signs_and_broadcasts_the_runestone() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+    std::fs::write(mockdata.join("alkanes-simulate.json"), r#"{"status": 0}"#).unwrap();
+    common::fund_wallet(&dir, &[100_000]);
+
+    let out = json_stdout(
+        sats(&dir)
+            .args(["alkanes", "execute", "2:1", "77", "-y", "--json"])
+            .assert()
+            .success(),
+    );
+    let txid = out["txid"].as_str().unwrap().to_string();
+    assert_eq!(out["target"], "2:1");
+    assert_eq!(out["postage_sat"], 546);
+
+    // The broadcast reached the mock chain.
+    let broadcasts = std::fs::read_to_string(mockdata.join("broadcasts.log")).unwrap();
+    assert!(broadcasts.contains(&txid));
+
+    // The durable record is an ordinary attributed CLI transaction.
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            dir.path()
+                .join("signet/transactions")
+                .join(format!("{txid}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["recipient"], "alkanes:2:1");
+    assert_eq!(record["status"], "broadcast");
+    assert_eq!(record["origin"]["surface"], "cli");
+
+    // Decode the signed transaction: output 0 is exactly the runestone
+    // the pure crate encodes for this call, output 1 the postage.
+    let tx: sats_core::bitcoin::Transaction = sats_core::bitcoin::consensus::deserialize(
+        &hex::decode(record["tx_hex"].as_str().unwrap()).unwrap(),
+    )
+    .unwrap();
+    let expected =
+        sats_alkanes::protostone::runestone_script(&[sats_alkanes::protostone::Protostone {
+            protocol_tag: sats_alkanes::protostone::ALKANES_PROTOCOL_TAG,
+            message: sats_alkanes::call::AlkaneCall {
+                target: sats_alkanes::id::AlkaneId { block: 2, tx: 1 },
+                inputs: vec![77],
+            }
+            .encode_cellpack(),
+            pointer: Some(1),
+            refund_pointer: Some(1),
+        }])
+        .unwrap();
+    assert_eq!(tx.output[0].script_pubkey, expected);
+    assert_eq!(tx.output[0].value.to_sat(), 0);
+    assert_eq!(tx.output[1].value.to_sat(), 546);
+    assert!(
+        tx.output[1].script_pubkey.is_p2tr(),
+        "postage pays the wallet"
+    );
+}
+
+#[test]
+fn execute_refuses_mainnet() {
+    let dir = TempDir::new().unwrap();
+    sats(&dir)
+        .args([
+            "--network",
+            "mainnet",
+            "alkanes",
+            "execute",
+            "2:1",
+            "77",
+            "-y",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not enabled on mainnet"));
+}
+
+#[test]
+fn execute_fails_closed_without_simulation() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    write_mock_provider(&dir);
+    common::fund_wallet(&dir, &[100_000]);
+    // No alkanes-simulate.json: the call is never composed.
+    sats(&dir)
+        .args(["alkanes", "execute", "2:1", "77", "-y"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("alkanes view failed"));
+    assert!(!dir.path().join("signet/transactions").exists());
+}
+
+#[test]
+fn execute_fails_closed_without_a_guard_answer() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+    std::fs::write(mockdata.join("alkanes-simulate.json"), r#"{"status": 0}"#).unwrap();
+    common::fund_wallet(&dir, &[100_000]);
+    std::fs::remove_file(mockdata.join("guard.json")).unwrap();
+
+    sats(&dir)
+        .args(["alkanes", "execute", "2:1", "77", "-y"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to plan without the asset check",
+        ));
+    assert!(!dir.path().join("signet/transactions").exists());
+}
+
+#[test]
+fn execute_excludes_dust_suspects() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+    std::fs::write(mockdata.join("alkanes-simulate.json"), r#"{"status": 0}"#).unwrap();
+    common::fund_wallet(&dir, &[100_000, 546]);
+
+    let out = json_stdout(
+        sats(&dir)
+            .args(["alkanes", "execute", "2:1", "77", "-y", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(out["excluded_utxos"], 1, "the 546-sat suspect stays out");
+}

@@ -109,6 +109,25 @@ pub enum AlkanesCommand {
         #[arg(value_name = "INPUTS")]
         inputs: Vec<u128>,
     },
+    /// Execute a contract call: simulate, confirm, sign, broadcast.
+    /// Refuses mainnet in this release
+    Execute {
+        /// Alkane id (e.g. 2:1)
+        #[arg(value_name = "BLOCK:TX")]
+        id: String,
+        /// Calldata words (the first is conventionally the opcode)
+        #[arg(value_name = "INPUTS")]
+        inputs: Vec<u128>,
+        /// Fee rate in sat/vB (default: estimated for ~2 blocks)
+        #[arg(long, value_name = "SAT_VB")]
+        fee_rate: Option<u64>,
+        /// Sats carried by the pointer output the call's assets land on
+        #[arg(long, value_name = "SATS", default_value_t = 546)]
+        postage: u64,
+        /// Skip the confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]

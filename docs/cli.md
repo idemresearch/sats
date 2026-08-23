@@ -80,6 +80,7 @@ hold the explicit advanced workflows.
 | `sats agent serve <name>` | Serve the four wallet tools for one granted agent over MCP stdio |
 | `sats alkanes inspect <BLOCK:TX>` | Fetch a contract's bytecode and show its sha256 code hash |
 | `sats alkanes simulate <BLOCK:TX> <INPUTS...>` | Simulate a contract call and show the interpreted result |
+| `sats alkanes execute <BLOCK:TX> <INPUTS...>` | Simulate, confirm, sign, and broadcast a contract call (refuses mainnet) |
 
 ## Global flags
 
@@ -265,6 +266,25 @@ an authorization. Both are read-only, validate the endpoint's network
 first, and require an explicitly configured `alkanes.view` provider:
 there is no fallback, and without one they fail with a typed error.
 
+### Executing a call
+
+```sh
+sats alkanes execute <BLOCK:TX> <INPUTS...> [--fee-rate <SAT_VB>] \
+  [--postage <SATS>] [-y]
+```
+
+`execute` composes the call transaction — output 0 the runestone
+OP_RETURN, output 1 a postage output (default 546 sats) back to the
+wallet that the protostone's pointer and refund both target — then shows
+the simulation, postage, fee, and total, asks for confirmation, signs
+with the wallet password, privately persists the raw transaction, and
+broadcasts. The pipeline fails closed at every step: an unavailable
+simulation or guard stops it, sync failure stops it, and there are no
+`--allow-dust`/`--no-guards` escapes on this command at all. It refuses
+mainnet in this release — the encoding is young; dogfood on signet. The
+546-sat postage lands on a wallet address at a value the dust heuristic
+protects from later coin selection automatically.
+
 ## JSON output
 
 `--json` is implemented for:
@@ -285,7 +305,8 @@ there is no fallback, and without one they fail with a typed error.
 - `agent deny`;
 - `agent log`;
 - `alkanes inspect`;
-- `alkanes simulate`.
+- `alkanes simulate`;
+- `alkanes execute`.
 
 JSON field names are compatibility surfaces. Scripts should branch on
 documented status and reason fields rather than human-readable messages.

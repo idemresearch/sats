@@ -198,6 +198,27 @@ a redacted origin in errors and debug output. Esplora authentication is
 expected in the configured bearer header; its endpoint URL may be displayed
 in diagnostics. Do not embed Esplora credentials in URL paths or queries.
 
+## Alkanes execution
+
+`sats alkanes execute` is human-only and deliberately narrow:
+
+- the OP_RETURN envelope is encoded locally by the `sats-alkanes` crate,
+  against the published reference encoding, frozen by byte-vector tests —
+  the provider composes nothing;
+- simulation and inspection results are advisory display from the
+  configured `alkanes.view` endpoint, never an authorization, and the
+  endpoint's network is validated before any result is shown;
+- the transaction pipeline is the ordinary send tail: dust and guard
+  exclusions with no escape flags, confirmation, password unlock, private
+  persistence before broadcast;
+- mainnet is refused in this release, and no agent surface exists — the
+  MCP server cannot reach any alkanes operation, and no grant can carry
+  alkanes authority.
+
+The wire dialect for the view calls has not been verified against a live
+endpoint; a wrong dialect fails closed as a view error rather than
+composing a transaction from misread data.
+
 ## PSBT and finalized-transaction boundary
 
 PSBTs are the preparation and signer contract. A normal human or agent send
@@ -230,6 +251,7 @@ That is reported as partial rather than treated as a broadcastable success.
 | Malicious asset guard | Restrictive-only result | Can hide funds; incomplete results can miss assets |
 | Broadcast failure | Finalized raw transaction saved before the attempt; agent budget remains reserved | Manual retry or reconciliation is required |
 | Wrong Bitcoin network | Address and provider network validation | Misconfigured third-party responses remain possible |
+| Malicious alkanes view endpoint | Advisory display only; local encoding; mainnet refused | Can mislead the human reviewing a signet call |
 
 ## Operational guidance
 
