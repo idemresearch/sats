@@ -184,6 +184,24 @@ pub struct TransactionRecord {
     /// Explicit PSBT-session or legacy-plan id, when one produced this tx.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
+    /// Which surface produced this transaction. Absent on records written
+    /// by releases that predate attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<TxOrigin>,
+}
+
+/// Attribution for a finalized transaction: which surface asked for it,
+/// and — for agent sends — which agent, request, and canonical intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TxOrigin {
+    /// "cli" or "mcp".
+    pub surface: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_digest: Option<String>,
 }
 
 impl TransactionRecord {
@@ -210,7 +228,15 @@ impl TransactionRecord {
             tx_hex: hex::encode(consensus::serialize(tx)),
             excluded_utxos,
             source_id,
+            origin: None,
         }
+    }
+
+    /// Tag the record with its originating surface. A builder rather than
+    /// a constructor argument so existing construction paths stay valid.
+    pub fn with_origin(mut self, origin: TxOrigin) -> Self {
+        self.origin = Some(origin);
+        self
     }
 
     pub fn total_sat(&self) -> u64 {
@@ -275,8 +301,52 @@ mod tests {
             tx_hex: String::new(),
             excluded_utxos: 0,
             source_id: None,
+            origin: None,
         };
         assert_eq!(record.total_sat(), u64::MAX);
+    }
+
+    #[test]
+    fn origin_round_trips_and_defaults_to_none() {
+        let record = TransactionRecord {
+            format_version: FORMAT_VERSION,
+            txid: String::new(),
+            network: "signet".into(),
+            recipient: "tb1p".into(),
+            amount_sat: 1,
+            fee_sat: 1,
+            created_at: 0,
+            status: TransactionStatus::Pending,
+            tx_hex: String::new(),
+            excluded_utxos: 0,
+            source_id: None,
+            origin: None,
+        }
+        .with_origin(TxOrigin {
+            surface: "mcp".into(),
+            agent: Some("claude".into()),
+            request_id: Some("k-job-1".into()),
+            intent_digest: Some("ab".repeat(32)),
+        });
+        let json = serde_json::to_value(&record).unwrap();
+        assert_eq!(json["origin"]["surface"], "mcp");
+        assert_eq!(json["origin"]["agent"], "claude");
+        let back: TransactionRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(back.origin, record.origin);
+
+        // Records written before attribution existed read as origin: None.
+        let old = serde_json::json!({
+            "txid": "", "network": "signet", "recipient": "tb1p",
+            "amount_sat": 1, "fee_sat": 1, "created_at": 0,
+            "status": "pending", "tx_hex": "",
+        });
+        let old: TransactionRecord = serde_json::from_value(old).unwrap();
+        assert!(old.origin.is_none());
+        let json = serde_json::to_value(&old).unwrap();
+        assert!(
+            json.get("origin").is_none(),
+            "absent origin is not serialized"
+        );
     }
 }
 
