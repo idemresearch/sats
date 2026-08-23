@@ -7,6 +7,10 @@
 //! - `broadcasts.log`  broadcast txids are appended here
 //! - `guard.json`      `{"protected": ["txid:vout", ...]}`; **missing file is
 //!   a guard error** so fail-closed behavior is exercisable
+//! - `alkanes-bytecode.json`  `{"BLOCK:TX": "<hex>"}`; a missing file or
+//!   key is a typed view error
+//! - `alkanes-simulate.json`  returned verbatim for any simulate call;
+//!   missing file is a typed view error
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -77,6 +81,32 @@ impl MockProvider {
             message: e.to_string(),
         })?;
         Ok(txid)
+    }
+
+    fn view_err(&self, message: String) -> ProviderError {
+        ProviderError::View {
+            url: self.display.clone(),
+            message,
+        }
+    }
+
+    pub fn alkanes_bytecode(&self, block: u128, tx: u128) -> Result<Vec<u8>, ProviderError> {
+        let text = std::fs::read_to_string(self.dir.join("alkanes-bytecode.json"))
+            .map_err(|e| self.view_err(e.to_string()))?;
+        let map: HashMap<String, String> =
+            serde_json::from_str(&text).map_err(|e| self.view_err(e.to_string()))?;
+        let key = format!("{block}:{tx}");
+        let hex_str = map
+            .get(&key)
+            .ok_or_else(|| self.view_err(format!("no bytecode for {key}")))?;
+        hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str))
+            .map_err(|e| self.view_err(e.to_string()))
+    }
+
+    pub fn alkanes_simulate(&self) -> Result<serde_json::Value, ProviderError> {
+        let text = std::fs::read_to_string(self.dir.join("alkanes-simulate.json"))
+            .map_err(|e| self.view_err(e.to_string()))?;
+        serde_json::from_str(&text).map_err(|e| self.view_err(e.to_string()))
     }
 
     pub fn protected(&self, outpoints: &[OutPoint]) -> Result<Vec<OutPoint>, ProviderError> {

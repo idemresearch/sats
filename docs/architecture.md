@@ -57,6 +57,15 @@ adapters.
 `main.rs` is the composition root. Leaf feature logic belongs in the owning
 module, not in dispatch.
 
+### `sats-alkanes`
+
+Pure Alkanes protocol composition: alkane ids, LEB128 varints, cellpack
+call encoding, the protostone/runestone OP_RETURN envelope, bytecode
+code-hashing, and tolerant simulation-result views. Byte encodings are
+derived from the published alkanes-rs reference and frozen by unit
+vectors. Environment-agnostic like `sats-core`: chain access, funding,
+and signing stay with the `sats` crate.
+
 ### `sats-web`
 
 The website playground: `sats-core` compiled to WebAssembly behind a small
@@ -161,7 +170,8 @@ A provider is bound to one network and advertises audited capabilities:
 - `chain.broadcast`;
 - `guard.ord`;
 - `guard.alkanes`;
-- `guard.native` for deterministic tests.
+- `guard.native` for deterministic tests;
+- `alkanes.view` for the explicit `sats alkanes` contract tools.
 
 Provider resolution is configuration work and performs no network I/O.
 Operations validate the selected network when they execute. See

@@ -85,6 +85,30 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Alkanes contract tools (experimental, signet-first)
+    Alkanes {
+        #[command(subcommand)]
+        command: AlkanesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AlkanesCommand {
+    /// Fetch a contract's bytecode and show its code hash
+    Inspect {
+        /// Alkane id (e.g. 2:1)
+        #[arg(value_name = "BLOCK:TX")]
+        id: String,
+    },
+    /// Simulate a contract call and show the interpreted result
+    Simulate {
+        /// Alkane id (e.g. 2:1)
+        #[arg(value_name = "BLOCK:TX")]
+        id: String,
+        /// Calldata words (the first is conventionally the opcode)
+        #[arg(value_name = "INPUTS")]
+        inputs: Vec<u128>,
+    },
 }
 
 #[derive(Subcommand)]

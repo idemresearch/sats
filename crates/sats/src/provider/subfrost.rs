@@ -38,6 +38,14 @@ mod dialect {
     pub const BROADCAST: &str = "esplora_broadcast";
     pub const ORD_OUTPUT: &str = "ord_output";
     pub const ALKANES_BY_OUTPOINT: &str = "alkanes_protorunesbyoutpoint";
+    /// Contract bytecode by alkane id. Params: one `{block, tx}` object
+    /// with decimal-string values (u128s exceed JSON number range).
+    /// Result: hex string.
+    pub const ALKANES_GET_BYTECODE: &str = "alkanes_getbytecode";
+    /// Simulate a contract call. Params: one
+    /// `{target: {block, tx}, inputs: [...]}` object, decimal strings.
+    /// Result: opaque JSON, displayed rather than trusted.
+    pub const ALKANES_SIMULATE: &str = "alkanes_simulate";
     /// `GET /blocks` — recent block summaries. Params: `[]`.
     pub const BLOCKS: &str = "esplora_blocks";
     /// `GET /block-height/:height` — block hash at height. Params: `[height]`.
@@ -156,6 +164,43 @@ impl SubfrostClient {
             }
         }
         Ok(protected)
+    }
+
+    fn view_err(&self, message: String) -> ProviderError {
+        ProviderError::View {
+            url: self.display_url.clone(),
+            message,
+        }
+    }
+
+    /// Contract bytecode for an alkane id, decoded from the endpoint's
+    /// hex result.
+    pub fn alkanes_bytecode(&self, block: u128, tx: u128) -> Result<Vec<u8>, ProviderError> {
+        let value: serde_json::Value = self
+            .call(
+                dialect::ALKANES_GET_BYTECODE,
+                serde_json::json!([{ "block": block.to_string(), "tx": tx.to_string() }]),
+            )
+            .map_err(|m| self.view_err(m))?;
+        parse_bytecode_result(&value).map_err(|m| self.view_err(m))
+    }
+
+    /// Simulate a contract call; the result is returned verbatim.
+    pub fn alkanes_simulate(
+        &self,
+        block: u128,
+        tx: u128,
+        inputs: &[u128],
+    ) -> Result<serde_json::Value, ProviderError> {
+        let inputs: Vec<String> = inputs.iter().map(u128::to_string).collect();
+        self.call(
+            dialect::ALKANES_SIMULATE,
+            serde_json::json!([{
+                "target": { "block": block.to_string(), "tx": tx.to_string() },
+                "inputs": inputs,
+            }]),
+        )
+        .map_err(|m| self.view_err(m))
     }
 
     /// Which of these outpoints carry alkanes balances?
@@ -616,6 +661,23 @@ fn parse_alkanes_outpoint(value: &serde_json::Value) -> bool {
     }
 }
 
+/// A bytecode result is a hex string, with or without a 0x prefix. An
+/// empty result means nothing is deployed at that id.
+fn parse_bytecode_result(value: &serde_json::Value) -> Result<Vec<u8>, String> {
+    let hex_str = value
+        .as_str()
+        .ok_or_else(|| "expected a hex string result".to_string())?;
+    let stripped = hex_str
+        .trim()
+        .strip_prefix("0x")
+        .or_else(|| hex_str.trim().strip_prefix("0X"))
+        .unwrap_or(hex_str.trim());
+    if stripped.is_empty() {
+        return Err("no bytecode at this alkane id".to_string());
+    }
+    hex::decode(stripped).map_err(|e| format!("invalid bytecode hex: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,5 +751,20 @@ mod tests {
             client.scrub("boom at https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc"),
         );
         assert!(!guard_err.to_string().contains("SECRETKEY"));
+        let view_err = client
+            .view_err(client.scrub("boom at https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc"));
+        assert!(!view_err.to_string().contains("SECRETKEY"));
+    }
+
+    #[test]
+    fn bytecode_results_decode_or_fail_typed() {
+        let with_prefix = serde_json::json!("0x0061736d");
+        assert_eq!(parse_bytecode_result(&with_prefix).unwrap(), b"\0asm");
+        let bare = serde_json::json!("0061736d");
+        assert_eq!(parse_bytecode_result(&bare).unwrap(), b"\0asm");
+        assert!(parse_bytecode_result(&serde_json::json!("")).is_err());
+        assert!(parse_bytecode_result(&serde_json::json!("0x")).is_err());
+        assert!(parse_bytecode_result(&serde_json::json!(null)).is_err());
+        assert!(parse_bytecode_result(&serde_json::json!("zz")).is_err());
     }
 }

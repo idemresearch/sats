@@ -50,6 +50,9 @@ pub enum ProviderError {
         url: String,
         message: String,
     },
+
+    #[error("alkanes view failed ({url}): {message}")]
+    View { url: String, message: String },
 }
 
 /// Origin-only form of a URL: `scheme://host[:port]`. Used for any endpoint

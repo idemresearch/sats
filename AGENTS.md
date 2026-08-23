@@ -57,6 +57,7 @@ Signet is the default. Mainnet must remain an explicit choice.
 | `crates/sats/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
 | `crates/sats/src/mcp/` | MCP transport, schemas, and granted agent workflows |
 | `crates/sats/tests/` | Native CLI and MCP integration tests |
+| `crates/sats-alkanes/src/` | Pure Alkanes protocol composition: ids, cellpacks, protostones, inspection, simulation views |
 | `crates/sats-web/src/lib.rs` | Browser playground: wasm bindings over sats-core and the simulated chain |
 | `website/` | Project website, including the interactive playground terminal |
 

@@ -78,6 +78,8 @@ hold the explicit advanced workflows.
 | `sats agent deny <id>` | Dismiss a request and revoke its unconsumed approval |
 | `sats agent log [--limit N] [--request ID]` | Show the causal event log of agent activity |
 | `sats agent serve <name>` | Serve the four wallet tools for one granted agent over MCP stdio |
+| `sats alkanes inspect <BLOCK:TX>` | Fetch a contract's bytecode and show its sha256 code hash |
+| `sats alkanes simulate <BLOCK:TX> <INPUTS...>` | Simulate a contract call and show the interpreted result |
 
 ## Global flags
 
@@ -243,6 +245,26 @@ revocation or expiry. `deny` dismisses the request and revokes an
 unconsumed approval without a password: reducing authority stays cheap.
 Both accept a request id or unique prefix and support `--json`.
 
+## Alkanes contract tools
+
+The `sats alkanes` namespace is an experimental, signet-first Alkanes
+client over the `alkanes.view` provider capability (currently the
+Subfrost driver; the JSON-RPC dialect has not been verified against a
+live endpoint and is confined to the driver so corrections stay local):
+
+```sh
+sats alkanes inspect 2:1          # bytecode size + sha256 code hash
+sats alkanes simulate 2:1 77      # advisory call simulation
+```
+
+`inspect` fetches the contract bytecode and prints its sha256 code hash
+for comparison against a build you trust. `simulate` runs a call against
+the endpoint's view and shows the recognized fields (status, gas, asset
+transfers) alongside the verbatim result — it is advisory display, never
+an authorization. Both are read-only, validate the endpoint's network
+first, and require an explicitly configured `alkanes.view` provider:
+there is no fallback, and without one they fail with a typed error.
+
 ## JSON output
 
 `--json` is implemented for:
@@ -261,7 +283,9 @@ Both accept a request id or unique prefix and support `--json`.
 - `agent requests`;
 - `agent approve`;
 - `agent deny`;
-- `agent log`.
+- `agent log`;
+- `alkanes inspect`;
+- `alkanes simulate`.
 
 JSON field names are compatibility surfaces. Scripts should branch on
 documented status and reason fields rather than human-readable messages.

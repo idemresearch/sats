@@ -19,6 +19,7 @@ mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
 
 [dependencies]
 sats-core = { workspace = true }
+sats-alkanes = { workspace = true }
 bdk_wallet = { workspace = true, features = ["rusqlite"] }
 bdk_esplora = { workspace = true }
 rusqlite = { workspace = true }

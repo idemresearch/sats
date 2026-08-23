@@ -110,5 +110,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 mcp::run(&store, &config, network, &name, overrides.clone())
             }
         },
+        Command::Alkanes { command } => match command {
+            cli::AlkanesCommand::Inspect { id } => {
+                commands::alkanes::inspect(&services(&config)?, &id, json)
+            }
+            cli::AlkanesCommand::Simulate { id, inputs } => {
+                commands::alkanes::simulate(&services(&config)?, &id, &inputs, json)
+            }
+        },
     }
 }

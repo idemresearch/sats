@@ -1361,6 +1361,7 @@ dependencies = [
  "rmcp",
  "rpassword",
  "rusqlite",
+ "sats-alkanes",
  "sats-core",
  "schemars",
  "serde",
