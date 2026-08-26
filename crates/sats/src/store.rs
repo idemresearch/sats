@@ -297,6 +297,13 @@ impl Store {
     /// so honoring one would preserve exactly the weakness the daemon
     /// removes. It is read well enough to name itself and is then
     /// refused with the commands that replace it.
+    ///
+    /// The record's own `network` is checked against the requested one,
+    /// like every sibling loader. A v1 grant sealed its seed under an AAD
+    /// naming the network, so a grant copied across networks failed to
+    /// unseal and was inert; a v2 grant carries no seal to bind it, so the
+    /// check is what keeps a signet grant from authorizing a mainnet
+    /// signature when its file is dropped into another network's directory.
     pub fn load_grant(&self, network: &str, agent: &str) -> Result<Option<Grant>> {
         let path = self.grants_dir(network).join(format!("{agent}.json"));
         if !path.exists() {
@@ -308,8 +315,16 @@ impl Store {
         if is_legacy_grant(&value) {
             bail!("{}", legacy_grant_message(agent, &path));
         }
-        let grant = serde_json::from_value(value)
+        let grant: Grant = serde_json::from_value(value)
             .with_context(|| format!("corrupt grant {}", path.display()))?;
+        if grant.network != network {
+            bail!(
+                "grant network {} does not match {network} — a grant authorizes only the \
+                 network it was created for; re-issue it with: sats agent grant {agent} \
+                 --budget <sats> --network {network}",
+                grant.network
+            );
+        }
         Ok(Some(grant))
     }
 
@@ -742,6 +757,52 @@ mod tests {
             None,
             &tx,
         )
+    }
+
+    fn grant(network: &str) -> Grant {
+        let token = sats_core::token::generate().unwrap();
+        Grant {
+            format_version: sats_core::authz::GRANT_FORMAT_VERSION,
+            agent: "claude".into(),
+            network: network.into(),
+            budget_sat: 50_000,
+            spent_sat: 0,
+            max_tx_sat: None,
+            max_fee_sat: None,
+            created_at: 0,
+            expires_at: u64::MAX,
+            tx_count: 0,
+            token_id: token.token_id,
+            token_hash: token.token_hash,
+        }
+    }
+
+    /// A grant authorizes only the network it names. The v1 seal bound the
+    /// seed to the network by AAD, so a copied grant was inert; a v2 grant
+    /// carries no seal, so `load_grant` is what keeps a signet grant
+    /// dropped into the mainnet directory from authorizing mainnet signing.
+    #[test]
+    fn load_grant_refuses_a_grant_from_another_network() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+
+        // The exploit: a real signet grant's file placed under mainnet.
+        let signet_grant = grant("signet");
+        store.save_grant("mainnet", &signet_grant).unwrap();
+
+        let err = store.load_grant("mainnet", "claude").unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("does not match mainnet"),
+            "cross-network grant must be refused, got: {message}"
+        );
+
+        // A grant filed under the network it names loads normally, and the
+        // wrong directory simply has no grant rather than a stolen one.
+        store.save_grant("signet", &grant("signet")).unwrap();
+        assert!(store.load_grant("signet", "claude").unwrap().is_some());
+        // (only the mainnet copy remains under mainnet, still refused)
+        assert!(store.load_grant("mainnet", "claude").is_err());
     }
 
     #[test]

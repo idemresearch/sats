@@ -174,6 +174,32 @@ fn a_v1_grant_is_refused_with_its_migration_path() {
         .stderr(predicate::str::contains("treat the seed as disclosed"));
 }
 
+/// A grant authorizes only its own network. Copying a signet grant file
+/// into another network's directory must not let it authorize signing
+/// there — the confinement the removed v1 seal AAD used to guarantee.
+#[test]
+fn a_grant_is_confined_to_its_network() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    // A real signet grant, with its genuine token hash.
+    grant_json(&dir, "claude");
+    let signet_grant = std::fs::read(dir.path().join("signet/grants/claude.json")).unwrap();
+
+    // Drop that exact file into mainnet's grant directory.
+    let mainnet_grants = dir.path().join("mainnet/grants");
+    std::fs::create_dir_all(&mainnet_grants).unwrap();
+    std::fs::write(mainnet_grants.join("claude.json"), &signet_grant).unwrap();
+
+    // Serving as that agent on mainnet must refuse before anything else:
+    // the grant on disk names signet, not mainnet.
+    sats(&dir)
+        .args(["--network", "mainnet", "agent", "serve", "claude"])
+        .env("SATS_AGENT_TOKEN", "unused")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("does not match mainnet"));
+}
+
 /// Locked is a state the daemon serves from, not an error it dies of.
 #[test]
 fn the_daemon_locks_and_unlocks() {

@@ -86,6 +86,12 @@ The token is what an agent presents. Pass it to the served process as
 line. Re-issuing a grant mints a new token and kills the old one, so
 rotation and revocation are the same act.
 
+A grant names its network and authorizes only that network. Loading a grant
+checks the record's network against the one requested and refuses a
+mismatch, so a grant file moved or copied into another network's directory
+is inert — a signet grant can never authorize a mainnet signature. The token
+is likewise scoped to the grant that holds its hash.
+
 The honest cost is that a token in an agent's configuration is a secret that
 agent can also read. Compromising it costs the grant's remaining budget until
 its expiry — which is what a budget is for — never the seed, and never any
