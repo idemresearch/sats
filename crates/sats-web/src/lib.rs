@@ -26,11 +26,11 @@ use bdk_wallet::bitcoin::{
 use bdk_wallet::chain::{BlockId, ConfirmationBlockTime, TxUpdate};
 use bdk_wallet::{KeychainKind, Update, Wallet};
 use bip39::Mnemonic;
-use sats_core::authz::{Grant, SpendRequest};
+use sats_core::authz::{GRANT_FORMAT_VERSION, Grant, SpendRequest};
 use sats_core::fmt::format_sats;
 use sats_core::plan::{PreparedSpend, TransactionRecord};
 use sats_core::signer::{LocalSigner, Signer};
-use sats_core::{amount, engine, seal, seed};
+use sats_core::{amount, engine, seed, token};
 use serde_json::json;
 use wasm_bindgen::prelude::*;
 
@@ -357,16 +357,15 @@ impl Sim {
         let max_tx_sat = max_tx_str.as_deref().map(amount::parse).transpose()?;
         let max_fee_sat = max_fee_str.as_deref().map(amount::parse).transpose()?;
 
-        // Same wrapping as the native grant: the seed re-sealed under a
-        // fresh grant key. In the playground both live in page memory.
-        let grant_key = seal::generate_key_b64().map_err(|e| e.to_string())?;
-        let key = seal::decode_key_b64(&grant_key).map_err(|e| e.to_string())?;
-        let aad = format!("sats-grant-v1:{NETWORK_NAME}:{agent}").into_bytes();
-        let wrapped_seed = seal::seal_with_key(self.mnemonic.to_string().as_bytes(), &key, &aad)
-            .map_err(|e| e.to_string())?;
+        // Same shape as the native grant: a capability token, never key
+        // material. The playground has no daemon to hold a seed behind a
+        // process boundary — it is one page — so the token is only
+        // demonstrating the model, not enforcing it.
+        let issued = token::generate().map_err(|e| e.to_string())?;
 
         let replaced = self.grants.contains_key(agent);
         let grant = Grant {
+            format_version: GRANT_FORMAT_VERSION,
             agent: agent.to_string(),
             network: NETWORK_NAME.to_string(),
             budget_sat,
@@ -376,11 +375,12 @@ impl Sim {
             created_at: now,
             expires_at: now.saturating_add(lifetime_secs),
             tx_count: 0,
-            wrapped_seed,
-            grant_key,
+            token_id: issued.token_id.clone(),
+            token_hash: issued.token_hash.clone(),
         };
         let out = json!({
             "agent": grant.agent,
+            "token_id": grant.token_id,
             "budget_sat": grant.budget_sat,
             "max_tx_sat": grant.max_tx_sat,
             "max_fee_sat": grant.max_fee_sat,

@@ -17,6 +17,8 @@ pub mod request;
 pub mod seal;
 pub mod seed;
 pub mod signer;
+pub mod token;
+pub mod verify;
 
 pub use bdk_wallet;
 pub use bdk_wallet::bitcoin;

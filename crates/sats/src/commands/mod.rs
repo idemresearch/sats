@@ -2,6 +2,7 @@ pub mod agent_log;
 pub mod alkanes;
 pub mod approve;
 pub mod balance;
+pub mod daemon;
 pub mod deny;
 pub mod grant;
 pub mod grants;

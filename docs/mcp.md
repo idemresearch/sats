@@ -2,14 +2,19 @@
 
 `sats agent serve` exposes a deliberately small wallet surface to one named
 agent over Model Context Protocol stdio. The server does not grant authority
-by itself; it starts only when a human has already created a non-expired
-grant.
+by itself, and it cannot sign: it is a shim that prepares and broadcasts
+transactions, carrying a bearer token that names the grant it acts under.
+Signatures come from `satsd` (see [CLI](cli.md#the-signing-daemon)).
 
 ## Connect an agent
 
-Initialize and fund a wallet, then create a grant:
+Initialize and fund a wallet, start and unlock the daemon, then create a
+grant:
 
 ```sh
+sats daemon start
+sats daemon unlock
+
 sats agent grant claude \
   --budget 50k \
   --for 24h \
@@ -17,16 +22,18 @@ sats agent grant claude \
   --max-fee 1000
 ```
 
-Configure an MCP client to launch:
+The grant prints a bearer token once. It is never stored, so copy it now;
+re-issue the grant if you lose it. The served process reads it from
+`SATS_AGENT_TOKEN`:
 
 ```sh
-sats agent serve claude
+SATS_AGENT_TOKEN=<token> sats agent serve claude
 ```
 
 For Claude Code, for example:
 
 ```sh
-claude mcp add sats -- sats agent serve claude
+claude mcp add sats --env SATS_AGENT_TOKEN=<token> -- sats agent serve claude
 ```
 
 Use the same `--network`, `--provider`, and `SATS_DIR` values that identify the
@@ -35,10 +42,14 @@ wallet and provider configuration the agent should use.
 At startup the server verifies:
 
 - the named grant exists and has not expired;
+- `SATS_AGENT_TOKEN` is present and matches that grant;
 - the selected network wallet exists;
-- provider configuration resolves without ambiguity.
+- provider configuration resolves without ambiguity;
+- satsd is reachable.
 
-Failure is reported immediately, before the client begins a conversation.
+Failure is reported immediately, before the client begins a conversation. A
+daemon that is running but locked is a warning rather than a refusal — a
+human can unlock it while the client is already connected.
 
 ## Tool surface
 
@@ -146,6 +157,17 @@ Operational failure:
 }
 ```
 
+Locked wallet — an error, deliberately not a denial:
+
+```json
+{
+  "status": "error",
+  "error_code": "wallet_locked",
+  "message": "the wallet is locked — a human must run: sats daemon unlock",
+  "request_id": "k-invoice-7012"
+}
+```
+
 `send` does not expose fee-rate, dust, guard, signer, PSBT, or provider-bypass
 parameters. The agent supplies only destination, integer satoshis, and
 optionally its idempotency key.
@@ -164,8 +186,10 @@ amount is always safe:
   existed, the retry re-evaluates the same request from scratch.
 
 Reusing a key for a different address or amount never mutates anything.
-Mechanical failures of the idempotency contract are `status: "error"`
-results carrying a stable `error_code`:
+Mechanical and operational failures are `status: "error"` results carrying a
+stable `error_code`. An `error_code` and a denial `reason` never appear
+together: a denial is a policy decision a human can approve, an error is a
+condition to fix.
 
 | `error_code` | Meaning |
 |---|---|
@@ -173,6 +197,9 @@ results carrying a stable `error_code`:
 | `request_id_conflict` | The key was already used for a different send |
 | `request_in_flight` | The same request is executing right now |
 | `request_incomplete` | An earlier execution recorded neither outcome nor transaction; a human should review |
+| `wallet_locked` | satsd holds no seed; a human must run `sats daemon unlock` |
+| `daemon_unavailable` | satsd could not be reached, or could not be told a send's outcome |
+| `unauthorized` | The presented token does not authorize this agent's grant |
 
 ## Denial semantics
 
@@ -212,21 +239,34 @@ dismisses a request and revokes its unconsumed approval.
 
 ## Send lifecycle
 
-The server executes:
+A send spans one connection to the daemon; the request claim is released if
+that connection closes, so a caller that dies mid-send strands nothing.
 
-1. normalize the recipient and compute the canonical intent digest
-   (network, agent, recipient, amount — the fee is excluded);
+The shim normalizes the recipient, then the daemon executes:
+
+1. verify the bearer token against the grant, and compute the canonical
+   intent digest (network, agent, recipient, amount — the fee is excluded);
 2. resolve the request id: replay a recorded keyed outcome, reject a
    conflicting key reuse, or claim a durable request record for execution;
 3. reload the grant so revocation is current;
-4. precheck expiry, amount cap, and obviously exhausted budget;
-5. run shared safe preparation to sync, protect UTXOs, and learn the fee;
-6. authorize the final amount plus fee;
-7. reserve and persist budget;
-8. unlock the grant-wrapped seed and sign;
-9. privately save raw finalized transaction hex — attributed to the agent,
-   request, and intent digest — before network access;
-10. broadcast, mark the transaction broadcast, and return the txid.
+4. precheck expiry, amount cap, and obviously exhausted budget.
+
+The shim then runs shared safe preparation to sync, protect UTXOs, and build
+the PSBT, and hands it back. The daemon:
+
+5. derives the payment and fee **from the PSBT** against the wallet's own
+   descriptors, and refuses if they disagree with the request it claimed —
+   nothing the shim reports about the transaction is trusted;
+6. re-reads the grant under its lock, re-checks the token, and authorizes
+   the derived amount plus fee;
+7. reserves and persists budget;
+8. signs with the seed held in its memory;
+9. privately saves raw finalized transaction hex — attributed to the agent,
+   request, and intent digest — before returning. A signed transaction never
+   crosses the socket.
+
+The shim broadcasts the saved transaction and reports the result back, which
+marks the record and resolves the request.
 
 Each transition is appended to the per-network event log
 (`events/log.jsonl`), and the request record is resolved to its outcome, so
@@ -251,7 +291,14 @@ the next call without restarting the MCP client. An already signed
 transaction remains valid after revocation.
 
 Expired grants cannot start a new MCP server and are removed when discovered
-by grant-listing and startup paths.
+by grant-listing and startup paths. Re-issuing a grant mints a new token, so
+a server still holding the old one is refused on its next start.
+
+A locked daemon is not a denial. `send` returns `status: "error"` with
+`error_code: "wallet_locked"` and no `reason`, so an agent can distinguish a
+policy refusal — which a human may approve — from a wallet nobody has
+unlocked yet, which they simply need to unlock. `daemon_unavailable` means
+satsd could not be reached at all.
 
 ## Transport rules
 

@@ -10,6 +10,9 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
     let net_name = network_name(network);
     let now = unix_now();
     let grants = store.active_grants(net_name, now)?;
+    // v1 records are not authority, but they are on disk and a human
+    // needs to be told so rather than shown an empty list.
+    let legacy = store.legacy_grants(net_name)?;
 
     if json {
         let list: Vec<_> = grants
@@ -28,8 +31,20 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
                 })
             })
             .collect();
+        // The array shape is the documented contract; the v1 notice goes
+        // to stderr so stdout stays exactly the list a script expects.
+        for agent in &legacy {
+            eprintln!("⚠ {}", reissue_notice(agent));
+        }
         println!("{}", serde_json::json!(list));
         return Ok(());
+    }
+
+    if !legacy.is_empty() {
+        for agent in &legacy {
+            ui::warn(&reissue_notice(agent));
+        }
+        println!();
     }
 
     if grants.is_empty() {
@@ -87,4 +102,12 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
         println!("{}", line(row));
     }
     Ok(())
+}
+
+/// What a human must do about a grant left in the v1 format.
+fn reissue_notice(agent: &str) -> String {
+    format!(
+        "grant for {agent:?} uses the v1 format and cannot sign — re-issue it: \
+         sats agent revoke {agent} && sats agent grant {agent} --budget <sats>"
+    )
 }

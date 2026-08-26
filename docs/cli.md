@@ -70,6 +70,12 @@ hold the explicit advanced workflows.
 | `sats psbt inspect <FILE>` | Decode a PSBT file offline: outputs, fee, signing state |
 | `sats psbt sign <FILE> [--out FILE]` | Sign an explicit PSBT artifact |
 | `sats tx broadcast <FILE\|TXID>` | Broadcast a raw hex file, or a saved transaction by txid/prefix/id |
+| `sats daemon run [--auto-lock D]` | Run the signing daemon in the foreground (for a supervisor) |
+| `sats daemon start [--auto-lock D]` | Start the signing daemon in the background |
+| `sats daemon status` | Show whether the daemon is running, and whether it can sign |
+| `sats daemon unlock` | Unseal the wallet into the daemon so agent sends can be signed |
+| `sats daemon lock` | Drop the seed from the daemon's memory, without stopping it |
+| `sats daemon stop` | Stop the daemon |
 | `sats agent grant <name>` | Create bounded unattended signing authority |
 | `sats agent revoke <name>` | Delete an agent grant immediately |
 | `sats agent list` | List non-expired grants and remaining budgets |
@@ -183,6 +189,35 @@ hidden internal state. New sats versions no longer write stored sessions.
 transaction hex; anything else resolves a saved transaction by full txid,
 unique prefix, or the session id that produced it.
 
+## The signing daemon
+
+Agent sends are signed by `satsd`, a local per-network process that holds the
+seed in memory. The served MCP process holds only a bearer token, so nothing
+an agent can read can produce a signature.
+
+```sh
+sats daemon start          # background; logs to <network>/satsd.log
+sats daemon unlock         # password prompt, or SATS_PASSWORD
+sats daemon status
+```
+
+The daemon starts **locked** and signs nothing until a human unlocks it.
+`--auto-lock` (default `8h`) drops the seed after that much inactivity;
+`sats daemon lock` drops it immediately without stopping the process. While
+locked, agent sends return the typed error code `wallet_locked` rather than a
+policy denial.
+
+For anything long-lived, prefer `sats daemon run` under a supervisor — a
+systemd user unit or a launchd agent. A backgrounded `sats daemon start` dies
+with its session, and only a supervisor will bring it back.
+
+The socket is `$XDG_RUNTIME_DIR/sats/<network>.sock`, mode 0600, or
+`<network>/d.sock` under `SATS_DIR`. One daemon serves one network; a second
+on the same network is refused.
+
+Human commands never use the daemon. `sats send`, `sats psbt sign`, and
+`sats init` unseal the seed for the duration of one command, as before.
+
 ## Agent grants
 
 ```sh
@@ -195,7 +230,19 @@ sats agent grant <name> --budget <SATS> [--for <DURATION>] \
 underscores.
 
 Budget is amount plus fee. `--max-tx` applies to recipient amount only and
-`--max-fee` applies to fee only. Grant creation requires the wallet password.
+`--max-fee` applies to fee only. Grant creation requires the wallet password,
+which authorizes the grant and is not otherwise used: the grant file holds a
+budget and a token hash, never key material.
+
+Creating a grant prints a bearer token **once**. It is not stored — only its
+SHA-256 is — so there is no way to recover it later; re-issue the grant to
+mint a new one. Pass it to the served process as `SATS_AGENT_TOKEN`:
+
+```sh
+sats agent grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
+# SATS_AGENT_TOKEN=<token>
+claude mcp add sats --env SATS_AGENT_TOKEN=<token> -- sats agent serve claude
+```
 
 ```sh
 sats agent list
@@ -203,7 +250,13 @@ sats agent revoke claude
 ```
 
 Expired grants are removed while listing. Revocation deletes the grant file;
-an active MCP server observes the deletion on its next send call.
+an active MCP server observes the deletion on its next send call. Re-issuing
+a grant replaces its token, so rotation and revocation are the same act.
+
+Grants written by releases before the daemon stored recoverable signing
+material in the grant file. They are reported by `sats agent list` and
+refused for signing; re-issue them, and read
+[Security](security.md) about rotating the wallet.
 
 `sats agent serve <name>` runs the MCP server as that agent. See
 [MCP and agent grants](mcp.md) for the tool-level contract.
@@ -297,6 +350,7 @@ protects from later coin selection automatically.
 - `psbt inspect`;
 - `psbt sign`;
 - `tx broadcast`;
+- `daemon start`, `daemon status`, `daemon unlock`, `daemon lock`, `daemon stop`;
 - `agent grant`;
 - `agent revoke`;
 - `agent list`;
@@ -310,6 +364,12 @@ protects from later coin selection automatically.
 
 JSON field names are compatibility surfaces. Scripts should branch on
 documented status and reason fields rather than human-readable messages.
+
+Two shapes are worth calling out. `agent grant --json` includes `token`, the
+only time it is ever emitted; treat that output as a secret. `daemon status
+--json` reports `{"running": false}` and exits 0 when no daemon is running,
+so a script can check without treating absence as failure — the text form
+fails instead, because a human asking for status wants to be told.
 
 `init` remains an interactive recovery-material flow and deliberately has no
 JSON mode: emitting the mnemonic on a machine-readable stream invites

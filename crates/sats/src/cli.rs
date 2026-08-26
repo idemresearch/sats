@@ -80,6 +80,11 @@ pub enum Command {
         #[command(subcommand)]
         command: TxCommand,
     },
+    /// Run and control satsd, the local signing daemon
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
     /// Manage agent spending grants and the agent-facing MCP server
     Agent {
         #[command(subcommand)]
@@ -90,6 +95,30 @@ pub enum Command {
         #[command(subcommand)]
         command: AlkanesCommand,
     },
+}
+
+#[derive(Subcommand)]
+pub enum DaemonCommand {
+    /// Run the daemon in the foreground (for systemd, launchd, or a shell)
+    Run {
+        /// Lock the seed after this much inactivity (e.g. 8h, 30m)
+        #[arg(long, default_value = "8h", value_name = "DURATION")]
+        auto_lock: String,
+    },
+    /// Start the daemon in the background
+    Start {
+        /// Lock the seed after this much inactivity (e.g. 8h, 30m)
+        #[arg(long, default_value = "8h", value_name = "DURATION")]
+        auto_lock: String,
+    },
+    /// Show whether the daemon is running, and whether it can sign
+    Status,
+    /// Unseal the wallet into the daemon so agent sends can be signed
+    Unlock,
+    /// Drop the seed from the daemon's memory, without stopping it
+    Lock,
+    /// Stop the daemon
+    Stop,
 }
 
 #[derive(Subcommand)]

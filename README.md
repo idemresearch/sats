@@ -4,7 +4,9 @@
 
 Run an on-chain wallet from your terminal, or give an AI agent a budget it
 cannot exceed. Keys stay local, spends are prepared as in-memory PSBTs, and
-every agent spend is checked against human-set limits before signing.
+every agent spend is checked against human-set limits by a separate process
+that holds the only copy of the key — so the limits hold even if the agent
+does not.
 
 [Docs](docs/README.md) · [CLI](docs/cli.md) · [MCP](docs/mcp.md) ·
 [Architecture](docs/architecture.md) · [Security](docs/security.md)
@@ -12,6 +14,11 @@ every agent spend is checked against human-set limits before signing.
 > [!WARNING]
 > sats is experimental. Signet is the default; use small amounts and short
 > agent grants while evaluating it.
+>
+> Grants created before the signing daemon stored recoverable key material in
+> the grant file. They are now refused rather than honored. If an agent with
+> shell access ever ran while one existed, move the funds to a fresh wallet —
+> see [Security](docs/security.md).
 
 ## Install
 
@@ -72,17 +79,26 @@ and machine-readable output.
 
 ## Give an agent a budget
 
-Create bounded spending authority, then launch the MCP server as that agent:
+Start the signing daemon, then create bounded spending authority:
 
 ```sh
+sats daemon start
+sats daemon unlock
+
 sats agent grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
-claude mcp add sats -- sats agent serve claude
+# prints, once: SATS_AGENT_TOKEN=<token>
+
+claude mcp add sats --env SATS_AGENT_TOKEN=<token> -- sats agent serve claude
 ```
 
 The agent receives four tools: `get_balance`, `get_receive_address`,
 `get_grant`, and `send`. Each send is checked against the grant's expiry,
 per-transaction amount cap, fee cap, and remaining budget. Outside that
 authority the agent receives a deterministic refusal, not a signature.
+
+The token names a policy; it opens nothing. The seed lives only in `satsd`,
+which decides and signs, and which derives what a transaction actually pays
+from the PSBT rather than believing what it was told.
 
 ```json
 {
@@ -109,17 +125,27 @@ details.
 
 - The seed is sealed with Argon2id and XChaCha20-Poly1305. The SQLite wallet
   database is watch-only and never contains private keys.
+- A grant file holds a budget and the SHA-256 of a bearer token. It contains
+  no key material: reading it gets you nothing that can spend.
+- Agent signatures happen only inside `satsd`, which starts locked, auto-locks
+  when idle, and refuses with a typed `wallet_locked` rather than a denial.
+- The daemon recomputes a transaction's payment and fee from the PSBT against
+  the wallet's own descriptors. An extra output raises the amount charged to
+  the budget; a foreign input is refused outright.
 - Agent authorization is deterministic. Budget is reserved and persisted
   before signing because a signed transaction is already spendable.
-- Finalized transactions are written privately before broadcast so a crash or
-  lost provider response cannot strand the only retry copy.
+- Finalized transactions are written privately before broadcast, by the
+  process that signed them, so a crash or lost response cannot strand the
+  only retry copy.
 - Planning excludes common inscription postage outputs by default and unions
   those exclusions with every configured asset guard.
 - A configured guard fails closed. Agents cannot use `--allow-dust` or
   `--no-guards`.
-- An active grant enables unattended signing. Anyone who can read the grant
-  file as your OS user can recover the seed; keep budgets small and expiries
-  short.
+- A stolen agent token spends that grant's remaining budget until it expires —
+  which is what a budget is for — and never the seed. Keep budgets small and
+  expiries short.
+- satsd runs as your own user, so it is a process boundary, not a privilege
+  boundary: it defeats reading a file, not root or a debugger.
 
 Read the full [security and trust model](docs/security.md) before using
 mainnet or unattended grants.
@@ -132,10 +158,11 @@ network, clock, or async-runtime dependencies. `crates/sats` supplies native
 storage, providers, terminal output, the CLI, and the MCP server.
 
 PSBTs are the preparation and signer contract. They stay in memory for normal
-sends and leave the wallet only as explicit `--export-psbt` file artifacts.
-Once fully signed, sats persists private raw transaction hex instead; a
-provider then broadcasts it. Agents use the same preparation and safety path
-as humans, with the grant check added before signing.
+sends and leave the wallet only as explicit `--export-psbt` file artifacts —
+and, for an agent send, as the request the shim hands `satsd`. Once fully
+signed, sats persists private raw transaction hex instead; a provider then
+broadcasts it. Agents use the same preparation and safety path as humans,
+with the grant check added before signing, in a process they cannot read.
 
 See [Architecture](docs/architecture.md) for module ownership and end-to-end
 flows, or [AGENTS.md](AGENTS.md) for the implementation rules used by coding

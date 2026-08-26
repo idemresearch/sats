@@ -1,14 +1,14 @@
 //! Unsealing the master seed with the wallet password.
+//!
+//! There is exactly one way to turn a password into signing material, and
+//! it is here. Agent grants carry no key material at all: they name a
+//! policy that `satsd` enforces against a seed it unsealed itself.
 
 use anyhow::{Context, Result};
 use bdk_wallet::bip39::Mnemonic;
-#[cfg(feature = "mcp")]
-use sats_core::authz::Grant;
 use sats_core::{seal, seed};
 
 use crate::password;
-#[cfg(feature = "mcp")]
-use crate::store::grant_aad;
 use crate::store::{AAD_SEED, Store};
 
 /// Prompt for (or read) the password and unseal the mnemonic.
@@ -20,12 +20,11 @@ pub fn unlock(store: &Store) -> Result<Mnemonic> {
     Ok(seed::parse_mnemonic(phrase)?)
 }
 
-/// Unseal the grant-wrapped mnemonic — the unattended signing path.
-/// Only callable while the grant file (key + wrapped seed) exists.
-#[cfg(feature = "mcp")]
-pub fn unlock_grant(grant: &Grant, network: &str) -> Result<Mnemonic> {
-    let key = seal::decode_key_b64(&grant.grant_key)?;
-    let bytes = seal::open_with_key(&grant.wrapped_seed, &key, &grant_aad(network, &grant.agent))?;
-    let phrase = std::str::from_utf8(&bytes).context("corrupt grant")?;
-    Ok(seed::parse_mnemonic(phrase)?)
+/// Prove the human knows the wallet password, without keeping anything.
+///
+/// Used where the password is the authorization gesture rather than a
+/// source of key material — issuing a grant, approving one request.
+pub fn verify_password(store: &Store) -> Result<()> {
+    let _ = unlock(store)?;
+    Ok(())
 }

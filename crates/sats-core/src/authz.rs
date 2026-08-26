@@ -9,10 +9,21 @@
 use serde::{Deserialize, Serialize};
 
 use crate::fmt::format_sats;
-use crate::seal::SealedBlob;
+use crate::token;
+
+/// Current on-disk grant shape. Version 1 stored the master seed re-sealed
+/// under a key in the same file; it is read for diagnosis and refused for
+/// signing. See `Store::load_grant`.
+pub const GRANT_FORMAT_VERSION: u32 = 2;
+
+const fn grant_format_version() -> u32 {
+    GRANT_FORMAT_VERSION
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Grant {
+    #[serde(default = "grant_format_version")]
+    pub format_version: u32,
     pub agent: String,
     /// Network name, so a grant file copied across networks is inert.
     pub network: String,
@@ -26,11 +37,16 @@ pub struct Grant {
     pub created_at: u64,
     pub expires_at: u64,
     pub tx_count: u64,
-    /// The master seed re-sealed under `grant_key` — see the V1 trust
-    /// model in the README. Deleting the grant file is revocation.
-    pub wrapped_seed: SealedBlob,
-    /// Base64 32-byte key for `wrapped_seed`.
-    pub grant_key: String,
+    /// Public identifier for this grant's bearer token: a prefix of
+    /// `token_hash`, safe to log, display, and put in an error.
+    pub token_id: String,
+    /// SHA-256 of the bearer token, compared in constant time by the
+    /// signing daemon. The token itself is shown to the human once, at
+    /// creation, and is never persisted by sats.
+    ///
+    /// This file holds no key material. Deleting it is revocation; the
+    /// seed it authorizes spending from lives only in `satsd`'s memory.
+    pub token_hash: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,6 +295,12 @@ pub fn authorize_intent_with_approval(
 }
 
 impl Grant {
+    /// Whether a presented bearer token authorizes this grant. Constant
+    /// time in the token contents.
+    pub fn authorizes(&self, token: &str) -> bool {
+        token::verify(token, &self.token_hash)
+    }
+
     pub fn remaining_sat(&self) -> u64 {
         self.budget_sat.saturating_sub(self.spent_sat)
     }
@@ -403,11 +425,11 @@ impl DenyReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::seal;
 
     fn grant(budget: u64, spent: u64, max_tx: Option<u64>, max_fee: Option<u64>) -> Grant {
-        let key = seal::decode_key_b64(&seal::generate_key_b64().unwrap()).unwrap();
+        let token = token::generate().unwrap();
         Grant {
+            format_version: GRANT_FORMAT_VERSION,
             agent: "test".into(),
             network: "signet".into(),
             budget_sat: budget,
@@ -417,8 +439,8 @@ mod tests {
             created_at: 1_000,
             expires_at: 2_000,
             tx_count: 0,
-            wrapped_seed: seal::seal_with_key(b"seed", &key, b"test").unwrap(),
-            grant_key: seal::generate_key_b64().unwrap(),
+            token_id: token.token_id,
+            token_hash: token.token_hash,
         }
     }
 
