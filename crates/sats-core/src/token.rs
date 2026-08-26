@@ -73,14 +73,7 @@ pub fn verify(token: &str, expected_hash: &str) -> bool {
 }
 
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    a.len() == b.len() && bool::from(subtle::ConstantTimeEq::ct_eq(a, b))
 }
 
 #[cfg(test)]

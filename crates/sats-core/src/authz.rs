@@ -56,9 +56,17 @@ pub struct SpendRequest {
 }
 
 impl SpendRequest {
-    /// What the spend draws from the budget: amount + fee.
+    /// What the spend draws from the budget: amount + fee. Saturating,
+    /// for display and journaling; the authorization decision uses
+    /// [`SpendRequest::checked_total_sat`] so an overflow denies rather
+    /// than collapsing into a passable number.
     pub fn total_sat(&self) -> u64 {
         self.amount_sat.saturating_add(self.fee_sat)
+    }
+
+    /// The budget draw, or `None` when amount + fee overflows.
+    pub fn checked_total_sat(&self) -> Option<u64> {
+        self.amount_sat.checked_add(self.fee_sat)
     }
 }
 
@@ -108,9 +116,16 @@ impl IntentRequest {
         }
     }
 
-    /// What the intent draws from the budget: sats out + fee.
+    /// What the intent draws from the budget: sats out + fee. Saturating,
+    /// for display and journaling; decisions use
+    /// [`IntentRequest::checked_total_sat`].
     pub fn total_sat(&self) -> u64 {
         self.sats_out().saturating_add(self.fee_sat())
+    }
+
+    /// The budget draw, or `None` when sats out + fee overflows.
+    pub fn checked_total_sat(&self) -> Option<u64> {
+        self.sats_out().checked_add(self.fee_sat())
     }
 }
 
@@ -138,6 +153,12 @@ pub enum DenyReason {
     ApprovalFeeExceeded {
         fee_sat: u64,
         max_fee_sat: u64,
+    },
+    /// Amount + fee overflows u64. Arithmetically absurd, so it fails
+    /// closed instead of saturating into a number a budget could pass.
+    AmountOverflow {
+        amount_sat: u64,
+        fee_sat: u64,
     },
 }
 
@@ -202,6 +223,34 @@ pub enum ReserveVia {
     Approval,
 }
 
+/// The one agent-name rule, stated once for every surface's error text.
+pub const AGENT_NAME_RULE: &str = "agent name must be 1-32 chars of a-z, 0-9, - or _";
+
+/// PURE. Whether a string is a well-formed agent name.
+///
+/// Agent names become path components (grant files, request
+/// directories), so this is a security check, not cosmetics: the only
+/// names that may ever reach a path join are the ones this accepts.
+/// Shared by the CLI, the daemon socket boundary, and the store.
+pub fn valid_agent_name(agent: &str) -> bool {
+    !agent.is_empty()
+        && agent.len() <= 32
+        && agent
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// PURE. The per-transaction fee cap a grant gets when its creator does
+/// not choose one: max(2% of budget, 1000 sat), clamped to the budget.
+///
+/// A grant with no fee cap lets a single bad fee estimate burn the whole
+/// budget as miner fees; this keeps "budget + expiry" the only required
+/// decisions while bounding that loss. Lifting the cap is an explicit
+/// choice at creation.
+pub fn default_max_fee_sat(budget_sat: u64) -> u64 {
+    (budget_sat / 50).max(1_000).min(budget_sat)
+}
+
 /// PURE. Send-shaped view of [`authorize_intent`], for callers that only
 /// ever send. Both paths make the identical decision.
 pub fn authorize_spend(grant: &Grant, req: &SpendRequest, now_unix: u64) -> Decision {
@@ -210,8 +259,8 @@ pub fn authorize_spend(grant: &Grant, req: &SpendRequest, now_unix: u64) -> Deci
 
 /// PURE. The single deterministic enforcement point for every intent.
 /// Check order: expiry → intent authority → per-tx amount cap →
-/// per-tx fee cap → budget. Expiry outranks everything, including
-/// whether the intent kind is granted at all.
+/// per-tx fee cap → overflow → budget. Expiry outranks everything,
+/// including whether the intent kind is granted at all.
 pub fn authorize_intent(grant: &Grant, req: &IntentRequest, now_unix: u64) -> Decision {
     if grant.is_expired(now_unix) {
         return Decision::Deny(DenyReason::Expired {
@@ -244,10 +293,16 @@ pub fn authorize_intent(grant: &Grant, req: &IntentRequest, now_unix: u64) -> De
             max_fee_sat,
         });
     }
+    let Some(total_sat) = req.checked_total_sat() else {
+        return Decision::Deny(DenyReason::AmountOverflow {
+            amount_sat: req.amount_sat,
+            fee_sat: req.fee_sat,
+        });
+    };
     let remaining_sat = grant.remaining_sat();
-    if req.total_sat() > remaining_sat {
+    if total_sat > remaining_sat {
         return Decision::Deny(DenyReason::OverBudget {
-            requested_sat: req.total_sat(),
+            requested_sat: total_sat,
             remaining_sat,
         });
     }
@@ -275,9 +330,12 @@ pub fn authorize_intent_with_approval(
         Decision::Deny(reason) => reason,
     };
     match reason {
-        DenyReason::Expired { .. } | DenyReason::IntentNotGranted { .. } => {
-            ApprovalDecision::Deny(reason)
-        }
+        // Never liftable: expiry is the human's kill switch, intent
+        // authority is not quantitative, and an overflowing total is
+        // nonsense no exception should turn into a signature.
+        DenyReason::Expired { .. }
+        | DenyReason::IntentNotGranted { .. }
+        | DenyReason::AmountOverflow { .. } => ApprovalDecision::Deny(reason),
         _ => match approval {
             Some(approval) if approval.is_valid_for(intent_digest, now_unix) => {
                 if req.fee_sat() > approval.max_fee_sat {
@@ -314,8 +372,10 @@ impl Grant {
     pub fn reserve(&mut self, req: &SpendRequest, now_unix: u64) -> Result<(), DenyReason> {
         match authorize_spend(self, req, now_unix) {
             Decision::Allow => {
+                // An allowed total is exact (overflow already denied);
+                // saturating here only matches the file's convention.
                 self.spent_sat = self.spent_sat.saturating_add(req.total_sat());
-                self.tx_count += 1;
+                self.tx_count = self.tx_count.saturating_add(1);
                 Ok(())
             }
             Decision::Deny(reason) => Err(reason),
@@ -353,13 +413,14 @@ impl Grant {
             ApprovalDecision::Deny(reason) => return Err(reason),
         };
         self.spent_sat = self.spent_sat.saturating_add(req.total_sat());
-        self.tx_count += 1;
+        self.tx_count = self.tx_count.saturating_add(1);
         Ok(via)
     }
 
     /// Return a reservation whose signing failed. Never refund after a
     /// signature exists — a signed transaction is spendable regardless of
-    /// whether the broadcast succeeded.
+    /// whether the broadcast succeeded. Both subtractions saturate, so a
+    /// refund can never credit more than what stands reserved.
     pub fn refund(&mut self, req: &SpendRequest) {
         self.spent_sat = self.spent_sat.saturating_sub(req.total_sat());
         self.tx_count = self.tx_count.saturating_sub(1);
@@ -375,6 +436,7 @@ impl DenyReason {
             DenyReason::OverBudget { .. } => "over_budget",
             DenyReason::IntentNotGranted { .. } => "intent_not_granted",
             DenyReason::ApprovalFeeExceeded { .. } => "approval_fee_exceeded",
+            DenyReason::AmountOverflow { .. } => "amount_overflow",
         }
     }
 
@@ -417,6 +479,14 @@ impl DenyReason {
                 "fee           {} sat\napproved max  {} sat",
                 format_sats(*fee_sat),
                 format_sats(*max_fee_sat)
+            ),
+            DenyReason::AmountOverflow {
+                amount_sat,
+                fee_sat,
+            } => format!(
+                "amount  {} sat\nfee     {} sat\namount + fee overflows",
+                format_sats(*amount_sat),
+                format_sats(*fee_sat)
             ),
         }
     }
@@ -586,11 +656,88 @@ mod tests {
     }
 
     #[test]
-    fn total_saturates_instead_of_overflowing() {
-        let g = grant(u64::MAX, 0, None, None);
+    fn overflowing_total_is_denied_not_saturated() {
+        let mut g = grant(u64::MAX, 0, None, None);
         let r = req(u64::MAX, u64::MAX);
+        // Display total still saturates; the decision does not.
         assert_eq!(r.total_sat(), u64::MAX);
-        assert_eq!(authorize_spend(&g, &r, NOW), Decision::Allow);
+        assert_eq!(r.checked_total_sat(), None);
+        assert_eq!(
+            authorize_spend(&g, &r, NOW),
+            Decision::Deny(DenyReason::AmountOverflow {
+                amount_sat: u64::MAX,
+                fee_sat: u64::MAX,
+            })
+        );
+        assert!(g.reserve(&r, NOW).is_err());
+        assert_eq!(g.spent_sat, 0, "denied reserve must not draw down");
+        assert_eq!(g.tx_count, 0);
+        // The largest representable total still authorizes.
+        assert_eq!(authorize_spend(&g, &req(u64::MAX, 0), NOW), Decision::Allow);
+    }
+
+    #[test]
+    fn amount_overflow_serializes_with_tag() {
+        let reason = DenyReason::AmountOverflow {
+            amount_sat: u64::MAX,
+            fee_sat: 1,
+        };
+        let json = serde_json::to_value(&reason).unwrap();
+        assert_eq!(json["reason"], "amount_overflow");
+        assert_eq!(json["amount_sat"], u64::MAX);
+        assert_eq!(json["fee_sat"], 1);
+        assert_eq!(reason.code(), "amount_overflow");
+        assert!(reason.human().contains("overflows"));
+    }
+
+    #[test]
+    fn approval_never_lifts_amount_overflow() {
+        let g = grant(u64::MAX, 0, None, None);
+        let a = approval(u64::MAX);
+        assert!(matches!(
+            decide(&g, u64::MAX, u64::MAX, Some(&a)),
+            ApprovalDecision::Deny(DenyReason::AmountOverflow { .. })
+        ));
+    }
+
+    #[test]
+    fn tx_count_saturates_at_max() {
+        let mut g = grant(10_000, 0, None, None);
+        g.tx_count = u64::MAX;
+        g.reserve(&req(1_000, 100), NOW).unwrap();
+        assert_eq!(g.tx_count, u64::MAX);
+    }
+
+    #[test]
+    fn agent_names_are_path_safe_or_rejected() {
+        for good in ["claude", "agent-1", "a", "x_2", &"a".repeat(32)] {
+            assert!(valid_agent_name(good), "{good:?} must be accepted");
+        }
+        for bad in [
+            "",
+            "../x",
+            "a/b",
+            "a\\b",
+            "/etc",
+            "a.b",
+            "A",
+            "café",
+            "a b",
+            "a\0b",
+            &"a".repeat(33),
+        ] {
+            assert!(!valid_agent_name(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn default_max_fee_floors_scales_and_clamps() {
+        assert_eq!(default_max_fee_sat(10_000), 1_000, "floor wins");
+        assert_eq!(default_max_fee_sat(50_000), 1_000, "2% below floor");
+        assert_eq!(default_max_fee_sat(100_000), 2_000, "2% of budget");
+        assert_eq!(default_max_fee_sat(1_000_000), 20_000);
+        assert_eq!(default_max_fee_sat(500), 500, "never above the budget");
+        assert_eq!(default_max_fee_sat(0), 0);
     }
 
     fn swap(give: u64, fee: u64) -> IntentRequest {

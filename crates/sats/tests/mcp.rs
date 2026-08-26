@@ -467,6 +467,12 @@ fn revocation_takes_effect_mid_session() {
     );
     assert_eq!(denial["status"], "denied");
     assert_eq!(denial["reason"], "revoked");
+    // The denied keyless send wrote nothing: no record dir was created
+    // for an agent whose grant no longer exists.
+    assert!(
+        !dir.path().join("signet/agent-requests/claude").exists(),
+        "a no-grant send must not create request records"
+    );
 }
 
 #[test]
@@ -779,6 +785,18 @@ fn daemon_begin_send(
     request_id: &str,
     amount_sat: u64,
 ) -> serde_json::Value {
+    daemon_begin_send_as(dir, "claude", token, request_id, amount_sat)
+}
+
+/// [`daemon_begin_send`] with the wire-level agent name under the
+/// caller's control, for hostile-input tests.
+fn daemon_begin_send_as(
+    dir: &TempDir,
+    agent: &str,
+    token: &str,
+    request_id: &str,
+    amount_sat: u64,
+) -> serde_json::Value {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
 
@@ -788,7 +806,7 @@ fn daemon_begin_send(
         "op": "begin_send",
         "protocol": 1,
         "token": token,
-        "agent": "claude",
+        "agent": agent,
         "request_id": request_id,
         "recipient": ADDRESS,
         "amount_sat": amount_sat,
@@ -798,4 +816,114 @@ fn daemon_begin_send(
     let mut line = String::new();
     BufReader::new(&stream).read_line(&mut line).unwrap();
     serde_json::from_str(line.trim()).unwrap()
+}
+
+/// The daemon writes nothing for an agent that has no grant: no request
+/// record, no directory, no journal line. An unauthenticated caller must
+/// not be able to grow the wallet's state.
+#[test]
+fn no_grant_begin_send_writes_nothing() {
+    let dir = TempDir::new().unwrap();
+    run_sats(&dir, &["init"]);
+    let token = grant_token(&dir, "claude", &["--budget", "50000"]);
+    let _daemon = Daemon::start(&dir);
+
+    let events_before =
+        std::fs::read(dir.path().join("signet/events/log.jsonl")).unwrap_or_default();
+
+    // "ghost" has no grant; the token is real but names another agent.
+    let outcome = daemon_begin_send_as(&dir, "ghost", &token, "k-ghost-1", 1_000);
+    assert_eq!(outcome["reply"], "outcome");
+    assert_eq!(outcome["status"], "denied", "got: {outcome}");
+    assert_eq!(outcome["reason"], "revoked");
+    assert!(
+        outcome.get("request_id").is_none(),
+        "no record may exist to name: {outcome}"
+    );
+
+    assert!(
+        !dir.path().join("signet/agent-requests/ghost").exists(),
+        "a no-grant send must not create request records"
+    );
+    let events_after =
+        std::fs::read(dir.path().join("signet/events/log.jsonl")).unwrap_or_default();
+    assert_eq!(
+        events_before, events_after,
+        "a no-grant send must not journal"
+    );
+    // A keyless variant writes nothing either.
+    let socket_alive = daemon_begin_send_as(&dir, "ghost2", &token, "k-g2", 1_000);
+    assert_eq!(socket_alive["reason"], "revoked");
+    assert!(
+        !dir.path()
+            .join("signet/agent-requests")
+            .join("ghost2")
+            .exists()
+    );
+}
+
+/// An agent name is a path component; a traversal name is refused with a
+/// typed operational error before the daemon touches the disk.
+#[test]
+fn a_traversal_agent_name_is_refused_before_any_io() {
+    let dir = TempDir::new().unwrap();
+    run_sats(&dir, &["init"]);
+    let token = grant_token(&dir, "claude", &["--budget", "50000"]);
+    let _daemon = Daemon::start(&dir);
+
+    for evil in ["../../evil", "/evil", "a/b", "..", "EVIL"] {
+        let outcome = daemon_begin_send_as(&dir, evil, &token, "k-evil-1", 1_000);
+        assert_eq!(outcome["reply"], "outcome");
+        assert_eq!(outcome["error_code"], "invalid_agent", "got: {outcome}");
+        assert!(outcome.get("reason").is_none(), "not a policy denial");
+    }
+
+    // Nothing landed anywhere: not outside the data dir, not inside it.
+    assert!(!dir.path().parent().unwrap().join("evil").exists());
+    assert!(!dir.path().join("evil").exists());
+    assert!(!dir.path().join("signet/agent-requests").exists());
+}
+
+/// Recorded truth outranks revocation, read-only: after the grant is
+/// gone, a keyed retry of a send that signed still answers with the
+/// recorded txid, and nothing new is written.
+#[test]
+fn revoked_keyed_retry_still_replays_recorded_truth() {
+    let dir = TempDir::new().unwrap();
+    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+
+    let mut mcp = McpSession::start(&dir, "claude", &fx.token);
+    handshake(&mut mcp);
+    let params = serde_json::json!({
+        "address": ADDRESS, "amount_sat": 1_000, "request_id": "job-1",
+    });
+    let sent = mcp.call_tool(2, "send", params.clone());
+    assert_eq!(sent["status"], "sent", "got: {sent}");
+    let txid = sent["txid"].as_str().unwrap().to_string();
+
+    run_sats(&dir, &["agent", "revoke", "claude"]);
+
+    let files_before: Vec<_> = std::fs::read_dir(dir.path().join("signet/agent-requests/claude"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    let replay = daemon_begin_send(&dir, &fx.token, "job-1", 1_000);
+    assert_eq!(replay["status"], "sent", "got: {replay}");
+    assert_eq!(replay["txid"], txid.as_str());
+    assert_eq!(replay["request_id"], "k-job-1");
+
+    let files_after: Vec<_> = std::fs::read_dir(dir.path().join("signet/agent-requests/claude"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(files_before, files_after, "replay must not write");
+
+    // A *fresh* key after revocation is denied and leaves no record.
+    let denied = daemon_begin_send(&dir, &fx.token, "job-2", 1_000);
+    assert_eq!(denied["reason"], "revoked");
+    assert!(
+        !dir.path()
+            .join("signet/agent-requests/claude/k-job-2.json")
+            .exists()
+    );
 }

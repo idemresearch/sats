@@ -255,6 +255,47 @@ fn a_wrong_password_does_not_unlock() {
     assert_eq!(status["locked"], true);
 }
 
+/// The socket is reachable by anything running as the wallet's user, so
+/// repeated wrong passwords must stop being tried: after the free misses
+/// the daemon refuses further attempts for a while, with a typed code.
+#[test]
+fn repeated_wrong_passwords_hit_the_throttle() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let _daemon = Daemon::start(&dir);
+
+    let attempt = |password: &str| -> String {
+        let mut cmd = assert_cmd::Command::cargo_bin("sats").unwrap();
+        let output = cmd
+            .args(["daemon", "unlock"])
+            .env("SATS_DIR", dir.path())
+            .env("SATS_PASSWORD", password)
+            .env("NO_COLOR", "1")
+            .assert()
+            .failure();
+        String::from_utf8_lossy(&output.get_output().stderr).into_owned()
+    };
+
+    // Three misses are free, the fourth arms the block.
+    for _ in 0..4 {
+        let failed = attempt("not-the-password");
+        assert!(failed.contains("unlock_failed"), "got: {failed}");
+    }
+    // The fifth is refused without being tried — even the right password.
+    let throttled = attempt(PASSWORD);
+    assert!(
+        throttled.contains("too many failed unlock attempts"),
+        "got: {throttled}"
+    );
+
+    let out = sats(&dir)
+        .args(["--json", "daemon", "status"])
+        .assert()
+        .success();
+    let status: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(status["locked"], true);
+}
+
 /// The socket is the access control, so its permissions are the test.
 #[test]
 fn the_socket_is_owner_only() {

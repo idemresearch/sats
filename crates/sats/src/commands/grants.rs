@@ -9,6 +9,10 @@ use crate::ui;
 pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
     let net_name = network_name(network);
     let now = unix_now();
+    // Listing is where expired grants get cleaned up: an explicit human
+    // surface, unlike the daemon's unauthenticated status op, which only
+    // reads. Pruning takes the grant lock internally.
+    store.prune_expired_grants(net_name, now)?;
     let grants = store.active_grants(net_name, now)?;
     // v1 records are not authority, but they are on disk and a human
     // needs to be told so rather than shown an empty list.

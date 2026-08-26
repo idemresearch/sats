@@ -27,6 +27,7 @@ bip39 = "2.2.2"
 argon2 = "0.5.3"
 chacha20poly1305 = "0.10.1"
 getrandom = "0.3"
+subtle = { version = "2.6", default-features = false }
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
 hex = "0.4.3"
 base64 = "0.22"

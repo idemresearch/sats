@@ -9,7 +9,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use sats_core::authz::Grant;
+use sats_core::authz::{AGENT_NAME_RULE, Grant, valid_agent_name};
 use sats_core::event::AgentEvent;
 use sats_core::plan::{LegacyPlan, PsbtSession, TransactionRecord};
 use sats_core::request::AgentRequest;
@@ -18,11 +18,21 @@ use sats_core::seal::SealedBlob;
 /// AAD binding the master seed blob to its purpose.
 pub const AAD_SEED: &[u8] = b"sats-seed-v1";
 
-pub fn unix_now() -> u64 {
+/// The clock for authorization decisions. Fails closed: a broken system
+/// clock refuses to authorize rather than reporting 1970, which would
+/// un-expire every grant and approval.
+pub fn now_checked() -> Result<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .context("system clock is before the unix epoch — refusing to authorize")
+}
+
+/// Record timestamps only (`created_at`, `resolved_at`, journal lines).
+/// Never use this for an authorization decision — expiry checked against
+/// its 0 fallback fails open. Decisions take [`now_checked`].
+pub fn unix_now() -> u64 {
+    now_checked().unwrap_or(0)
 }
 
 /// Exclusive hold on a network's grant state; released on drop.
@@ -68,6 +78,29 @@ impl Store {
     /// lets long-running components reconstruct an identical store.
     pub fn dir_override(&self) -> Option<&Path> {
         self.override_dir.as_deref()
+    }
+
+    /// Create `dir` and restrict it — and every component from the data
+    /// directory down — to the owner. Files inside are already 0600;
+    /// this keeps the directory *listings* (agent names, txids, request
+    /// ids) private too. Re-applies 0700 to components that already
+    /// exist, so older installations harden lazily as they are touched.
+    pub fn create_private_dirs(&self, dir: &Path) -> Result<()> {
+        fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        let mut current = dir;
+        loop {
+            if current.starts_with(&self.data_dir) {
+                harden_dir(current)?;
+            }
+            if current == self.data_dir {
+                break;
+            }
+            match current.parent() {
+                Some(parent) if parent.starts_with(&self.data_dir) => current = parent,
+                _ => break,
+            }
+        }
+        Ok(())
     }
 
     pub fn config_path(&self) -> PathBuf {
@@ -275,7 +308,7 @@ impl Store {
     /// also serializes sends inside one server.
     pub fn lock_grants(&self, network: &str) -> Result<GrantLock> {
         let dir = self.grants_dir(network);
-        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        self.create_private_dirs(&dir)?;
         let path = dir.join(".lock");
         let file = fs::File::create(&path)
             .with_context(|| format!("cannot open grant lock {}", path.display()))?;
@@ -287,7 +320,7 @@ impl Store {
     pub fn save_grant(&self, network: &str, grant: &Grant) -> Result<()> {
         let path = self
             .grants_dir(network)
-            .join(format!("{}.json", grant.agent));
+            .join(format!("{}.json", agent_component(&grant.agent)?));
         write_atomic(&path, &serde_json::to_vec_pretty(grant)?, true)
     }
 
@@ -305,6 +338,7 @@ impl Store {
     /// check is what keeps a signet grant from authorizing a mainnet
     /// signature when its file is dropped into another network's directory.
     pub fn load_grant(&self, network: &str, agent: &str) -> Result<Option<Grant>> {
+        let agent = agent_component(agent)?;
         let path = self.grants_dir(network).join(format!("{agent}.json"));
         if !path.exists() {
             return Ok(None);
@@ -366,6 +400,7 @@ impl Store {
     /// Returns whether a grant existed. Deletion is revocation: no key
     /// material survives it.
     pub fn delete_grant(&self, network: &str, agent: &str) -> Result<bool> {
+        let agent = agent_component(agent)?;
         let path = self.grants_dir(network).join(format!("{agent}.json"));
         if !path.exists() {
             return Ok(false);
@@ -374,7 +409,10 @@ impl Store {
         Ok(true)
     }
 
-    /// All grants for a network, deleting expired ones as they're found.
+    /// All unexpired grants for a network. Purely a read: expired files
+    /// are skipped, never deleted, so unauthenticated surfaces (the
+    /// daemon's status op) can call this without mutating grant state.
+    /// [`Store::prune_expired_grants`] is the explicit cleanup.
     pub fn active_grants(&self, network: &str, now_unix: u64) -> Result<Vec<Grant>> {
         let dir = self.grants_dir(network);
         if !dir.exists() {
@@ -399,13 +437,45 @@ impl Store {
                 continue;
             };
             if grant.is_expired(now_unix) {
-                let _ = fs::remove_file(&path);
                 continue;
             }
             grants.push(grant);
         }
         grants.sort_by(|a, b| a.agent.cmp(&b.agent));
         Ok(grants)
+    }
+
+    /// Delete expired grant files, returning the agent names pruned.
+    /// Takes the grant lock so a prune never races an in-flight send's
+    /// budget write or a grant replacement.
+    pub fn prune_expired_grants(&self, network: &str, now_unix: u64) -> Result<Vec<String>> {
+        let dir = self.grants_dir(network);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let _lock = self.lock_grants(network)?;
+        let mut pruned = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else { continue };
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            if is_legacy_grant(&value) {
+                continue;
+            }
+            let Ok(grant) = serde_json::from_value::<Grant>(value) else {
+                continue;
+            };
+            if grant.is_expired(now_unix) && fs::remove_file(&path).is_ok() {
+                pruned.push(grant.agent);
+            }
+        }
+        pruned.sort();
+        Ok(pruned)
     }
 
     /// Atomically create an agent request record and take its execution
@@ -416,9 +486,13 @@ impl Store {
         network: &str,
         request: &AgentRequest,
     ) -> Result<Option<RequestClaim>> {
-        let dir = self.agent_requests_dir(network).join(&request.agent);
-        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
-        let path = dir.join(format!("{}.json", request.id));
+        // Both components are gated before anything touches the disk.
+        let file = format!("{}.json", request_id_component(&request.id)?);
+        let dir = self
+            .agent_requests_dir(network)
+            .join(agent_component(&request.agent)?);
+        self.create_private_dirs(&dir)?;
+        let path = dir.join(file);
         let mut file = match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -448,9 +522,12 @@ impl Store {
         agent: &str,
         id: &str,
     ) -> Result<Option<RequestClaim>> {
-        let dir = self.agent_requests_dir(network).join(agent);
-        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
-        let path = dir.join(format!("{id}.lock"));
+        let file = format!("{}.lock", request_id_component(id)?);
+        let dir = self
+            .agent_requests_dir(network)
+            .join(agent_component(agent)?);
+        self.create_private_dirs(&dir)?;
+        let path = dir.join(file);
         let file = fs::File::create(&path)
             .with_context(|| format!("cannot open request lock {}", path.display()))?;
         match file.try_lock() {
@@ -470,8 +547,8 @@ impl Store {
     ) -> Result<Option<AgentRequest>> {
         let path = self
             .agent_requests_dir(network)
-            .join(agent)
-            .join(format!("{id}.json"));
+            .join(agent_component(agent)?)
+            .join(format!("{}.json", request_id_component(id)?));
         if !path.exists() {
             return Ok(None);
         }
@@ -487,8 +564,8 @@ impl Store {
     pub fn save_agent_request(&self, network: &str, request: &AgentRequest) -> Result<()> {
         let path = self
             .agent_requests_dir(network)
-            .join(&request.agent)
-            .join(format!("{}.json", request.id));
+            .join(agent_component(&request.agent)?)
+            .join(format!("{}.json", request_id_component(&request.id)?));
         write_atomic(&path, &serde_json::to_vec_pretty(request)?, true)
     }
 
@@ -568,7 +645,7 @@ impl Store {
     /// fsynced, under the log's own lock. Log order is the audit order.
     pub fn append_event(&self, network: &str, event: &AgentEvent) -> Result<()> {
         let dir = self.events_dir(network);
-        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        self.create_private_dirs(&dir)?;
         let lock = fs::File::create(dir.join(".lock"))
             .with_context(|| format!("cannot open event lock in {}", dir.display()))?;
         lock.lock()
@@ -631,6 +708,32 @@ fn harden_path(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Gate an agent name before it becomes a path component. Every store
+/// function that joins an agent name into a path must pass it through
+/// here: the daemon receives the name raw off its socket, and `join`
+/// with `..` or an absolute path escapes the data directory entirely.
+fn agent_component(agent: &str) -> Result<&str> {
+    if !valid_agent_name(agent) {
+        bail!("invalid agent name {agent:?}: {AGENT_NAME_RULE}");
+    }
+    Ok(agent)
+}
+
+/// Gate a request id before it becomes a path component. Daemon-minted
+/// ids (`k-<key>`, `r-<hex>`) always pass; this is the backstop for any
+/// future caller handing an id straight from a wire.
+fn request_id_component(id: &str) -> Result<&str> {
+    let ok = !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !ok {
+        bail!("invalid request id {id:?}: must be 1-128 chars of A-Za-z0-9_-");
+    }
+    Ok(id)
+}
+
 /// A grant written before the signing daemon existed: it carries the
 /// master seed re-sealed under a key stored in the same file.
 fn is_legacy_grant(value: &serde_json::Value) -> bool {
@@ -677,6 +780,11 @@ pub fn harden_dir(_path: &Path) -> Result<()> {
 pub fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
     let dir = path.parent().context("path has no parent directory")?;
     fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    // A secret file's directory listing is metadata about the secret:
+    // keep the containing directory owner-only too.
+    if secret {
+        harden_dir(dir)?;
+    }
     let tmp = path.with_extension("tmp");
     {
         let mut file =
@@ -1029,6 +1137,115 @@ mod tests {
             assert_eq!(
                 fs::metadata(legacy_path).unwrap().permissions().mode() & 0o777,
                 0o600
+            );
+        }
+    }
+
+    /// Agent names reach the store raw off the daemon socket, so every
+    /// path join gates them: a traversal name must fail and leave no
+    /// artifact anywhere.
+    #[test]
+    fn traversal_agent_names_are_rejected_at_the_store() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+
+        for evil in ["../evil", "a/b", "", "/etc", "A", "a\\b"] {
+            assert!(store.load_grant("signet", evil).is_err(), "load {evil:?}");
+            assert!(
+                store.delete_grant("signet", evil).is_err(),
+                "delete {evil:?}"
+            );
+            let mut g = grant("signet");
+            g.agent = evil.into();
+            assert!(store.save_grant("signet", &g).is_err(), "save {evil:?}");
+
+            let mut request = agent_request("k-job-1");
+            request.agent = evil.into();
+            assert!(
+                store.create_agent_request("signet", &request).is_err(),
+                "create request {evil:?}"
+            );
+            assert!(
+                store
+                    .claim_agent_request("signet", evil, "k-job-1")
+                    .is_err(),
+                "claim {evil:?}"
+            );
+            assert!(
+                store.load_agent_request("signet", evil, "k-job-1").is_err(),
+                "load request {evil:?}"
+            );
+        }
+        // A hostile request id is refused the same way.
+        assert!(
+            store
+                .create_agent_request("signet", &agent_request("../../evil"))
+                .is_err()
+        );
+
+        // Nothing escaped the data directory, and nothing was created for
+        // any of the refused names.
+        assert!(!dir.path().parent().unwrap().join("evil").exists());
+        assert!(!dir.path().join("evil").exists());
+        assert!(!store.agent_requests_dir("signet").exists());
+    }
+
+    /// Reading grant state must not mutate it: the daemon's status op is
+    /// unauthenticated, so listing leaves expired files alone and only the
+    /// explicit prune removes them.
+    #[test]
+    fn listing_does_not_delete_expired_grants_but_prune_does() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let mut expired = grant("signet");
+        expired.expires_at = 100;
+        store.save_grant("signet", &expired).unwrap();
+        let path = store.grants_dir("signet").join("claude.json");
+
+        let listed = store.active_grants("signet", 1_000).unwrap();
+        assert!(listed.is_empty(), "expired grant must not list as active");
+        assert!(path.exists(), "listing must not delete the file");
+
+        let pruned = store.prune_expired_grants("signet", 1_000).unwrap();
+        assert_eq!(pruned, vec!["claude".to_string()]);
+        assert!(!path.exists(), "prune removes the expired file");
+
+        // An unexpired grant survives both.
+        store.save_grant("signet", &grant("signet")).unwrap();
+        assert!(
+            store
+                .prune_expired_grants("signet", 1_000)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.active_grants("signet", 1_000).unwrap().len(), 1);
+    }
+
+    /// Directory listings under the data dir name agents, txids, and
+    /// request ids: every component down from the data dir is owner-only.
+    #[cfg(unix)]
+    #[test]
+    fn data_directories_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        store.save_grant("signet", &grant("signet")).unwrap();
+        store
+            .create_agent_request("signet", &agent_request("k-job-1"))
+            .unwrap()
+            .unwrap();
+
+        for private in [
+            store.grants_dir("signet"),
+            store.agent_requests_dir("signet"),
+            store.agent_requests_dir("signet").join("claude"),
+            dir.path().join("signet"),
+        ] {
+            assert_eq!(
+                fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+                0o700,
+                "{} must be owner-only",
+                private.display()
             );
         }
     }

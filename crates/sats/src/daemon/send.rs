@@ -98,6 +98,27 @@ fn sent_outcome(txid: &str, amount_sat: u64, fee_sat: u64, grant: Option<&Grant>
     )
 }
 
+/// The recorded truth of a request that already produced a side effect.
+fn replay_outcome(existing: &AgentRequest, grant: Option<&Grant>) -> SendOutcome {
+    match &existing.outcome {
+        Some(RequestOutcome::Sent { txid, fee_sat, .. }) => {
+            sent_outcome(txid, existing.amount_sat, *fee_sat, grant)
+        }
+        Some(RequestOutcome::Failed { message, .. }) => SendOutcome::error(message.clone()),
+        _ => SendOutcome::error("internal: side effect without outcome".into()),
+    }
+}
+
+/// The denial for an agent with no grant on file.
+fn revoked_outcome(agent: &str) -> SendOutcome {
+    SendOutcome::denied(
+        "revoked",
+        format!(
+            "human authorization required: no active grant — ask the human to run: sats agent grant {agent} --budget <sats>"
+        ),
+    )
+}
+
 /// One event onto the network's causal log.
 fn journal(store: &Store, net_name: &str, request: &AgentRequest, kind: EventKind) -> Result<()> {
     store.append_event(
@@ -205,7 +226,7 @@ fn claim_request(
     recipient: &str,
     amount_sat: u64,
     digest: &str,
-    grant: Option<&Grant>,
+    grant: &Grant,
     now: u64,
 ) -> ClaimState {
     let fresh_record = |id: String| AgentRequest {
@@ -280,14 +301,7 @@ fn claim_request(
     }
     if existing.has_side_effect() {
         journal_soft(store, net_name, &existing, EventKind::Replayed);
-        let outcome = match &existing.outcome {
-            Some(RequestOutcome::Sent { txid, fee_sat, .. }) => {
-                sent_outcome(txid, existing.amount_sat, *fee_sat, grant)
-            }
-            Some(RequestOutcome::Failed { message, .. }) => SendOutcome::error(message.clone()),
-            _ => SendOutcome::error("internal: side effect without outcome".into()),
-        };
-        return ClaimState::Done(outcome.with_request(&existing.id));
+        return ClaimState::Done(replay_outcome(&existing, Some(grant)).with_request(&existing.id));
     }
 
     // No side effect on record: either mid-execution, crashed, or safe to
@@ -331,7 +345,7 @@ fn claim_request(
                             resolved_at: now,
                         },
                     );
-                    sent_outcome(&record.txid, record.amount_sat, record.fee_sat, grant)
+                    sent_outcome(&record.txid, record.amount_sat, record.fee_sat, Some(grant))
                 }
                 TransactionStatus::Pending => {
                     let message = format!(
@@ -380,7 +394,16 @@ pub fn begin(
     recipient: &str,
     amount_sat: u64,
 ) -> Begin {
-    let now = unix_now();
+    // The agent name becomes a path component in every store lookup, so
+    // it is gated before anything touches the disk. A typed operational
+    // error, not a denial: a malformed name is protocol misuse, never
+    // something a human approves.
+    if !sats_core::authz::valid_agent_name(agent) {
+        return Begin::done(SendOutcome::op_error(
+            "invalid_agent",
+            sats_core::authz::AGENT_NAME_RULE.into(),
+        ));
+    }
 
     if let Some(key) = client_request_id
         && !valid_request_key(key)
@@ -390,6 +413,13 @@ pub fn begin(
             "request_id must be 1-64 characters of A-Za-z0-9_-".into(),
         ));
     }
+
+    // Authorization time fails closed: a broken clock must not un-expire
+    // every grant by reporting 1970.
+    let now = match crate::store::now_checked() {
+        Ok(now) => now,
+        Err(e) => return Begin::done(SendOutcome::op_error("clock_unavailable", format!("{e:#}"))),
+    };
 
     let digest = SendIntent {
         network: net_name.to_string(),
@@ -409,10 +439,6 @@ pub fn begin(
     // A grant that exists but rejects this token means the caller is not
     // the agent it claims to be. Refuse before writing anything: an
     // unauthenticated caller must not be able to create request records.
-    //
-    // An *absent* grant is different, and deliberately falls through to
-    // the claim below: a keyed retry whose earlier execution signed must
-    // still learn that, and recorded truth outranks revocation.
     if grant.as_ref().is_some_and(|g| !g.authorizes(token)) {
         return Begin::done(SendOutcome::op_error(
             "unauthorized",
@@ -422,6 +448,37 @@ pub fn begin(
             ),
         ));
     }
+    // No grant on file: nobody can be authenticated, so nothing may be
+    // written — no request record, no journal line. Recorded truth still
+    // outranks revocation: a keyed retry whose earlier execution signed
+    // learns that from the existing record, read-only.
+    let Some(grant) = grant else {
+        if let Some(key) = client_request_id {
+            let id = format!("k-{key}");
+            match store.load_agent_request(net_name, agent, &id) {
+                Ok(Some(existing)) if existing.intent_digest != digest => {
+                    return Begin::done(
+                        SendOutcome::op_error(
+                            "request_id_conflict",
+                            format!(
+                                "request_id {key:?} was already used for a different send — pick a fresh id"
+                            ),
+                        )
+                        .with_request(&existing.id),
+                    );
+                }
+                Ok(Some(existing)) if existing.has_side_effect() => {
+                    return Begin::done(replay_outcome(&existing, None).with_request(&existing.id));
+                }
+                Ok(Some(existing)) => {
+                    return Begin::done(revoked_outcome(agent).with_request(&existing.id));
+                }
+                Ok(None) => {}
+                Err(e) => return Begin::done(SendOutcome::error(format!("{e:#}"))),
+            }
+        }
+        return Begin::done(revoked_outcome(agent));
+    };
 
     let (mut request, claim, fresh) = match claim_request(
         store,
@@ -431,26 +488,11 @@ pub fn begin(
         recipient,
         amount_sat,
         &digest,
-        grant.as_ref(),
+        &grant,
         now,
     ) {
         ClaimState::Execute(request, claim, fresh) => (request, claim, fresh),
         ClaimState::Done(outcome) => return Begin::done(outcome),
-    };
-
-    // Revocation: the human already acted, and no token opens a grant that
-    // no longer exists. A fresh request is deliberately not recorded.
-    let Some(grant) = grant else {
-        let mut outcome = SendOutcome::denied(
-            "revoked",
-            format!(
-                "human authorization required: no active grant — ask the human to run: sats agent grant {agent} --budget <sats>"
-            ),
-        );
-        if !fresh {
-            outcome = outcome.with_request(&request.id);
-        }
-        return Begin::done(outcome);
     };
 
     if fresh {
@@ -615,7 +657,15 @@ pub fn authorize(
 
     // Fresh clock and a fresh approval read under the lock: preparation
     // synced the chain and may have taken long enough for either to move.
-    let now = unix_now();
+    // The clock fails closed, like at `begin`.
+    let now = match crate::store::now_checked() {
+        Ok(now) => now,
+        Err(e) => {
+            drop(grant_lock);
+            return SendOutcome::op_error("clock_unavailable", format!("{e:#}"))
+                .with_request(&request_id);
+        }
+    };
     let (mut approval, mut holder_record) = match current_approval(
         store,
         net_name,

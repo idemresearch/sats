@@ -207,6 +207,11 @@ The daemon starts **locked** and signs nothing until a human unlocks it.
 locked, agent sends return the typed error code `wallet_locked` rather than a
 policy denial.
 
+Repeated failed unlocks throttle: the first three misses are free, then
+each further miss doubles a required wait (capped at one minute) during
+which every attempt — right password included — is refused with the typed
+code `unlock_throttled` and the remaining wait.
+
 For anything long-lived, prefer `sats daemon run` under a supervisor — a
 systemd user unit or a launchd agent. A backgrounded `sats daemon start` dies
 with its session, and only a supervisor will bring it back.
@@ -222,7 +227,7 @@ Human commands never use the daemon. `sats send`, `sats psbt sign`, and
 
 ```sh
 sats agent grant <name> --budget <SATS> [--for <DURATION>] \
-  [--max-tx <SATS>] [--max-fee <SATS>]
+  [--max-tx <SATS>] [--max-fee <SATS> | --no-max-fee]
 ```
 
 `--for` defaults to `24h` and accepts human-readable durations such as `30m`,
@@ -230,9 +235,13 @@ sats agent grant <name> --budget <SATS> [--for <DURATION>] \
 underscores.
 
 Budget is amount plus fee. `--max-tx` applies to recipient amount only and
-`--max-fee` applies to fee only. Grant creation requires the wallet password,
-which authorizes the grant and is not otherwise used: the grant file holds a
-budget and a token hash, never key material.
+`--max-fee` applies to fee only. When `--max-fee` is not given, the grant
+gets a default fee cap of 2% of the budget — at least 1000 sats, never above
+the budget — so a single bad fee estimate cannot burn the whole budget as
+miner fees; `--no-max-fee` issues a grant without any fee cap. Grant
+creation requires the wallet password, which authorizes the grant and is not
+otherwise used: the grant file holds a budget and a token hash, never key
+material.
 
 Creating a grant prints a bearer token **once**. It is not stored — only its
 SHA-256 is — so there is no way to recover it later; re-issue the grant to

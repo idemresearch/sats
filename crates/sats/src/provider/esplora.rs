@@ -162,7 +162,7 @@ mod tests {
         let estimates =
             fee_estimates_from_2xx(&http_err(203, SIGNET_203_BODY)).expect("2xx body parses");
         assert_eq!(
-            pick_fee_rate(&estimates, 2),
+            pick_fee_rate(&estimates, 2).unwrap(),
             FeeRate::from_sat_per_vb_u32(4)
         );
     }

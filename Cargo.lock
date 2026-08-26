@@ -1398,6 +1398,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror",
  "zeroize",
 ]

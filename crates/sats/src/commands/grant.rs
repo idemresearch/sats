@@ -17,6 +17,7 @@ pub fn run(
     duration: &str,
     max_tx: Option<u64>,
     max_fee: Option<u64>,
+    no_max_fee: bool,
     json: bool,
 ) -> Result<()> {
     validate_agent_name(agent)?;
@@ -29,6 +30,15 @@ pub fn run(
     if lifetime == 0 {
         bail!("--for must be a positive duration");
     }
+    // A grant with no fee cap lets one bad fee estimate burn the whole
+    // budget as miner fees, so the cap defaults on. Lifting it entirely
+    // is `--no-max-fee`, an explicit choice.
+    let defaulted_fee = max_fee.is_none() && !no_max_fee;
+    let max_fee = match (max_fee, no_max_fee) {
+        (Some(cap), _) => Some(cap),
+        (None, true) => None,
+        (None, false) => Some(sats_core::authz::default_max_fee_sat(budget)),
+    };
     let net_name = network_name(network);
     let replacing = store.load_grant(net_name, agent)?.is_some();
 
@@ -41,7 +51,15 @@ pub fn run(
             rows.push(("Max tx", format!("{} sat", format_sats(max_tx))));
         }
         if let Some(max_fee) = max_fee {
-            rows.push(("Max fee", format!("{} sat", format_sats(max_fee))));
+            let row = if defaulted_fee {
+                format!(
+                    "{} sat (default — set with --max-fee, lift with --no-max-fee)",
+                    format_sats(max_fee)
+                )
+            } else {
+                format!("{} sat", format_sats(max_fee))
+            };
+            rows.push(("Max fee", row));
         }
         rows.push(("For", ui::human_duration(lifetime)));
         ui::kv_rows(&rows);
@@ -120,13 +138,8 @@ pub fn run(
 }
 
 fn validate_agent_name(agent: &str) -> Result<()> {
-    let ok = !agent.is_empty()
-        && agent.len() <= 32
-        && agent
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
-    if !ok {
-        bail!("agent name must be 1-32 chars of a-z, 0-9, - or _");
+    if !sats_core::authz::valid_agent_name(agent) {
+        bail!("{}", sats_core::authz::AGENT_NAME_RULE);
     }
     Ok(())
 }

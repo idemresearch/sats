@@ -2,8 +2,6 @@
 //! `crate::provider` — a `WalletCtx` is purely local state (sqlite-backed
 //! BDK wallet), so opening one requires no chain configuration at all.
 
-use std::fs;
-
 use anyhow::{Context, Result, bail};
 use bdk_wallet::{PersistedWallet, Wallet};
 use rusqlite::Connection;
@@ -28,7 +26,7 @@ pub fn create(store: &Store, network: Network, ext: String, int: String) -> Resu
         bail!("wallet already exists for {net_name} ({})", db.display());
     }
     let dir = db.parent().context("bad wallet path")?;
-    fs::create_dir_all(dir)?;
+    store.create_private_dirs(dir)?;
     let mut conn = Connection::open(&db)?;
     Wallet::create(ext, int)
         .network(network)
