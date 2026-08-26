@@ -20,7 +20,7 @@ use sats_core::bitcoin::Network;
 use crate::config::network_name;
 use crate::daemon::protocol::{self, PROTOCOL_VERSION, Request, Response, SendOutcome, StatusInfo};
 use crate::daemon::send::{self, Begin, InFlight};
-use crate::daemon::session::Session;
+use crate::daemon::session::{Session, UnlockError};
 use crate::store::{Store, unix_now};
 
 /// How often the idle sweep runs. The auto-lock deadline is exact to
@@ -147,9 +147,15 @@ fn dispatch(
 
         Request::Unlock { password, .. } => match session.unlock(store, &password) {
             Ok(()) => Response::Ok,
+            // A throttled attempt is a distinct, typed condition: the
+            // password was not even tried, and retrying sooner cannot help.
+            Err(err @ UnlockError::Throttled { .. }) => Response::Error {
+                code: "unlock_throttled".into(),
+                message: err.to_string(),
+            },
             Err(err) => Response::Error {
                 code: "unlock_failed".into(),
-                message: format!("{err:#}"),
+                message: err.to_string(),
             },
         },
 

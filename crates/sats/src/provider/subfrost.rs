@@ -544,9 +544,11 @@ impl SubfrostClient {
 
         let mut tip = point_of_agreement
             .ok_or_else(|| self.sync_err("no point of agreement with the local chain"))?;
+        // The conflict heights come from remote block data: a hostile or
+        // broken endpoint must produce a sync error, never a panic.
         tip = tip
             .extend(conflicts.into_iter().rev())
-            .expect("evicted are in order");
+            .map_err(|_| self.sync_err("provider served checkpoint conflicts out of order"))?;
 
         for (anchor, _) in anchors {
             let height = anchor.block_id.height;

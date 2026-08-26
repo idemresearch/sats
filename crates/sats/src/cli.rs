@@ -240,8 +240,17 @@ pub enum AgentCommand {
         #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
         max_tx: Option<u64>,
         /// Per-transaction fee cap in sats
-        #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+        /// (default: 2% of the budget, at least 1000, never above the budget)
+        #[arg(
+            long,
+            value_name = "SATS",
+            value_parser = crate::amount::parse,
+            conflicts_with = "no_max_fee"
+        )]
         max_fee: Option<u64>,
+        /// Issue the grant with no per-transaction fee cap at all
+        #[arg(long)]
+        no_max_fee: bool,
     },
     /// Revoke an agent's grant
     Revoke {

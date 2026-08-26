@@ -179,6 +179,10 @@ authorize a signature.
 - Chain sync validates the provider's genesis/network before applying data.
 - Planning fails rather than using stale wallet state after sync failure.
 - Fee estimation failure asks a human CLI caller to supply `--fee-rate`.
+- Fee estimates are bounded: a non-finite, negative, or absurd rate (above
+  10,000 sat/vB) from an endpoint is a typed fee error, never a fee.
+- Malformed checkpoint data from an endpoint fails the sync with a typed
+  error rather than the process.
 - A configured guard failure stops planning.
 - `--no-guards` and `--allow-dust` are human, per-invocation escape hatches.
 - MCP sends have no escape hatches and always use the safe defaults.

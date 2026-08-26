@@ -99,8 +99,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 duration,
                 max_tx,
                 max_fee,
+                no_max_fee,
             } => commands::grant::run(
-                &store, network, &name, budget, &duration, max_tx, max_fee, json,
+                &store, network, &name, budget, &duration, max_tx, max_fee, no_max_fee, json,
             ),
             cli::AgentCommand::Revoke { name } => {
                 commands::revoke::run(&store, network, &name, json)

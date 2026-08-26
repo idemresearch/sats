@@ -523,6 +523,58 @@ fn grant_list_revoke_lifecycle() {
         .stderr(predicate::str::contains("no grant"));
 }
 
+/// A grant with only a budget still gets a fee cap: without one, a bad
+/// fee estimate can burn the whole budget as miner fees. The default is
+/// max(2% of budget, 1000 sat), clamped to the budget; lifting it takes
+/// the explicit `--no-max-fee`.
+#[test]
+fn grant_defaults_a_fee_cap_and_no_max_fee_opts_out() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+
+    let granted_fee = |args: &[&str]| -> serde_json::Value {
+        let mut cmd_args = vec!["--json", "agent", "grant", "claude"];
+        cmd_args.extend_from_slice(args);
+        let out = sats(&dir).args(&cmd_args).assert().success();
+        let grant: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+        grant["max_fee_sat"].clone()
+    };
+
+    assert_eq!(granted_fee(&["--budget", "50k"]), 1_000, "floor");
+    assert_eq!(granted_fee(&["--budget", "200k"]), 4_000, "2% of budget");
+    assert_eq!(granted_fee(&["--budget", "500"]), 500, "clamped to budget");
+    assert_eq!(granted_fee(&["--budget", "50k", "--max-fee", "250"]), 250);
+    assert_eq!(
+        granted_fee(&["--budget", "50k", "--no-max-fee"]),
+        serde_json::Value::Null,
+        "lifting the cap is explicit"
+    );
+
+    // The two fee flags contradict each other; clap refuses the pair.
+    sats(&dir)
+        .args([
+            "agent",
+            "grant",
+            "claude",
+            "--budget",
+            "50k",
+            "--max-fee",
+            "250",
+            "--no-max-fee",
+        ])
+        .assert()
+        .code(2);
+
+    // The human output names the default and both escape hatches.
+    sats(&dir)
+        .args(["agent", "grant", "claude", "--budget", "50k"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Max fee"))
+        .stdout(predicate::str::contains("default"))
+        .stdout(predicate::str::contains("--no-max-fee"));
+}
+
 #[test]
 fn grant_requires_correct_password() {
     let dir = TempDir::new().unwrap();

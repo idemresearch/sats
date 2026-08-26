@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use crate::config::{Config, network_name};
 use crate::daemon;
-use crate::store::{Store, unix_now};
+use crate::store::{Store, now_checked, unix_now};
 use crate::ui;
 use crate::walletd;
 
@@ -39,7 +39,9 @@ pub fn run(
     let grant = store.load_grant(net_name, agent)?.with_context(|| {
         format!("no grant for {agent:?} — run: sats agent grant {agent} --budget <sats>")
     })?;
-    if grant.is_expired(unix_now()) {
+    // Fail-closed clock: a broken clock refuses to serve rather than
+    // treating every grant as unexpired.
+    if grant.is_expired(now_checked()?) {
         store.delete_grant(net_name, agent)?;
         bail!("grant for {agent:?} has expired — run: sats agent grant {agent} --budget <sats>");
     }

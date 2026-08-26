@@ -33,11 +33,85 @@ struct Unlocked {
     touched: Instant,
 }
 
+/// Escalating delay after failed unlock attempts.
+///
+/// Pure over an injected `Instant` so the schedule is testable without
+/// sleeping. The socket is reachable by any process running as the
+/// wallet's user, which makes an ungated unlock a password-guessing
+/// oracle; the first misses are free (humans mistype), then the delay
+/// doubles per miss up to a cap. Monotonic time, so a wall-clock
+/// rollback cannot lift a block early.
+struct UnlockThrottle {
+    failures: u32,
+    blocked_until: Option<Instant>,
+    base: Duration,
+}
+
+/// Failed attempts before any delay applies.
+const FREE_FAILURES: u32 = 3;
+/// Ceiling on the per-attempt delay.
+const MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+impl UnlockThrottle {
+    fn new(base: Duration) -> UnlockThrottle {
+        UnlockThrottle {
+            failures: 0,
+            blocked_until: None,
+            base,
+        }
+    }
+
+    /// Whether an attempt may run now; `Err` carries the remaining wait.
+    fn check(&self, now: Instant) -> Result<(), Duration> {
+        match self.blocked_until {
+            Some(until) if now < until => Err(until - now),
+            _ => Ok(()),
+        }
+    }
+
+    fn record_failure(&mut self, now: Instant) {
+        self.failures = self.failures.saturating_add(1);
+        if self.failures > FREE_FAILURES {
+            let doublings = (self.failures - FREE_FAILURES - 1).min(31);
+            let delay = self.base.saturating_mul(1u32 << doublings).min(MAX_BACKOFF);
+            self.blocked_until = Some(now + delay);
+        }
+    }
+
+    fn record_success(&mut self) {
+        self.failures = 0;
+        self.blocked_until = None;
+    }
+}
+
 pub struct Session {
     pub network: Network,
     pub net_name: &'static str,
     auto_lock_after: Duration,
     key: Mutex<Option<Unlocked>>,
+    unlock_gate: Mutex<UnlockThrottle>,
+}
+
+/// Why an unlock attempt did not unlock.
+#[derive(Debug)]
+pub enum UnlockError {
+    /// Refused without touching the sealed seed: too many recent misses.
+    Throttled { retry_in: Duration },
+    /// The attempt ran and failed (wrong password, unreadable seed, …).
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for UnlockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UnlockError::Throttled { retry_in } => write!(
+                f,
+                "too many failed unlock attempts — retry in {}s",
+                retry_in.as_secs().max(1)
+            ),
+            UnlockError::Failed(err) => write!(f, "{err:#}"),
+        }
+    }
 }
 
 /// The descriptors and phrase needed to verify and sign one transaction.
@@ -64,6 +138,16 @@ impl Session {
             net_name,
             auto_lock_after,
             key: Mutex::new(None),
+            unlock_gate: Mutex::new(UnlockThrottle::new(Duration::from_secs(1))),
+        }
+    }
+
+    /// Test constructor: a session whose unlock backoff starts at `base`.
+    #[cfg(test)]
+    fn with_unlock_base(self, base: Duration) -> Session {
+        Session {
+            unlock_gate: Mutex::new(UnlockThrottle::new(base)),
+            ..self
         }
     }
 
@@ -84,9 +168,33 @@ impl Session {
 
     /// Unseal the master seed with the human's password.
     ///
-    /// Deriving the descriptors here also proves the phrase is usable for
-    /// this network before the daemon reports itself unlocked.
-    pub fn unlock(&self, store: &Store, password: &str) -> Result<()> {
+    /// The throttle gate is held across the whole attempt: concurrent
+    /// unlocks queue on one mutex, so at most one Argon2id derivation
+    /// (64 MiB) is in memory at a time, and repeated misses back off
+    /// instead of turning the socket into a guessing oracle.
+    pub fn unlock(&self, store: &Store, password: &str) -> Result<(), UnlockError> {
+        let mut gate = self
+            .unlock_gate
+            .lock()
+            .map_err(|_| UnlockError::Failed(poisoned()))?;
+        gate.check(Instant::now())
+            .map_err(|retry_in| UnlockError::Throttled { retry_in })?;
+        match self.try_unlock(store, password) {
+            Ok(()) => {
+                gate.record_success();
+                Ok(())
+            }
+            Err(err) => {
+                gate.record_failure(Instant::now());
+                Err(UnlockError::Failed(err))
+            }
+        }
+    }
+
+    /// One ungated unlock attempt. Deriving the descriptors here also
+    /// proves the phrase is usable for this network before the daemon
+    /// reports itself unlocked.
+    fn try_unlock(&self, store: &Store, password: &str) -> Result<()> {
         let blob = store.read_seed()?;
         let bytes = Zeroizing::new(seal::open(&blob, password.as_bytes(), AAD_SEED)?);
         let phrase = Zeroizing::new(
@@ -94,10 +202,8 @@ impl Session {
                 .context("corrupt seed")?
                 .to_string(),
         );
-        // Deriving the descriptors here also proves the phrase is usable
-        // before the daemon reports itself unlocked. `Mnemonic` is not
-        // zeroize-on-drop, which is why only `phrase` is kept and a
-        // mnemonic is re-parsed for each signature.
+        // `Mnemonic` is not zeroize-on-drop, which is why only `phrase` is
+        // kept and a mnemonic is re-parsed for each signature.
         let (external, internal) = descriptors(&seed::parse_mnemonic(&phrase)?, self.network)?;
 
         let mut key = self.key.lock().map_err(|_| poisoned())?;
@@ -238,6 +344,65 @@ mod tests {
         session.unlock(&store, "password").unwrap();
         assert!(!session.lock_if_idle());
         assert!(!session.is_locked());
+    }
+
+    #[test]
+    fn unlock_backoff_is_free_then_doubling_then_capped() {
+        let t0 = Instant::now();
+        let mut throttle = UnlockThrottle::new(Duration::from_secs(1));
+
+        // Three misses cost nothing: humans mistype.
+        for _ in 0..FREE_FAILURES {
+            assert!(throttle.check(t0).is_ok());
+            throttle.record_failure(t0);
+        }
+        assert!(throttle.check(t0).is_ok(), "free misses arm no delay");
+
+        // The next misses double: 1s, 2s, 4s, … capped at 60s.
+        let mut expected = Duration::from_secs(1);
+        for _ in 0..8 {
+            throttle.record_failure(t0);
+            let retry_in = throttle.check(t0).unwrap_err();
+            assert_eq!(retry_in, expected.min(MAX_BACKOFF));
+            assert!(
+                throttle.check(t0 + retry_in).is_ok(),
+                "the block lifts exactly when it says"
+            );
+            expected *= 2;
+        }
+        // Far past the cap the delay stays capped.
+        for _ in 0..40 {
+            throttle.record_failure(t0);
+        }
+        assert_eq!(throttle.check(t0).unwrap_err(), MAX_BACKOFF);
+
+        // Success resets everything.
+        throttle.record_success();
+        assert!(throttle.check(t0).is_ok());
+        throttle.record_failure(t0);
+        assert!(throttle.check(t0).is_ok(), "the free window re-arms");
+    }
+
+    #[test]
+    fn a_throttled_unlock_refuses_even_the_correct_password() {
+        let (_dir, store) = store();
+        let session = Session::new(Network::Signet, "signet", Duration::from_secs(60))
+            .with_unlock_base(Duration::from_secs(3600));
+
+        // Three free misses, then the miss that arms the hour-long block.
+        for _ in 0..4 {
+            assert!(matches!(
+                session.unlock(&store, "wrong"),
+                Err(UnlockError::Failed(_))
+            ));
+        }
+        // The block refuses before the attempt runs: the right password
+        // is not even tried, so the wallet stays locked.
+        assert!(matches!(
+            session.unlock(&store, "password"),
+            Err(UnlockError::Throttled { .. })
+        ));
+        assert!(session.is_locked());
     }
 
     #[test]

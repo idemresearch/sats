@@ -193,6 +193,7 @@ condition to fix.
 
 | `error_code` | Meaning |
 |---|---|
+| `invalid_agent` | The agent name is not 1–32 characters of `a-z0-9_-` |
 | `invalid_request_id` | The key is not 1–64 characters of `A-Za-z0-9_-` |
 | `request_id_conflict` | The key was already used for a different send |
 | `request_in_flight` | The same request is executing right now |
@@ -200,6 +201,7 @@ condition to fix.
 | `wallet_locked` | satsd holds no seed; a human must run `sats daemon unlock` |
 | `daemon_unavailable` | satsd could not be reached, or could not be told a send's outcome |
 | `unauthorized` | The presented token does not authorize this agent's grant |
+| `clock_unavailable` | The system clock cannot be read; expiry cannot be evaluated, so the send refuses |
 
 ## Denial semantics
 
@@ -214,10 +216,17 @@ Supported reason codes are:
 | `over_budget` | Amount plus fee exceeds remaining budget |
 | `revoked` | The grant file no longer exists |
 | `approval_fee_exceeded` | The prepared fee exceeds a one-time approval's ceiling |
+| `amount_overflow` | Amount plus fee overflows; not approvable |
 
 An agent should relay the denial — including its `request_id` — to its
 human and stop. Retrying the same request unchanged cannot expand
 authority; what can change the answer is a human decision.
+
+A `revoked` denial for an agent with no grant on file carries a
+`request_id` only when an earlier authenticated execution already recorded
+the request: with no grant there is nobody to authenticate, so the daemon
+records nothing new. A keyed retry of a send that signed before the
+revocation still replays its recorded txid.
 
 ## One-time approvals
 

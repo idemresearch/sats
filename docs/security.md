@@ -20,8 +20,12 @@ material.
 
 Sensitive files are written atomically with restrictive Unix permissions.
 This includes sealed keys, grants, explicit PSBT sessions, and finalized
-transaction records. The boundary protects against partial writes and other
-OS users, but not against a process already running as the wallet's user.
+transaction records. The data directories that hold them are owner-only
+(0700) as well, so directory listings — agent names, transaction ids,
+request ids — are as private as the files; existing installations are
+re-hardened lazily as those directories are touched. The boundary protects
+against partial writes and other OS users, but not against a process
+already running as the wallet's user.
 
 ## Human signing
 
@@ -54,6 +58,16 @@ daemon still serves, and refuses every signature with the typed error code
 `wallet_locked` — distinct from any policy denial, so an agent can tell
 "your budget said no" from "no human has unlocked the wallet".
 
+Unlock attempts are throttled: they run one at a time (so parallel
+connections cannot stack Argon2id derivations in memory), the first three
+misses are free, and further misses back off with a doubling delay capped
+at one minute. A blocked attempt is refused with the typed code
+`unlock_throttled` before the password is even tried. The window is
+monotonic, so rolling the wall clock back does not lift it; restarting the
+daemon does, which costs an attacker more than waiting. The daemon's
+status query is read-only — expired grants are pruned by `sats agent
+list`, never by an unauthenticated socket call.
+
 The socket lives at `$XDG_RUNTIME_DIR/sats/<network>.sock` (or under
 `SATS_DIR`) with mode 0600, in a 0700 directory.
 
@@ -69,11 +83,18 @@ cannot stop the seed from paging to swap.
 
 - total budget, including transaction fees;
 - optional per-transaction amount cap;
-- optional per-transaction fee cap;
+- per-transaction fee cap — defaulted when not given to 2% of the budget,
+  at least 1000 sats and never above the budget, so one bad fee estimate
+  cannot burn the whole budget as miner fees; only the explicit
+  `--no-max-fee` issues a grant without one;
 - expiry timestamp;
 - network binding;
 - running spend and transaction counts;
 - the SHA-256 of a bearer token.
+
+Agent names are path components on disk, so they are restricted to 1-32
+characters of `a-z`, `0-9`, `-` or `_` — enforced at grant creation, at
+the daemon's socket boundary, and again inside the store.
 
 Creating the grant requires the human's wallet password, but nothing derived
 from it enters the grant: **the grant file holds no key material.** A random
@@ -119,13 +140,22 @@ The authorization engine is deterministic and pure. Checks occur in this
 order:
 
 1. expiry;
-2. per-transaction amount cap;
-3. per-transaction fee cap;
-4. remaining total budget.
+2. intent authority (only send is grantable today);
+3. per-transaction amount cap;
+4. per-transaction fee cap;
+5. arithmetic sanity — an amount + fee that overflows is the typed denial
+   `amount_overflow`, never a saturated number a budget could pass, and no
+   approval can lift it;
+6. remaining total budget.
 
 Budget drawdown is amount plus fee. The MCP server performs a cheap
 amount-only precheck, prepares the transaction to learn the real fee, then
 makes the final decision.
+
+The engine takes the current time as an input, and the daemon's clock
+fails closed: if the system clock cannot be read, sends refuse with the
+typed error `clock_unavailable` rather than evaluating expiry against a
+1970 fallback that would treat every grant as live.
 
 After approval, sats reserves and persists the budget before signing. If
 signing fails and no signature exists, the reservation is refunded. Once a
@@ -154,6 +184,13 @@ Retrying a key whose earlier execution signed a transaction replays the
 recorded outcome; it can never sign twice. Reusing a key for a different
 intent is a typed error that mutates nothing. Denials are side-effect
 free, so a keyed retry after a denial re-evaluates the same request.
+
+Only authenticated callers write: a send for an agent with no grant on
+file — a name that never had one, or one already revoked — is denied
+without creating a request record or a journal line, exactly like a wrong
+token. Recorded truth still outranks revocation, read-only: a keyed retry
+of a send that signed before the revocation replays its recorded txid
+from the existing record without writing anything new.
 
 Each state transition of the agent path — request received, denial,
 reservation, refund, signature, broadcast — appends one line to the
@@ -255,6 +292,11 @@ trust decision. A dishonest or incorrect guard can cause denial of service by
 over-protecting outputs; it cannot directly authorize a spend. An incomplete
 guard can miss an asset, which is why bypasses and third-party results require
 care.
+
+Fee estimates are remote data and are bounded before use: a non-finite,
+negative, or absurd rate (above 10,000 sat/vB) is a typed fee error rather
+than a number the endpoint chose. Malformed checkpoint data from a
+provider fails the sync instead of the process.
 
 Subfrost URLs may contain API keys in their paths, so that driver exposes only
 a redacted origin in errors and debug output. Esplora authentication is

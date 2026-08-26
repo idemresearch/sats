@@ -494,18 +494,19 @@ impl Services {
     }
 
     /// Estimated fee rate for confirmation within `target` blocks, floored
-    /// at 1 sat/vB.
+    /// at 1 sat/vB. An unusable rate from the endpoint is a typed fee
+    /// error, never a silently cast number.
     pub fn estimate_fee_rate(&self, target: u16) -> Result<FeeRate, ProviderError> {
-        let estimates = match self
+        let source = self
             .fees
             .as_ref()
-            .ok_or_else(|| self.no_provider(Capability::ChainFees))?
-        {
-            FeeSource::Esplora(e) => e.fee_estimates()?,
-            FeeSource::Subfrost(c) => c.fee_estimates()?,
-            FeeSource::Mock(m) => m.fee_estimates()?,
+            .ok_or_else(|| self.no_provider(Capability::ChainFees))?;
+        let (estimates, url) = match source {
+            FeeSource::Esplora(e) => (e.fee_estimates()?, e.url().to_string()),
+            FeeSource::Subfrost(c) => (c.fee_estimates()?, c.display_url().to_string()),
+            FeeSource::Mock(m) => (m.fee_estimates()?, "mock".to_string()),
         };
-        Ok(pick_fee_rate(&estimates, target))
+        pick_fee_rate(&estimates, target).map_err(|message| ProviderError::Fees { url, message })
     }
 
     /// Broadcast and record the transaction as unconfirmed in the wallet.
@@ -582,8 +583,17 @@ impl Services {
     }
 }
 
+/// Ceiling on a believable fee estimate. Far above any historical
+/// mempool peak, far below what a cast from a hostile float could reach.
+pub const MAX_FEE_RATE_SAT_VB: f64 = 10_000.0;
+
 /// Largest conf target ≤ the requested one; else the closest above.
-pub fn pick_fee_rate(estimates: &HashMap<u16, f64>, target: u16) -> FeeRate {
+///
+/// The estimate map is remote data. A NaN casts to 0 (silently
+/// under-fees to the 1 sat/vB floor) and an infinite or huge value
+/// saturates to `u32::MAX` (a fee-burn); both are refused instead of
+/// cast, so the endpoint cannot choose the fee outside sane bounds.
+pub fn pick_fee_rate(estimates: &HashMap<u16, f64>, target: u16) -> Result<FeeRate, String> {
     let sat_vb = estimates
         .iter()
         .filter(|(k, _)| **k <= target)
@@ -591,7 +601,12 @@ pub fn pick_fee_rate(estimates: &HashMap<u16, f64>, target: u16) -> FeeRate {
         .or_else(|| estimates.iter().min_by_key(|(k, _)| **k))
         .map(|(_, rate)| *rate)
         .unwrap_or(1.0);
-    FeeRate::from_sat_per_vb_u32((sat_vb.ceil() as u32).max(1))
+    if !sat_vb.is_finite() || !(0.0..=MAX_FEE_RATE_SAT_VB).contains(&sat_vb) {
+        return Err(format!(
+            "provider returned an unusable fee rate: {sat_vb} sat/vB"
+        ));
+    }
+    Ok(FeeRate::from_sat_per_vb_u32((sat_vb.ceil() as u32).max(1)))
 }
 
 #[cfg(test)]
@@ -617,6 +632,38 @@ mod tests {
             esplora: BTreeMap::new(),
             providers,
         }
+    }
+
+    /// The fee-estimate map is remote data: values that would cast into a
+    /// wrong fee (NaN → 0, ∞ → u32::MAX) are refused, sane ones round up.
+    #[test]
+    fn hostile_fee_estimates_are_rejected_not_cast() {
+        for hostile in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 1e12] {
+            let estimates = HashMap::from([(2u16, hostile)]);
+            assert!(
+                pick_fee_rate(&estimates, 2).is_err(),
+                "{hostile} sat/vB must be refused"
+            );
+        }
+        let sane = HashMap::from([(2u16, 3.5)]);
+        assert_eq!(
+            pick_fee_rate(&sane, 2).unwrap(),
+            FeeRate::from_sat_per_vb_u32(4)
+        );
+        // An empty map keeps the historical 1 sat/vB floor.
+        assert_eq!(
+            pick_fee_rate(&HashMap::new(), 2).unwrap(),
+            FeeRate::from_sat_per_vb_u32(1)
+        );
+        // At the ceiling: usable; the floor still applies to tiny rates.
+        assert_eq!(
+            pick_fee_rate(&HashMap::from([(2u16, MAX_FEE_RATE_SAT_VB)]), 2).unwrap(),
+            FeeRate::from_sat_per_vb_u32(10_000)
+        );
+        assert_eq!(
+            pick_fee_rate(&HashMap::from([(2u16, 0.0)]), 2).unwrap(),
+            FeeRate::from_sat_per_vb_u32(1)
+        );
     }
 
     #[test]
