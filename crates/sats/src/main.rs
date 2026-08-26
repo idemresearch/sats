@@ -2,6 +2,7 @@ use sats_core::amount;
 mod cli;
 mod commands;
 mod config;
+mod daemon;
 mod keys;
 #[cfg(feature = "mcp")]
 mod mcp;
@@ -78,6 +79,18 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cli::TxCommand::Broadcast { target } => {
                 commands::tx::broadcast(&store, network, &services(&config)?, &target, json)
             }
+        },
+        Command::Daemon { command } => match command {
+            cli::DaemonCommand::Run { auto_lock } => {
+                commands::daemon::run(&store, network, &auto_lock)
+            }
+            cli::DaemonCommand::Start { auto_lock } => {
+                commands::daemon::start(&store, network, &auto_lock, json)
+            }
+            cli::DaemonCommand::Status => commands::daemon::status(&store, network, json),
+            cli::DaemonCommand::Unlock => commands::daemon::unlock(&store, network, json),
+            cli::DaemonCommand::Lock => commands::daemon::lock(&store, network, json),
+            cli::DaemonCommand::Stop => commands::daemon::stop(&store, network, json),
         },
         Command::Agent { command } => match command {
             cli::AgentCommand::Grant {

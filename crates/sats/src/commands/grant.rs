@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, bail};
-use sats_core::authz::Grant;
+use sats_core::authz::{GRANT_FORMAT_VERSION, Grant};
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
-use sats_core::seal;
+use sats_core::token;
 
 use crate::config::network_name;
-use crate::store::{Store, grant_aad, unix_now};
+use crate::store::{Store, unix_now};
 use crate::{keys, ui};
 
 #[allow(clippy::too_many_arguments)]
@@ -50,18 +50,15 @@ pub fn run(
         }
     }
 
-    // The password prompt IS the human authorization.
-    let mnemonic = keys::unlock(store)?;
+    // The password prompt IS the human authorization. Nothing derived
+    // from it goes into the grant: the file that follows holds a policy
+    // and a token hash, never key material.
+    keys::verify_password(store)?;
 
-    let grant_key = seal::generate_key_b64()?;
-    let key = seal::decode_key_b64(&grant_key)?;
-    let wrapped_seed = seal::seal_with_key(
-        mnemonic.to_string().as_bytes(),
-        &key,
-        &grant_aad(net_name, agent),
-    )?;
+    let issued = token::generate()?;
     let now = unix_now();
     let grant = Grant {
+        format_version: GRANT_FORMAT_VERSION,
         agent: agent.to_string(),
         network: net_name.to_string(),
         budget_sat: budget,
@@ -71,8 +68,8 @@ pub fn run(
         created_at: now,
         expires_at: now.saturating_add(lifetime),
         tx_count: 0,
-        wrapped_seed,
-        grant_key,
+        token_id: issued.token_id.clone(),
+        token_hash: issued.token_hash.clone(),
     };
     // Under the grant lock so an in-flight agent send cannot interleave
     // its budget write with this replacement.
@@ -82,6 +79,8 @@ pub fn run(
     }
 
     if json {
+        // The token is emitted once, here, because there is nowhere else
+        // it could come from later: only its hash is stored.
         println!(
             "{}",
             serde_json::json!({
@@ -91,19 +90,31 @@ pub fn run(
                 "max_fee_sat": grant.max_fee_sat,
                 "expires_at": grant.expires_at,
                 "replaced": replacing,
+                "token_id": grant.token_id,
+                "token": &*issued.secret,
             })
         );
     } else {
         println!();
         if replacing {
-            ui::ok(&format!("granted  {agent} (previous grant replaced)"));
+            ui::ok(&format!(
+                "granted  {agent} (previous grant replaced — its old token is now dead)"
+            ));
         } else {
             ui::ok(&format!("granted  {agent}"));
         }
+        println!();
+        ui::warn("this token is shown once and is not stored — copy it now");
+        println!();
+        println!("  SATS_AGENT_TOKEN={}", &*issued.secret);
+        println!();
+        ui::dim("add to Claude Code:");
         ui::dim(&format!(
-            "add to Claude Code:  claude mcp add sats -- sats agent serve {agent}"
+            "  claude mcp add sats --env SATS_AGENT_TOKEN={} -- sats agent serve {agent}",
+            &*issued.secret
         ));
         ui::dim(&format!("revoke any time:     sats agent revoke {agent}"));
+        ui::dim("the token spends only this budget; it cannot recover the seed");
     }
     Ok(())
 }

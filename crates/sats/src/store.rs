@@ -18,11 +18,6 @@ use sats_core::seal::SealedBlob;
 /// AAD binding the master seed blob to its purpose.
 pub const AAD_SEED: &[u8] = b"sats-seed-v1";
 
-/// AAD binding a grant-wrapped seed to its network and agent.
-pub fn grant_aad(network: &str, agent: &str) -> Vec<u8> {
-    format!("sats-grant-v1:{network}:{agent}").into_bytes()
-}
-
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -46,7 +41,6 @@ pub struct RequestClaim {
 pub struct Store {
     config_dir: PathBuf,
     data_dir: PathBuf,
-    #[cfg(feature = "mcp")]
     override_dir: Option<PathBuf>,
 }
 
@@ -66,14 +60,12 @@ impl Store {
         Ok(Store {
             config_dir,
             data_dir,
-            #[cfg(feature = "mcp")]
             override_dir: dir_override.map(Path::to_path_buf),
         })
     }
 
     /// The `--dir`/`SATS_DIR` override this store was opened with, if any —
     /// lets long-running components reconstruct an identical store.
-    #[cfg(feature = "mcp")]
     pub fn dir_override(&self) -> Option<&Path> {
         self.override_dir.as_deref()
     }
@@ -109,6 +101,32 @@ impl Store {
 
     pub fn agent_requests_dir(&self, network: &str) -> PathBuf {
         self.data_dir.join(network).join("agent-requests")
+    }
+
+    /// The satsd socket for a network.
+    ///
+    /// Prefers the XDG runtime directory, which is per-user, mode 0700,
+    /// and cleared at logout — the right home for a live socket. An
+    /// explicit `--dir`/`SATS_DIR` keeps everything under that directory
+    /// instead, so isolated runs and tests never collide.
+    pub fn socket_path(&self, network: &str) -> PathBuf {
+        if self.override_dir.is_none()
+            && let Some(run) = std::env::var_os("XDG_RUNTIME_DIR")
+            && !run.is_empty()
+        {
+            return PathBuf::from(run)
+                .join("sats")
+                .join(format!("{network}.sock"));
+        }
+        // Kept short: unix socket paths have a low length limit.
+        self.data_dir.join(network).join("d.sock")
+    }
+
+    /// Where a backgrounded daemon's diagnostics go. A detached process
+    /// has no terminal to write to, and silently discarding the reason it
+    /// failed to start would be worse than a file.
+    pub fn daemon_log_path(&self, network: &str) -> PathBuf {
+        self.data_dir.join(network).join("satsd.log")
     }
 
     pub fn events_dir(&self, network: &str) -> PathBuf {
@@ -273,15 +291,61 @@ impl Store {
         write_atomic(&path, &serde_json::to_vec_pretty(grant)?, true)
     }
 
+    /// Load a grant, refusing the v1 format outright.
+    ///
+    /// A v1 record stored the master seed re-sealed beside its own key,
+    /// so honoring one would preserve exactly the weakness the daemon
+    /// removes. It is read well enough to name itself and is then
+    /// refused with the commands that replace it.
     pub fn load_grant(&self, network: &str, agent: &str) -> Result<Option<Grant>> {
         let path = self.grants_dir(network).join(format!("{agent}.json"));
         if !path.exists() {
             return Ok(None);
         }
         let bytes = fs::read(&path)?;
-        let grant = serde_json::from_slice(&bytes)
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("corrupt grant {}", path.display()))?;
+        if is_legacy_grant(&value) {
+            bail!("{}", legacy_grant_message(agent, &path));
+        }
+        let grant = serde_json::from_value(value)
             .with_context(|| format!("corrupt grant {}", path.display()))?;
         Ok(Some(grant))
+    }
+
+    /// Agent names whose grant files are still in the v1 format, so read
+    /// surfaces can report them instead of silently showing no grant.
+    pub fn legacy_grants(&self, network: &str) -> Result<Vec<String>> {
+        let dir = self.grants_dir(network);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut agents = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else { continue };
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            if is_legacy_grant(&value) {
+                agents.push(
+                    value["agent"]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| {
+                            path.file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned()
+                        }),
+                );
+            }
+        }
+        agents.sort();
+        Ok(agents)
     }
 
     /// Returns whether a grant existed. Deletion is revocation: no key
@@ -308,7 +372,15 @@ impl Store {
                 continue;
             }
             let Ok(bytes) = fs::read(&path) else { continue };
-            let Ok(grant) = serde_json::from_slice::<Grant>(&bytes) else {
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                continue;
+            };
+            // Legacy records are reported by `legacy_grants`, never
+            // treated as authority here.
+            if is_legacy_grant(&value) {
+                continue;
+            }
+            let Ok(grant) = serde_json::from_value::<Grant>(value) else {
                 continue;
             };
             if grant.is_expired(now_unix) {
@@ -541,6 +613,47 @@ fn harden_path(path: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn harden_path(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// A grant written before the signing daemon existed: it carries the
+/// master seed re-sealed under a key stored in the same file.
+fn is_legacy_grant(value: &serde_json::Value) -> bool {
+    value.get("wrapped_seed").is_some() || value.get("grant_key").is_some()
+}
+
+/// What a human must do about a v1 grant. It names the commands rather
+/// than describing them, because the fix is two lines of shell.
+pub fn legacy_grant_message(agent: &str, path: &Path) -> String {
+    format!(
+        "grant for {agent:?} uses the v1 format, which stored recoverable signing \
+         material in the grant file itself. It cannot be used for signing.\n\n\
+         Re-issue it:\n\n    \
+         sats agent revoke {agent}\n    \
+         sats agent grant {agent} --budget <sats> --for 24h\n\n\
+         Then delete the old file: {}\n\n\
+         If an agent with shell access ever ran on this machine while that grant \
+         existed, treat the seed as disclosed and move the funds to a fresh wallet.",
+        path.display()
+    )
+}
+
+/// Restrict a file to its owner. Used for the daemon socket, where the
+/// permission bits are the whole access-control story.
+pub fn harden_file(path: &Path) -> Result<()> {
+    harden_path(path).with_context(|| format!("cannot restrict permissions on {}", path.display()))
+}
+
+/// Restrict a directory to its owner.
+#[cfg(unix)]
+pub fn harden_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("cannot restrict permissions on {}", path.display()))
+}
+
+#[cfg(not(unix))]
+pub fn harden_dir(_path: &Path) -> Result<()> {
     Ok(())
 }
 

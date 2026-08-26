@@ -59,3 +59,33 @@ pub enum PlanError {
     #[error("invalid transaction record: {0}")]
     Transaction(String),
 }
+
+#[derive(Debug, Error)]
+pub enum TokenError {
+    #[error("randomness unavailable")]
+    Rng,
+    #[error("malformed agent token")]
+    Malformed,
+}
+
+#[derive(Debug, Error)]
+pub enum VerifyError {
+    #[error("psbt has no inputs")]
+    NoInputs,
+    #[error("malformed psbt: {0}")]
+    Malformed(String),
+    #[error("input {0} has no witness_utxo, so its value is unknown")]
+    MissingWitnessUtxo(usize),
+    #[error("input {0} does not belong to this wallet")]
+    ForeignInput(usize),
+    #[error("output {0} is not a decodable address on this network")]
+    UndecodableOutput(usize),
+    #[error("outputs are worth more than the inputs")]
+    OutputsExceedInputs,
+    #[error("transaction values overflow")]
+    ValueOverflow,
+    #[error("transaction pays no one")]
+    NoRecipient,
+    #[error("transaction pays {0} recipients; sats sends pay exactly one")]
+    MultipleRecipients(usize),
+}

@@ -29,6 +29,10 @@ sats is an on-chain Bitcoin wallet with two native surfaces:
 - a human-operated CLI;
 - an MCP server operating under a named, human-created spending grant.
 
+Agent signing happens in `satsd`, a local per-network daemon holding the
+seed in memory. The MCP server is a shim: it prepares and broadcasts, and
+carries a bearer token that names a policy rather than opening anything.
+
 Prepared spends are PSBTs. Normal sends keep them in memory; an explicit
 export writes the unsigned PSBT to a user-named file artifact, and stored
 PSBT sessions are read-only legacy state from older releases. Once signed,
@@ -45,6 +49,8 @@ Signet is the default. Mainnet must remain an explicit choice.
 |---|---|
 | `crates/sats-core/src/engine.rs` | Pure transaction planning and conservative UTXO exclusion |
 | `crates/sats-core/src/authz.rs` | Pure grant decisions, reservation, and refund rules |
+| `crates/sats-core/src/token.rs` | Agent capability tokens: mint, hash, constant-time verify |
+| `crates/sats-core/src/verify.rs` | Recomputing a PSBT's payments and fee from the wallet's own descriptors |
 | `crates/sats-core/src/plan.rs` | Ephemeral prepared spends, explicit PSBT sessions, finalized transaction records, and legacy-plan compatibility |
 | `crates/sats-core/src/seed.rs` | BIP-39 seed handling and BIP-86 descriptors |
 | `crates/sats-core/src/seal.rs` | Versioned authenticated secret sealing |
@@ -55,7 +61,8 @@ Signet is the default. Mainnet must remain an explicit choice.
 | `crates/sats/src/provider/` | Native chain providers, capability resolution, and guards |
 | `crates/sats/src/store.rs` | Paths, atomic files, permissions, PSBT sessions, finalized transactions, legacy plans, and grants |
 | `crates/sats/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
-| `crates/sats/src/mcp/` | MCP transport, schemas, and granted agent workflows |
+| `crates/sats/src/daemon/` | satsd: socket protocol, lock state, and the granted agent send path |
+| `crates/sats/src/mcp/` | MCP transport and schemas — a shim over the daemon |
 | `crates/sats/tests/` | Native CLI and MCP integration tests |
 | `crates/sats-alkanes/src/` | Pure Alkanes protocol composition: ids, cellpacks, protostones, inspection, simulation views |
 | `crates/sats-web/src/lib.rs` | Browser playground: wasm bindings over sats-core and the simulated chain |
@@ -88,14 +95,25 @@ and rendering belong to callers.
 - Preserve the `Signer` boundary; do not make callers depend directly on the
   local mnemonic signer.
 - Treat a signed transaction as spendable even when broadcast fails.
-- Persist finalized transaction hex before attempting broadcast. Do not
-  persist a signed PSBT for a fully finalized single-sig send.
+- Persist finalized transaction hex before attempting broadcast, in the
+  process that produced the signature. Do not persist a signed PSBT for a
+  fully finalized single-sig send.
+- A grant carries no key material. Never reintroduce a field from which a
+  seed can be recovered; only a token hash belongs beside a policy.
+- A bearer token is emitted once, at creation, and never persisted.
 - Write PSBT sessions and finalized transaction records with restrictive
   permissions; both expose wallet and payment metadata.
 
 ### Agent authorization
 
 - `authorize_spend` is the single deterministic policy decision.
+- Never authorize against an amount or fee a caller reported. Derive both
+  from the PSBT with `sats_core::verify` and refuse on disagreement.
+- Only `satsd` signs for an agent. Nothing in the MCP process may hold key
+  material or reconstruct a mnemonic.
+- Operational conditions carry a typed `error_code`; policy refusals carry a
+  denial `reason`. Never conflate them — a locked wallet is not a denial a
+  human can approve.
 - Preserve check order: expiry, amount cap, fee cap, remaining budget.
 - Budget includes amount plus fee.
 - Reserve and persist budget before signing.
@@ -181,7 +199,10 @@ Call it from the shared native workflow so CLI and MCP cannot diverge.
 ### State format change
 
 Existing seed, PSBT-session, finalized-transaction, legacy-plan, grant,
-config, and SQLite state are compatibility surfaces. Define backward-reading
+config, and SQLite state are compatibility surfaces. Grant records are
+versioned (`GRANT_FORMAT_VERSION`); v1 records are read, reported, and
+refused rather than honored, because honoring one restores a seed
+disclosure. Define backward-reading
 behavior before changing a serialized shape. Preserve atomic writes and
 restrictive permissions for sensitive files.
 
@@ -215,6 +236,9 @@ cargo build --release --locked
 cargo check -p sats-core --target wasm32-unknown-unknown
 cargo check -p sats-web --target wasm32-unknown-unknown
 ```
+
+Agent-path work also needs a live daemon: `crates/sats/tests/daemon.rs` and
+`crates/sats/tests/mcp.rs` each start one against their own `SATS_DIR`.
 
 After changing `sats-core` or `sats-web`, regenerate the committed playground
 module with `sh scripts/build-playground.sh` (see

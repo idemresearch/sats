@@ -2,18 +2,27 @@
 
 sats is a native Bitcoin wallet with a portable core. The CLI and MCP server
 share wallet state and transaction preparation, while agent sends add a
-bounded authorization step before signing.
+bounded authorization step before signing — made in a separate process that
+holds the only copy of the key.
 
 ## System shape
 
 ```mermaid
 flowchart TD
     CLI["Human CLI"] --> Native["Native workflows"]
-    MCP["MCP server"] --> Native
+    MCP["MCP server (shim: token, no keys)"] --> Native
     Native --> Core["sats-core"]
     Native --> State["Store + watch-only wallet"]
     Native --> Providers["Chain providers + guards"]
+    MCP -->|"psbt + token"| Daemon["satsd (seed in memory)"]
+    Daemon --> Core
+    Daemon --> State
 ```
+
+A human send unlocks the seed for the duration of one command and never
+involves the daemon. An agent send cannot sign at all: the served process
+prepares a PSBT and asks satsd, which derives what the transaction does,
+decides, signs, and persists.
 
 `crates/sats-core` owns deterministic wallet and authorization behavior.
 `crates/sats` owns environment effects: command parsing, terminal rendering,
@@ -30,6 +39,8 @@ own.
 | Module | Responsibility |
 |---|---|
 | `authz` | Grant model, spend request, deterministic allow/deny decision, reservation and refund |
+| `token` | Agent capability tokens: mint, hash, constant-time verify |
+| `verify` | Recomputing a PSBT's payments and fee from the wallet's own descriptors |
 | `engine` | In-memory PSBT preparation and conservative UTXO exclusion |
 | `plan` | Prepared spends, legacy PSBT sessions, finalized transaction records, and legacy-plan conversion |
 | `seed` | BIP-39 generation and parsing; BIP-86 public and private descriptors |
@@ -50,8 +61,9 @@ adapters.
 | `store` | XDG paths, atomic files, PSBT sessions, finalized transactions, legacy plans, grants, and sensitive-file permissions |
 | `walletd` | SQLite-backed watch-only BDK wallet creation, loading, and persistence |
 | `provider` | Typed capabilities, driver resolution, chain access, and UTXO guards |
-| `keys`, `password` | Unlock the master seed or a grant-wrapped seed |
-| `mcp` | MCP stdio server, tool schemas, and agent send orchestration |
+| `keys`, `password` | Unlock the master seed; prove the password without keeping anything |
+| `daemon` | satsd: unix-socket protocol, lock state, and the granted agent send path |
+| `mcp` | MCP stdio server and tool schemas — a shim over the daemon |
 | `ui` | Terminal presentation |
 
 `main.rs` is the composition root. Leaf feature logic belongs in the owning
@@ -72,9 +84,11 @@ The website playground: `sats-core` compiled to WebAssembly behind a small
 JSON API for the interactive terminal at the project website. Only the chain
 is simulated (an in-memory faucet and instant confirmation); planning, UTXO
 exclusion, signing, sealing, and grant authorization run the same core code
-as the native surfaces. It holds no compatibility surface — the CLI and MCP
-schemas remain the stable contracts — and it must never gain filesystem,
-network, or native-store dependencies.
+as the native surfaces. There is no daemon in a web page, so the playground
+demonstrates the grant model without the process boundary that enforces it
+natively. It holds no compatibility surface — the CLI and MCP schemas remain
+the stable contracts — and it must never gain filesystem, network, or
+native-store dependencies.
 
 ## Persistent state
 
@@ -90,7 +104,9 @@ isolated runs.
 | PSBT sessions | `<network>/psbts/<id>.json` | Read-only legacy state from older releases' staged workflow; new exports are PSBT file artifacts |
 | Finalized transactions | `<network>/transactions/<txid>.json` | Private raw transaction hex, pending/broadcast status, and payment metadata |
 | Legacy plans | `<network>/plans/<id>.json` | Pre-refactor state; read, permission-hardened, and converted on sign/broadcast |
-| Grants | `<network>/grants/<agent>.json` | Limits, accounting, and grant-wrapped seed |
+| Grants | `<network>/grants/<agent>.json` | Limits, accounting, and the bearer token's hash — no key material |
+| Daemon socket | `$XDG_RUNTIME_DIR/sats/<network>.sock`, or `<network>/d.sock` under `SATS_DIR` | satsd's owner-only control socket |
+| Daemon log | `<network>/satsd.log` | Diagnostics from a backgrounded `sats daemon start` |
 | Agent requests | `<network>/agent-requests/<agent>/<id>.json` | One durable record per agent send: canonical intent digest, idempotency key, and resolved outcome |
 | Event log | `<network>/events/log.jsonl` | Append-only causal record of the agent path: one JSON line per state transition |
 
@@ -133,27 +149,37 @@ without retaining the signed PSBT.
 ```mermaid
 sequenceDiagram
     participant A as Agent
-    participant M as MCP
-    participant P as Preparation
-    participant Z as Authorization
+    participant M as MCP shim
+    participant D as satsd
+    participant P as Providers
     participant S as Store
     A->>M: send address, amount, request_id
-    M->>S: resolve request id, claim request record
-    M->>S: reload active grant
-    M->>Z: cheap amount precheck
-    M->>P: shared safe preparation
-    M->>Z: authorize amount plus fee
-    M->>S: reserve and persist budget
-    M->>M: sign, save attributed tx, broadcast
-    M->>S: record outcome and causal events
+    M->>D: begin_send(token, recipient, amount)
+    D->>S: claim request, reload grant, precheck
+    D-->>M: proceed, or a terminal outcome
+    M->>P: sync, guards, fee estimate, build PSBT
+    M->>D: authorize(token, psbt)
+    D->>D: derive amount and fee from the PSBT
+    D->>S: reserve and persist budget
+    D->>D: sign and finalize
+    D->>S: save attributed transaction
+    D-->>M: signed, or denied
+    M->>P: broadcast
+    M->>D: finish(broadcast result)
+    D->>S: record outcome and causal events
     M-->>A: sent, denied, or error
 ```
 
+A send spans one connection: the claim taken by `begin_send` is released
+when the connection closes, so a caller that dies mid-send strands nothing.
+
 The amount-only precheck rejects an obviously impossible request before
-network access. Final authorization uses the prepared fee. Budget is
-persisted before signing; it is refunded only if signing fails before a
-signature exists. Broadcast failure leaves both the finalized transaction
-record and budget reservation intact.
+network access. Final authorization uses the fee the daemon derived, never
+one the caller reported. Budget is persisted before signing; it is refunded
+only if signing fails before a signature exists. The finalized transaction is
+persisted by the process that signed it, before the result is returned — a
+signed transaction never crosses the socket. Broadcast failure leaves both
+the transaction record and the budget reservation intact.
 
 Every agent send is a durable request record: a keyed retry replays a
 signed outcome instead of paying twice, and each state transition —
@@ -183,6 +209,8 @@ Operations validate the selected network when they execute. See
 |---|---|---|
 | Transaction selection, preparation, or finalized-record metadata | `sats-core::engine`, `sats-core::plan` | Core unit tests plus CLI/MCP integration paths |
 | Grant rule or accounting | `sats-core::authz` | Decision edge cases, persistence ordering, MCP denial tests |
+| What a PSBT is taken to do | `sats-core::verify` | Adversarial derivation tests: forged hints, extra outputs, foreign inputs |
+| Daemon protocol or lock state | `daemon` | Wire round-trips, lock/unlock, `crates/sats/tests/daemon.rs` |
 | Human command or flag | `cli`, `commands`, `main` dispatch | CLI integration test and `docs/cli.md` |
 | MCP tool or result schema | `mcp::server` | MCP integration test and `docs/mcp.md` |
 | Provider driver or capability | `provider`, `config` | Mocked driver, network mismatch, ambiguity and failure tests |

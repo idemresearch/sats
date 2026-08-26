@@ -40,6 +40,29 @@ never persist the prepared or signed PSBT. The finalized transaction is saved
 before network broadcast, so a failure or lost response leaves an exact retry
 without retaining PSBT derivation metadata.
 
+## The signing daemon
+
+`satsd` is a local, per-network process that holds the unsealed mnemonic in
+memory and is the only thing that can produce a signature for an agent. It
+has no chain access: callers sync, apply guards, estimate fees, and
+broadcast; the daemon decides and signs.
+
+The daemon starts locked. `sats daemon unlock` unseals the seed into its
+memory with the wallet password; `sats daemon lock` drops it; an idle
+timeout (default 8h, `--auto-lock`) drops it unattended. While locked the
+daemon still serves, and refuses every signature with the typed error code
+`wallet_locked` — distinct from any policy denial, so an agent can tell
+"your budget said no" from "no human has unlocked the wallet".
+
+The socket lives at `$XDG_RUNTIME_DIR/sats/<network>.sock` (or under
+`SATS_DIR`) with mode 0600, in a 0700 directory.
+
+What this boundary is, stated exactly: satsd runs as the wallet's own user,
+so it is a **process-memory** boundary, not a privilege boundary. It defeats
+reading a file, which is what a shell-capable agent actually does. It does
+not defeat root, a debugger attaching to the process, or a core dump, and it
+cannot stop the seed from paging to swap.
+
 ## Agent grants
 
 `sats agent grant <name>` creates bounded unattended authority with:
@@ -49,21 +72,40 @@ without retaining PSBT derivation metadata.
 - optional per-transaction fee cap;
 - expiry timestamp;
 - network binding;
-- running spend and transaction counts.
+- running spend and transaction counts;
+- the SHA-256 of a bearer token.
 
-Creating the grant requires the human's wallet password. The mnemonic is
-re-sealed under a fresh random grant key, and the wrapped seed plus key are
-stored in the grant file. The password is not stored and is never sent to the
-agent.
+Creating the grant requires the human's wallet password, but nothing derived
+from it enters the grant: **the grant file holds no key material.** A random
+32-byte token is minted, printed once, and never persisted — only its hash
+is stored, compared in constant time. Reading a grant file yields a budget
+and a hash, and nothing that can spend.
 
-The honest cost is that the active grant file contains everything needed to
-recover the seed. Its boundary is the wallet user's filesystem permission and
-the grant's lifetime, not a hardware security module. A process that can read
-the grant file as that user can exceed the policy by extracting the seed.
+The token is what an agent presents. Pass it to the served process as
+`SATS_AGENT_TOKEN`; `sats agent grant` prints the exact `claude mcp add`
+line. Re-issuing a grant mints a new token and kills the old one, so
+rotation and revocation are the same act.
 
-Use small budgets and short expiries. Revoke grants when they are not needed.
-Hardware- or passkey-backed `Signer` implementations can strengthen this
-boundary without changing transaction planning.
+The honest cost is that a token in an agent's configuration is a secret that
+agent can also read. Compromising it costs the grant's remaining budget until
+its expiry — which is what a budget is for — never the seed, and never any
+other network. Use small budgets and short expiries; revoke when not needed.
+
+Hardware- or passkey-backed `Signer` implementations can strengthen the
+daemon's own boundary further without changing transaction planning.
+
+### Grant format v1
+
+Releases before the daemon stored the master seed re-sealed under a key in
+the same grant file, so any process that could read it could sign without
+asking. Those records are read well enough to name themselves and are then
+**refused**, with the commands that replace them; honoring one would preserve
+exactly the weakness the daemon removes. `sats agent list` reports them
+rather than showing an empty table.
+
+If an agent with shell access ever ran on a machine while a v1 grant existed,
+treat the seed as disclosed: move the funds to a fresh wallet rather than
+only revoking.
 
 ## Authorization order
 
@@ -90,8 +132,11 @@ Concurrent sends — in one server or across processes — therefore serialize
 their budget decisions instead of double-drawing, and a revocation cannot
 be undone by an in-flight send's write.
 
-The grant file is reloaded for every send. Deleting it with `sats agent revoke`
-therefore takes effect on the next send call, even in an existing MCP session.
+The grant file is reloaded for every send, and again under the lock before
+the budget draw, where the presented token is re-checked. Deleting the grant
+with `sats agent revoke` therefore takes effect on the next send call, even
+in an existing MCP session, and a grant replaced mid-flight refuses the older
+token.
 
 ## Agent requests, idempotency, and the event log
 
@@ -153,17 +198,29 @@ is refused by its `consumed_at` mark under the grant lock.
 
 ## MCP boundary
 
-The MCP server starts only when the named agent has a non-expired grant and
-the selected wallet and provider configuration are valid. It exposes only:
+The served process is a shim. It prepares transactions and broadcasts them,
+and carries a bearer token naming the grant it acts under; it holds no key
+material, so nothing in it can sign.
+
+It starts only when the named agent has a non-expired grant, `SATS_AGENT_TOKEN`
+matches that grant, the wallet and provider configuration are valid, and satsd
+is reachable. Each failure names its own remedy at `claude mcp add` time
+rather than mid-conversation. A daemon that is running but locked is a
+warning at startup, not a refusal — a human can unlock it later.
+
+It exposes only:
 
 - balance lookup;
 - fresh receive address;
 - the caller's grant status;
 - a bounded send operation.
 
-Agents never receive the password, mnemonic, grant key, raw signer, arbitrary
-PSBT signing tool, or the CLI's UTXO-safety bypass flags. Expected policy
-denials are machine-readable results, not errors that invite a retry.
+Agents never receive the password, mnemonic, raw signer, arbitrary PSBT
+signing tool, or the CLI's UTXO-safety bypass flags. Expected policy denials
+are machine-readable results, not errors that invite a retry. Operational
+conditions carry a typed `error_code` instead of a denial `reason`:
+`wallet_locked` when no human has unlocked satsd, `daemon_unavailable` when
+it cannot be reached.
 
 MCP uses stdout as its protocol transport. Diagnostic information goes to
 stderr so logs cannot corrupt protocol frames.
@@ -245,7 +302,12 @@ That is reported as partial rather than treated as a broadcastable success.
 |---|---|---|
 | Stolen watch-only database | No private descriptors in SQLite | Address history and balances may be exposed |
 | Stolen sealed seed | Argon2id plus authenticated encryption | Password strength and offline guessing |
-| Stolen active grant | OS file permissions and expiry | File contains recoverable unattended signing material |
+| Read grant file | Holds a budget and a token hash, no key material | Reveals amounts and expiry |
+| Stolen agent token | Budget, per-tx caps, and expiry enforced by satsd | Spends that grant's remaining budget until it expires |
+| Lied-about send amount or fee | Recomputed from the PSBT against the wallet's descriptors | An understated input burns the caller's own budget on an unrelayable transaction |
+| Compromised served process | Holds a token, never a key | Same as a stolen token |
+| Debugger attached to satsd | Process memory only; same-user | Seed recoverable where ptrace is permitted |
+| Grant left in v1 format | Read, reported, and refused for signing | The file itself is a seed disclosure until the wallet is rotated |
 | Revoked agent session | Grant reloaded on every send | A transaction signed before revocation remains valid |
 | Provider outage | Planning and configured guards fail closed | Loss of availability |
 | Malicious asset guard | Restrictive-only result | Can hide funds; incomplete results can miss assets |
@@ -261,6 +323,10 @@ That is reported as partial rather than treated as a broadcastable success.
 - Run sats only on a machine and user account you trust.
 - Keep grant budgets small, set fee caps, and prefer short expiries.
 - Review `sats agent list` regularly and revoke unused grants.
+- Lock satsd (`sats daemon lock`) when no agent needs to spend, and keep
+  `--auto-lock` no longer than the work actually requires.
+- Treat an agent token like the budget it unlocks: re-issue the grant to
+  rotate it, and never commit one to a repository.
 - Treat provider endpoints and their responses as part of your trust model.
 - Never paste a real mnemonic into issues, logs, screenshots, tests, or agent
   conversations.
