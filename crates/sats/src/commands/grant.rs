@@ -106,12 +106,12 @@ pub fn run(
         println!();
         ui::warn("this token is shown once and is not stored — copy it now");
         println!();
-        println!("  SATS_AGENT_TOKEN={}", &*issued.secret);
+        println!("  SATS_AGENT_TOKEN={}", *issued.secret);
         println!();
         ui::dim("add to Claude Code:");
         ui::dim(&format!(
             "  claude mcp add sats --env SATS_AGENT_TOKEN={} -- sats agent serve {agent}",
-            &*issued.secret
+            *issued.secret
         ));
         ui::dim(&format!("revoke any time:     sats agent revoke {agent}"));
         ui::dim("the token spends only this budget; it cannot recover the seed");
