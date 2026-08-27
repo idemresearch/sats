@@ -7,12 +7,12 @@ of feature.
 ## Requirements
 
 - Rust 1.89 or newer (the workspace MSRV in `Cargo.toml`);
-- `rustfmt` and Clippy;
+- `rustfmt`, Clippy, and `rust-analyzer` (included in `rust-toolchain.toml`);
 - the `wasm32-unknown-unknown` target;
 - a POSIX shell for installer checks.
 
 ```sh
-rustup component add rustfmt clippy
+rustup component add rustfmt clippy rust-analyzer
 rustup target add wasm32-unknown-unknown
 ```
 
