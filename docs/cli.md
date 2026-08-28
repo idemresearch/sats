@@ -81,7 +81,7 @@ hold the explicit advanced workflows.
 | `sats agent grant <name>` | Create bounded unattended signing authority |
 | `sats agent revoke <name>` | Delete an agent grant immediately |
 | `sats agent list` | List non-expired grants and remaining budgets |
-| `sats agent requests [--all]` | Review agent send requests; denied ones await a human decision |
+| `sats agent requests [--all\|--watch]` | Review agent send requests; `--watch` streams newly pending asks |
 | `sats agent approve <id>` | Authorize one denied request exactly once (password required) |
 | `sats agent deny <id>` | Dismiss a request and revoke its unconsumed approval |
 | `sats agent log [--limit N] [--request ID]` | Show the causal event log of agent activity |
@@ -327,6 +327,7 @@ transition appends to a per-network event log:
 ```sh
 sats agent requests            # pending: denied requests awaiting a decision
 sats agent requests --all      # every recorded request, newest first
+sats agent requests --watch    # stay running; print each new pending ask once
 sats agent log                 # the causal event chain, oldest first
 sats agent log --request k-big-1
 ```
@@ -337,6 +338,17 @@ one line per event — received, denied, reserved, signed, broadcast,
 refunded, replayed — and `--request` accepts an id or unique prefix.
 Unreadable records and torn log lines are skipped with a warning; both
 surfaces are purely local and never touch a provider.
+
+`--watch` is the trusted discovery channel: it polls the local store and
+prints each request exactly once, when it newly awaits an approval — an
+undismissed, approvable denial with no valid approval armed — ending each
+line with the exact `sats agent approve` command. You learn about pending
+asks from sats itself instead of relying on the agent to relay (or
+downplay) its own denials. Hard, non-approvable denials never appear
+there — nothing is awaited — and stay reviewable with `--all`. A request
+whose approval expires unconsumed re-enters the queue and announces
+again. With `--json` the stream is JSONL, one full record per line.
+Watching is read-only; Ctrl-C stops it.
 
 ## Approving one request
 

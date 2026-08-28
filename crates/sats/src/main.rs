@@ -108,8 +108,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 duration,
             } => commands::approve::run(&store, network, &id, max_fee, &duration, json),
             cli::AgentCommand::Deny { id } => commands::deny::run(&store, network, &id, json),
-            cli::AgentCommand::Requests { all } => {
-                commands::requests::run(&store, network, all, json)
+            cli::AgentCommand::Requests { all, watch } => {
+                commands::requests::run(&store, network, all, watch, json)
             }
             cli::AgentCommand::Log { limit, request } => {
                 commands::agent_log::run(&store, network, limit, request.as_deref(), json)

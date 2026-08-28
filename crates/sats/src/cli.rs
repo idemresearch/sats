@@ -295,8 +295,13 @@ pub enum AgentCommand {
     /// Review agent send requests (denied ones await a human decision)
     Requests {
         /// Include resolved and dismissed requests, not only pending ones
-        #[arg(long)]
+        #[arg(long, conflicts_with = "watch")]
         all: bool,
+        /// Stay running and print each request as it newly awaits an
+        /// approval — a trusted channel that does not rely on the agent
+        /// relaying its own denials. With --json, a JSONL stream
+        #[arg(long)]
+        watch: bool,
     },
     /// Show the causal log of agent activity, oldest first
     Log {

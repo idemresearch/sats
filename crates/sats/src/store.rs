@@ -641,9 +641,7 @@ impl Store {
         }
     }
 
-    /// The event log in append order. A torn or unreadable line — a crash
-    /// can leave one at the tail — is skipped with a warning.
-    /// Every line of the event log, read tolerantly: a newer sats may
+    /// Every line of the event log, in append order, read tolerantly: a newer sats may
     /// have appended kinds or versions this build does not know, and the
     /// audit view must show them raw rather than hide or abort on them.
     /// Only a line that is not JSON at all is skipped, with a warning.

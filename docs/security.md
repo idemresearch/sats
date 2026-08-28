@@ -285,6 +285,14 @@ kind or format version this build does not understand — written by a newer
 sats — is shown raw by `sats agent log` with a warning, never hidden and
 never fatal to the listing. The audit must survive the future.
 
+Discovery of pending asks does not depend on the agent's own channel:
+`sats agent requests --watch` streams each newly pending approvable
+request from the local store, so an agent that misrepresents, downplays,
+or simply never relays a denial cannot keep the human from seeing it.
+The watch is read-only — no provider access, no grant writes, no events —
+and approval itself stays in `sats agent approve`, which re-reads and
+renders the exact durable request before the password prompt.
+
 The event log also makes the one irreducible crash window visible: a
 `reserved` event with no following `signed` or `refunded` means the process
 died between persisting the budget draw and signing — budget is held for a

@@ -885,6 +885,140 @@ fn grant_hard_ceiling_validates_and_persists() {
     assert_eq!(grant["format_version"], 3);
 }
 
+/// `--watch` is the trusted discovery channel: it must announce each
+/// newly pending approvable request exactly once, stay quiet for
+/// everything else, and keep streaming past torn records.
+#[test]
+fn agent_requests_watch_streams_newly_pending_asks() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir); // approving later needs the sealed seed
+
+    let fabricate_hard = |id: &str| {
+        let requests_dir = dir.path().join("signet/agent-requests/claude");
+        std::fs::create_dir_all(&requests_dir).unwrap();
+        let record = serde_json::json!({
+            "format_version": 1, "id": id, "network": "signet", "agent": "claude",
+            "recipient": common::ADDRESS, "amount_sat": 30_000,
+            "intent_digest": "d".repeat(64), "created_at": 1_000, "updated_at": 1_000,
+            "outcome": {
+                "status": "denied",
+                "deny": { "reason": "over_ask_max", "requested_sat": 30_000, "ask_max_tx_sat": 25_000 },
+                "resolved_at": 1_001,
+            },
+        });
+        std::fs::write(requests_dir.join(format!("{id}.json")), record.to_string()).unwrap();
+    };
+
+    // One request is already waiting before the watcher starts.
+    fabricate_denied_request(&dir, "k-w-0");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sats"))
+        .args(["--json", "agent", "requests", "--watch"])
+        .env("SATS_DIR", dir.path())
+        .env("SATS_PASSWORD", common::PASSWORD)
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, lines) = mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let expect_id = |lines: &mpsc::Receiver<String>, id: &str| {
+        let line = lines
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("expected a line for {id}"));
+        let value: serde_json::Value = serde_json::from_str(&line).expect("JSONL stream");
+        assert_eq!(value["id"], id, "line: {line}");
+        value
+    };
+    let expect_quiet = |lines: &mpsc::Receiver<String>| {
+        if let Ok(line) = lines.recv_timeout(Duration::from_millis(2_500)) {
+            panic!("expected silence, got: {line}");
+        }
+    };
+
+    // Startup renders what is already pending, once.
+    expect_id(&lines, "k-w-0");
+
+    // A new ask announces once; repeats and rewrites stay silent.
+    fabricate_denied_request(&dir, "k-w-1");
+    expect_id(&lines, "k-w-1");
+    fabricate_denied_request(&dir, "k-w-1"); // rewritten, still pending
+    expect_quiet(&lines);
+
+    // Approving removes it from the queue silently; only the next new
+    // ask prints.
+    sats(&dir)
+        .args(["agent", "approve", "k-w-1", "--max-fee", "100"])
+        .assert()
+        .success();
+    fabricate_denied_request(&dir, "k-w-2");
+    expect_id(&lines, "k-w-2");
+
+    // A hard denial is not "awaiting approval" and never announces.
+    fabricate_hard("k-w-3");
+    expect_quiet(&lines);
+
+    // A torn record is skipped, and the stream survives it.
+    std::fs::write(
+        dir.path().join("signet/agent-requests/claude/k-torn.json"),
+        "{ not json",
+    )
+    .unwrap();
+    fabricate_denied_request(&dir, "k-w-4");
+    expect_id(&lines, "k-w-4");
+
+    child.kill().unwrap();
+    let _ = child.wait();
+
+    // The human rendering names the exact approval command.
+    let mut human = Command::new(env!("CARGO_BIN_EXE_sats"))
+        .args(["agent", "requests", "--watch"])
+        .env("SATS_DIR", dir.path())
+        .env("SATS_PASSWORD", common::PASSWORD)
+        .env("NO_COLOR", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut reader = BufReader::new(human.stdout.take().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(
+        line.contains("sats agent approve k-w-"),
+        "watch line must name the command: {line}"
+    );
+    human.kill().unwrap();
+    let _ = human.wait();
+
+    // And --all remains the home of hard denials.
+    let all = json_stdout(
+        sats(&dir)
+            .args(["agent", "requests", "--all", "--json"])
+            .assert()
+            .success(),
+    );
+    assert!(
+        all.as_array()
+            .unwrap()
+            .iter()
+            .any(|request| request["id"] == "k-w-3"),
+        "hard denials stay reviewable with --all"
+    );
+}
+
 fn fabricate_denied_request(dir: &TempDir, id: &str) {
     let requests_dir = dir.path().join("signet/agent-requests/claude");
     std::fs::create_dir_all(&requests_dir).unwrap();
