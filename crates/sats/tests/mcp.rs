@@ -1212,6 +1212,104 @@ fn finish_requires_the_token_that_began_the_send() {
     assert_eq!(event_kinds(&dir), ["request_received", "failed"]);
 }
 
+/// The three amount bands end to end: automatic under max_tx, one-time
+/// approvable up to ask_max_tx, and a hard refusal above it that carries
+/// no hint and that `sats agent approve` refuses to arm.
+#[test]
+fn amount_bands_split_auto_ask_and_hard_deny() {
+    let dir = TempDir::new().unwrap();
+    let fx = funded_setup(
+        &dir,
+        &[
+            "--budget",
+            "1000000",
+            "--max-tx",
+            "10000",
+            "--ask-max-tx",
+            "25000",
+        ],
+        &[2_000_000],
+    );
+    let mut mcp = McpSession::start(&dir, "claude", &fx.token);
+    handshake(&mut mcp);
+
+    // Auto band: at the cap, inclusive.
+    let sent = mcp.call_tool(
+        2,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 10_000, "request_id": "auto-1" }),
+    );
+    assert_eq!(sent["status"], "sent", "got: {sent}");
+    assert!(sent.get("approvable").is_none(), "sent carries no verdict");
+
+    // Ask band: denied, marked approvable, and the message names the
+    // exact one-time exception command.
+    let ask = mcp.call_tool(
+        3,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 10_001, "request_id": "ask-1" }),
+    );
+    assert_eq!(ask["status"], "denied", "got: {ask}");
+    assert_eq!(ask["reason"], "over_max_tx");
+    assert_eq!(ask["approvable"], true);
+    assert!(
+        ask["message"]
+            .as_str()
+            .unwrap()
+            .contains("sats agent approve k-ask-1")
+    );
+    // The ceiling itself is still the ask band, inclusive.
+    let edge = mcp.call_tool(
+        4,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 25_000, "request_id": "edge-1" }),
+    );
+    assert_eq!(edge["reason"], "over_max_tx", "got: {edge}");
+    assert_eq!(edge["approvable"], true);
+
+    // Approve the ask-band request; the identical retry executes once.
+    run_sats(&dir, &["agent", "approve", "k-ask-1", "--max-fee", "5000"]);
+    let approved = mcp.call_tool(
+        5,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 10_001, "request_id": "ask-1" }),
+    );
+    assert_eq!(approved["status"], "sent", "got: {approved}");
+    assert_eq!(approved["via_approval"], true);
+
+    // Hard band: denied, not approvable, no hint anywhere.
+    let hard = mcp.call_tool(
+        6,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 25_001, "request_id": "hard-1" }),
+    );
+    assert_eq!(hard["status"], "denied", "got: {hard}");
+    assert_eq!(hard["reason"], "over_ask_max");
+    assert_eq!(hard["approvable"], false);
+    assert!(
+        !hard["message"].as_str().unwrap().contains("agent approve"),
+        "a hard denial must not invite an approval: {hard}"
+    );
+
+    // And the approve command refuses to arm one, before any password.
+    let refused = Command::new(sats_bin())
+        .args(["agent", "approve", "k-hard-1", "--max-fee", "5000"])
+        .env("SATS_DIR", dir.path())
+        .env("SATS_PASSWORD", PASSWORD)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert!(!refused.status.success(), "hard denials cannot be approved");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("no approval can lift"), "stderr: {stderr}");
+    // Nothing was armed: the record holds no approval.
+    let record = read_json(
+        &dir.path()
+            .join("signet/agent-requests/claude/k-hard-1.json"),
+    );
+    assert!(record.get("approval").is_none());
+}
+
 /// Recorded truth outranks revocation, read-only: after the grant is
 /// gone, a keyed retry of a send that signed still answers with the
 /// recorded txid, and nothing new is written.

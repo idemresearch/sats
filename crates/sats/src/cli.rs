@@ -227,39 +227,47 @@ pub struct SendArgs {
     pub export_psbt: Option<PathBuf>,
 }
 
+#[derive(clap::Args)]
+pub struct GrantArgs {
+    /// Agent name (e.g. claude)
+    pub name: String,
+    /// Total budget in sats (amounts + fees draw it down; shorthand ok: 50k)
+    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+    pub budget: u64,
+    /// Grant lifetime (e.g. 24h, 7d)
+    #[arg(
+        long = "for",
+        alias = "expires",
+        default_value = "24h",
+        value_name = "DURATION"
+    )]
+    pub duration: String,
+    /// Per-transaction amount cap in sats: the automatic band. Amounts
+    /// above it are denied, and a human can approve each denial once
+    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+    pub max_tx: Option<u64>,
+    /// Hard per-transaction ceiling in sats: amounts above it are never
+    /// approvable — the only escalation is changing the grant
+    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+    pub ask_max_tx: Option<u64>,
+    /// Per-transaction fee cap in sats
+    /// (default: 2% of the budget, at least 1000, never above the budget)
+    #[arg(
+        long,
+        value_name = "SATS",
+        value_parser = crate::amount::parse,
+        conflicts_with = "no_max_fee"
+    )]
+    pub max_fee: Option<u64>,
+    /// Issue the grant with no per-transaction fee cap at all
+    #[arg(long)]
+    pub no_max_fee: bool,
+}
+
 #[derive(Subcommand)]
 pub enum AgentCommand {
     /// Grant an agent a spending budget
-    Grant {
-        /// Agent name (e.g. claude)
-        name: String,
-        /// Total budget in sats (amounts + fees draw it down; shorthand ok: 50k)
-        #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
-        budget: u64,
-        /// Grant lifetime (e.g. 24h, 7d)
-        #[arg(
-            long = "for",
-            alias = "expires",
-            default_value = "24h",
-            value_name = "DURATION"
-        )]
-        duration: String,
-        /// Per-transaction amount cap in sats
-        #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
-        max_tx: Option<u64>,
-        /// Per-transaction fee cap in sats
-        /// (default: 2% of the budget, at least 1000, never above the budget)
-        #[arg(
-            long,
-            value_name = "SATS",
-            value_parser = crate::amount::parse,
-            conflicts_with = "no_max_fee"
-        )]
-        max_fee: Option<u64>,
-        /// Issue the grant with no per-transaction fee cap at all
-        #[arg(long)]
-        no_max_fee: bool,
-    },
+    Grant(GrantArgs),
     /// Revoke an agent's grant
     Revoke {
         /// Agent name

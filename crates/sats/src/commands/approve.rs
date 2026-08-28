@@ -31,6 +31,20 @@ pub fn run(
             request.id
         );
     }
+    // The hard envelope is refused before any password prompt: an
+    // approval could never lift it, so creating one would only arm a
+    // decoy. The escalation for a hard refusal is changing the grant.
+    if let Some(RequestOutcome::Denied { deny, .. }) = &request.outcome
+        && !deny.approvable()
+    {
+        bail!(
+            "request {} was denied {}, which no approval can lift — the only escalation \
+             is changing the grant itself: sats agent grant {} --budget <sats> ...",
+            request.id,
+            deny.code(),
+            request.agent,
+        );
+    }
     match store.claim_agent_request(net_name, &request.agent, &request.id)? {
         Some(claim) => drop(claim),
         None => bail!(

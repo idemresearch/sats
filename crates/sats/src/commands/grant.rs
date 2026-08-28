@@ -8,33 +8,41 @@ use crate::config::network_name;
 use crate::store::{Store, unix_now};
 use crate::{keys, ui};
 
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     store: &Store,
     network: Network,
-    agent: &str,
-    budget: u64,
-    duration: &str,
-    max_tx: Option<u64>,
-    max_fee: Option<u64>,
-    no_max_fee: bool,
+    args: &crate::cli::GrantArgs,
     json: bool,
 ) -> Result<()> {
+    let agent = args.name.as_str();
+    let budget = args.budget;
     validate_agent_name(agent)?;
     if budget == 0 {
         bail!("budget must be greater than 0");
     }
-    let lifetime = humantime::parse_duration(duration)
-        .with_context(|| format!("invalid --for {duration:?} (try 24h, 7d)"))?
+    let lifetime = humantime::parse_duration(&args.duration)
+        .with_context(|| format!("invalid --for {:?} (try 24h, 7d)", args.duration))?
         .as_secs();
     if lifetime == 0 {
         bail!("--for must be a positive duration");
     }
+    // The hard ceiling bounds what may even be asked for; a ceiling below
+    // the automatic cap would make the ask band negative-width nonsense.
+    if let (Some(max_tx), Some(ask_max_tx)) = (args.max_tx, args.ask_max_tx)
+        && ask_max_tx < max_tx
+    {
+        bail!(
+            "--ask-max-tx ({} sat) must be at least --max-tx ({} sat) — amounts up to \
+             --max-tx are automatic, up to --ask-max-tx are approvable, above it never",
+            format_sats(ask_max_tx),
+            format_sats(max_tx),
+        );
+    }
     // A grant with no fee cap lets one bad fee estimate burn the whole
     // budget as miner fees, so the cap defaults on. Lifting it entirely
     // is `--no-max-fee`, an explicit choice.
-    let defaulted_fee = max_fee.is_none() && !no_max_fee;
-    let max_fee = match (max_fee, no_max_fee) {
+    let defaulted_fee = args.max_fee.is_none() && !args.no_max_fee;
+    let max_fee = match (args.max_fee, args.no_max_fee) {
         (Some(cap), _) => Some(cap),
         (None, true) => None,
         (None, false) => Some(sats_core::authz::default_max_fee_sat(budget)),
@@ -47,8 +55,17 @@ pub fn run(
             ("Grant", agent.to_string()),
             ("Budget", format!("{} sat", format_sats(budget))),
         ];
-        if let Some(max_tx) = max_tx {
+        if let Some(max_tx) = args.max_tx {
             rows.push(("Max tx", format!("{} sat", format_sats(max_tx))));
+        }
+        if let Some(ask_max_tx) = args.ask_max_tx {
+            rows.push((
+                "Ask max",
+                format!(
+                    "{} sat (above this: never approvable)",
+                    format_sats(ask_max_tx)
+                ),
+            ));
         }
         if let Some(max_fee) = max_fee {
             let row = if defaulted_fee {
@@ -81,7 +98,7 @@ pub fn run(
         network: net_name.to_string(),
         budget_sat: budget,
         spent_sat: 0,
-        max_tx_sat: max_tx,
+        max_tx_sat: args.max_tx,
         max_fee_sat: max_fee,
         created_at: now,
         expires_at: now.saturating_add(lifetime),
@@ -89,7 +106,7 @@ pub fn run(
         token_id: issued.token_id.clone(),
         token_hash: issued.token_hash.clone(),
         mode: Default::default(),
-        ask_max_tx_sat: None,
+        ask_max_tx_sat: args.ask_max_tx,
         allowed_recipients: None,
         suspended: None,
         strikes: Vec::new(),
@@ -110,6 +127,7 @@ pub fn run(
                 "agent": grant.agent,
                 "budget_sat": grant.budget_sat,
                 "max_tx_sat": grant.max_tx_sat,
+                "ask_max_tx_sat": grant.ask_max_tx_sat,
                 "max_fee_sat": grant.max_fee_sat,
                 "expires_at": grant.expires_at,
                 "replaced": replacing,

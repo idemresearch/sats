@@ -82,18 +82,15 @@ pub fn valid_request_key(key: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// A denial the human can act on: cap denials name the exact one-time
-/// exception command; expiry and revocation cannot be approved away.
+/// A denial the human can act on: approvable refusals name the exact
+/// one-time exception command; the hard envelope gets no hint, because
+/// asking cannot move it. `DenyReason::approvable()` is the single
+/// source of truth.
 fn denial_with_hint(reason: &DenyReason, request_id: &str) -> SendOutcome {
     let mut outcome = SendOutcome::from_deny(reason);
-    let approvable = matches!(
-        reason,
-        DenyReason::OverMaxTx { .. }
-            | DenyReason::OverMaxFee { .. }
-            | DenyReason::OverBudget { .. }
-            | DenyReason::ApprovalFeeExceeded { .. }
-    );
-    if approvable && let Some(message) = &mut outcome.message {
+    if reason.approvable()
+        && let Some(message) = &mut outcome.message
+    {
         message.push_str(&format!(
             "; a human can approve exactly this request once with: sats agent approve {request_id}"
         ));

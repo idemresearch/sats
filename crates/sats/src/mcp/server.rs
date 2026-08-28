@@ -143,7 +143,8 @@ pub struct SendResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining_budget_sat: Option<u64>,
     /// Denial code: expired, over_max_tx, over_max_fee, over_budget,
-    /// revoked, approval_fee_exceeded.
+    /// revoked, approval_fee_exceeded, amount_overflow, ask_required,
+    /// over_ask_max, observe_only, suspended, recipient_not_allowed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,6 +161,11 @@ pub struct SendResult {
     /// rather than the grant's standing caps.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via_approval: Option<bool>,
+    /// On denied results only: whether a one-time human approval can lift
+    /// this exact refusal. False means the hard envelope — asking cannot
+    /// move it, and only the human changing the grant can.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approvable: Option<bool>,
 }
 
 /// The daemon and the tool surface speak the same result vocabulary;
@@ -178,6 +184,7 @@ impl From<SendOutcome> for SendResult {
             request_id: outcome.request_id,
             error_code: outcome.error_code,
             via_approval: outcome.via_approval,
+            approvable: outcome.approvable,
         }
     }
 }
@@ -196,6 +203,7 @@ impl SendResult {
             request_id: None,
             error_code: None,
             via_approval: None,
+            approvable: None,
         }
     }
 
@@ -417,10 +425,15 @@ impl SatsMcp {
     }
 
     #[tool(description = "Send bitcoin. Enforced deterministically against the \
-        human-authorized grant (budget, per-tx cap, fee cap, expiry). Returns \
-        status='sent' with the txid, or status='denied' with the reason — a denial \
-        means human authorization is required, not that you should retry unchanged. \
-        Pass request_id (1-64 chars of A-Za-z0-9_-) to make retries safe: the same \
+        human-authorized grant (budget, per-tx cap, hard ceiling, fee cap, expiry, \
+        mode, recipient rules). Returns status='sent' with the txid, or \
+        status='denied' with the reason — a denial means human authorization is \
+        required, not that you should retry unchanged. Denied results carry \
+        approvable: true when a human can approve exactly this request once \
+        (relay the message and request_id, then retry the identical send after \
+        approval), and approvable: false when no approval exists for it — only \
+        the human changing the grant can, so do not ask repeatedly. Pass \
+        request_id (1-64 chars of A-Za-z0-9_-) to make retries safe: the same \
         key with the same address and amount never pays twice, and returns the \
         recorded outcome instead.")]
     async fn send(
@@ -607,11 +620,14 @@ impl ServerHandler for SatsMcp {
         info.with_instructions(format!(
             "sats: a Bitcoin wallet this server operates as agent {:?} on {}, under a \
              human-authorized spending grant. All amounts are integer satoshis. send() is \
-             enforced deterministically against the grant's budget, per-transaction cap, fee \
-             cap, and expiry; status='denied' means human authorization is required — relay \
-             the message and request_id to your human instead of retrying unchanged. If the \
-             human approves the request (sats agent approve), retry the identical send with \
-             the same request_id: the one-time approval is consumed by exactly that intent. \
+             enforced deterministically against the grant's policy — budget, per-transaction \
+             cap, hard ceiling, fee cap, expiry, mode, recipient rules; status='denied' means \
+             human authorization is required — relay the message and request_id to your human \
+             instead of retrying unchanged. A denial with approvable=true can be approved \
+             exactly once (sats agent approve); retry the identical send with the same \
+             request_id after approval: the one-time approval is consumed by exactly that \
+             intent. A denial with approvable=false cannot be approved at all — only the \
+             human changing the grant lifts it, so report it once and stop. \
              Pass request_id on every send so retries can never pay twice. Use get_grant() \
              to see the remaining budget before sending. Use get_status() for daemon \
              availability; unavailable or locked is an operational condition, not a policy \

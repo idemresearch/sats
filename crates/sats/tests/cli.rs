@@ -831,6 +831,60 @@ fn agent_log_renders_events_and_filters_by_request() {
     assert_eq!(limited.as_array().unwrap()[0]["event"], "quantum_settled");
 }
 
+/// The hard ceiling flag validates its band geometry and lands in both
+/// the JSON emission and the grant file.
+#[test]
+fn grant_hard_ceiling_validates_and_persists() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+
+    // A ceiling below the automatic cap is a negative-width ask band.
+    sats(&dir)
+        .args([
+            "agent",
+            "grant",
+            "claude",
+            "--budget",
+            "50000",
+            "--max-tx",
+            "10000",
+            "--ask-max-tx",
+            "5000",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must be at least"));
+    assert!(
+        !dir.path().join("signet/grants/claude.json").exists(),
+        "a refused grant writes nothing"
+    );
+
+    let issued = json_stdout(
+        sats(&dir)
+            .args([
+                "--json",
+                "agent",
+                "grant",
+                "claude",
+                "--budget",
+                "50000",
+                "--max-tx",
+                "10000",
+                "--ask-max-tx",
+                "25000",
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(issued["ask_max_tx_sat"], 25_000);
+    let grant: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.path().join("signet/grants/claude.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(grant["ask_max_tx_sat"], 25_000);
+    assert_eq!(grant["format_version"], 3);
+}
+
 fn fabricate_denied_request(dir: &TempDir, id: &str) {
     let requests_dir = dir.path().join("signet/agent-requests/claude");
     std::fs::create_dir_all(&requests_dir).unwrap();

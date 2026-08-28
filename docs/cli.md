@@ -265,7 +265,7 @@ Human commands never use the daemon. `sats send`, `sats psbt sign`, and
 
 ```sh
 sats agent grant <name> --budget <SATS> [--for <DURATION>] \
-  [--max-tx <SATS>] [--max-fee <SATS> | --no-max-fee]
+  [--max-tx <SATS>] [--ask-max-tx <SATS>] [--max-fee <SATS> | --no-max-fee]
 ```
 
 `--for` defaults to `24h` and accepts human-readable durations such as `30m`,
@@ -280,6 +280,17 @@ miner fees; `--no-max-fee` issues a grant without any fee cap. Grant
 creation requires the wallet password, which authorizes the grant and is not
 otherwise used: the grant file holds a budget and a token hash, never key
 material.
+
+The two amount caps split sends into three bands. Up to `--max-tx` a send
+is automatic. Above it, the send is denied but the denial is approvable:
+`sats agent approve` authorizes exactly that request, once. Above
+`--ask-max-tx` — the hard ceiling — the denial is `over_ask_max` and is
+never approvable: no hint is offered, `sats agent approve` refuses to arm
+one, and the only escalation is changing the grant itself. The ceiling is
+the pre-commitment you make while calm, so that later pressure — an agent
+asking nicely fifty times — has nothing to push on. When both caps are
+given, `--ask-max-tx` must be at least `--max-tx`; without `--ask-max-tx`,
+every cap denial stays approvable, as before.
 
 Creating a grant prints a bearer token **once**. It is not stored — only its
 SHA-256 is — so there is no way to recover it later; re-issue the grant to

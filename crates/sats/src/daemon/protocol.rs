@@ -159,6 +159,11 @@ pub struct SendOutcome {
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via_approval: Option<bool>,
+    /// On denied outcomes only: whether a one-time human approval can
+    /// lift this exact refusal. False marks the hard envelope, where the
+    /// only escalation is changing the grant itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approvable: Option<bool>,
 }
 
 impl SendOutcome {
@@ -179,19 +184,26 @@ impl SendOutcome {
             status: "denied".into(),
             reason: Some(reason.into()),
             message: Some(message),
+            // Denials built from a bare code — revocation, no grant on
+            // file — have no approval path: there is nothing to approve
+            // against. Typed refusals override this via `from_deny`.
+            approvable: Some(false),
             ..Default::default()
         }
     }
 
     /// The denial shape shared by every refusal path.
     pub fn from_deny(reason: &DenyReason) -> Self {
-        SendOutcome::denied(
-            reason.code(),
-            format!(
-                "human authorization required: {}",
-                reason.human().replace('\n', "; ")
-            ),
-        )
+        SendOutcome {
+            approvable: Some(reason.approvable()),
+            ..SendOutcome::denied(
+                reason.code(),
+                format!(
+                    "human authorization required: {}",
+                    reason.human().replace('\n', "; ")
+                ),
+            )
+        }
     }
 
     pub fn error(message: String) -> Self {
@@ -422,5 +434,32 @@ mod tests {
         assert_eq!(json["total_sat"], 120);
         assert_eq!(json["remaining_budget_sat"], 500);
         assert!(sent.is_sent());
+    }
+
+    /// `approvable` rides denied outcomes only, and tracks the typed
+    /// reason: the ask band true, the hard envelope false, bare-code
+    /// denials (revoked) false.
+    #[test]
+    fn approvable_marks_denials_and_nothing_else() {
+        let ask = SendOutcome::from_deny(&DenyReason::OverMaxTx {
+            requested_sat: 2,
+            max_tx_sat: 1,
+        });
+        assert_eq!(serde_json::to_value(&ask).unwrap()["approvable"], true);
+
+        let hard = SendOutcome::from_deny(&DenyReason::OverAskMax {
+            requested_sat: 2,
+            ask_max_tx_sat: 1,
+        });
+        assert_eq!(serde_json::to_value(&hard).unwrap()["approvable"], false);
+
+        let revoked = SendOutcome::denied("revoked", "no grant".into());
+        assert_eq!(serde_json::to_value(&revoked).unwrap()["approvable"], false);
+
+        let sent = serde_json::to_value(SendOutcome::sent("ab".into(), 1, 1, None)).unwrap();
+        assert!(sent.get("approvable").is_none());
+        let error =
+            serde_json::to_value(SendOutcome::op_error("wallet_locked", "l".into())).unwrap();
+        assert!(error.get("approvable").is_none());
     }
 }

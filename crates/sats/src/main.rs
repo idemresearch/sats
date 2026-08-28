@@ -97,16 +97,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cli::DaemonCommand::Stop => commands::daemon::stop(&store, network, json),
         },
         Command::Agent { command } => match command {
-            cli::AgentCommand::Grant {
-                name,
-                budget,
-                duration,
-                max_tx,
-                max_fee,
-                no_max_fee,
-            } => commands::grant::run(
-                &store, network, &name, budget, &duration, max_tx, max_fee, no_max_fee, json,
-            ),
+            cli::AgentCommand::Grant(args) => commands::grant::run(&store, network, &args, json),
             cli::AgentCommand::Revoke { name } => {
                 commands::revoke::run(&store, network, &name, json)
             }
