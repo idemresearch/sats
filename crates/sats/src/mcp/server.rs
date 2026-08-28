@@ -147,6 +147,10 @@ pub struct GrantResult {
     pub active: bool,
     pub agent: String,
     pub network: String,
+    /// Authority mode: "auto" (sends inside the caps execute), "ask"
+    /// (every send needs a one-time approval), or "observe" (read-only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_sat: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -462,6 +466,7 @@ impl SatsMcp {
                     active: true,
                     agent,
                     network: net_name.to_string(),
+                    mode: Some(g.mode.as_str().to_string()),
                     budget_sat: Some(g.budget_sat),
                     spent_sat: Some(g.spent_sat),
                     remaining_sat: Some(g.remaining_sat()),
@@ -475,6 +480,7 @@ impl SatsMcp {
                     active: false,
                     agent: agent.clone(),
                     network: net_name.to_string(),
+                    mode: None,
                     budget_sat: None,
                     spent_sat: None,
                     remaining_sat: None,

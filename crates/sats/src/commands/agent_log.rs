@@ -135,5 +135,8 @@ fn detail(event: &AgentEvent) -> String {
         EventKind::BroadcastFailed { txid, message } => format!("{txid}: {message}"),
         EventKind::Failed { message } => message.clone(),
         EventKind::Replayed | EventKind::Conflicted => String::new(),
+        EventKind::ModeChanged { from, to, widened } => {
+            format!("{from} → {to}{}", if *widened { " (widened)" } else { "" })
+        }
     }
 }

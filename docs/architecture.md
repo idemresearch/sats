@@ -104,7 +104,7 @@ isolated runs.
 | PSBT sessions | `<network>/psbts/<id>.json` | Read-only legacy state from older releases' staged workflow; new exports are PSBT file artifacts |
 | Finalized transactions | `<network>/transactions/<txid>.json` | Private raw transaction hex, pending/broadcast status, and payment metadata |
 | Legacy plans | `<network>/plans/<id>.json` | Pre-refactor state; read, permission-hardened, and converted on sign/broadcast |
-| Grants | `<network>/grants/<agent>.json` | Limits, accounting, and the bearer token's hash — no key material |
+| Grants | `<network>/grants/<agent>.json` | Authority mode, limits, accounting, and the bearer token's hash — no key material |
 | Daemon socket | `$XDG_RUNTIME_DIR/sats/<network>.sock`, or `<network>/d.sock` under `SATS_DIR` | satsd's owner-only control socket |
 | Daemon log | `<network>/satsd.log` | Diagnostics from a backgrounded `sats daemon start` |
 | Daemon lifetime lock | Socket path with `.lock` extension | Private OS file lock held until process exit; not deleted on shutdown |

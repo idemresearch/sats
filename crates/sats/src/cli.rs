@@ -262,6 +262,10 @@ pub struct GrantArgs {
     /// Issue the grant with no per-transaction fee cap at all
     #[arg(long)]
     pub no_max_fee: bool,
+    /// Authority mode: auto (sends inside the caps execute), ask (every
+    /// send needs a one-time approval), or observe (read-only)
+    #[arg(long, default_value = "auto", value_name = "auto|ask|observe")]
+    pub mode: String,
 }
 
 #[derive(Subcommand)]
@@ -272,6 +276,14 @@ pub enum AgentCommand {
     Revoke {
         /// Agent name
         name: String,
+    },
+    /// Set an agent's authority mode (widening requires the password)
+    Mode {
+        /// Agent name
+        name: String,
+        /// auto, ask, or observe
+        #[arg(value_name = "auto|ask|observe")]
+        mode: String,
     },
     /// List active grants
     List,

@@ -118,8 +118,13 @@ users keep using the terminal unlock command.
 
 `sats agent grant <name>` creates bounded unattended authority with:
 
+- an authority mode — `auto` (sends inside the caps execute), `ask`
+  (every send needs a one-time approval), or `observe` (read-only) —
+  switchable live with `sats agent mode`, where tightening never needs
+  the password and widening always does;
 - total budget, including transaction fees;
-- optional per-transaction amount cap;
+- optional per-transaction amount cap, and an optional hard ceiling
+  above which a send is never approvable;
 - per-transaction fee cap — defaulted when not given to 2% of the budget,
   at least 1000 sats and never above the budget, so one bad fee estimate
   cannot burn the whole budget as miner fees; only the explicit

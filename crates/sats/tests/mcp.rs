@@ -1466,6 +1466,89 @@ fn check_request_polls_without_side_effects() {
     assert_eq!(cross["found"], false, "got: {cross}");
 }
 
+/// Ask mode proposes everything and executes only through approvals;
+/// observe mode reads but can never send; auto restores autonomy. All
+/// three flow through get_grant and take effect mid-session.
+#[test]
+fn modes_gate_the_send_path_end_to_end() {
+    let dir = TempDir::new().unwrap();
+    let fx = funded_setup(&dir, &["--budget", "50000", "--mode", "ask"], &[100_000]);
+    let mut mcp = McpSession::start(&dir, "claude", &fx.token);
+    handshake(&mut mcp);
+
+    let grant = mcp.call_tool(2, "get_grant", serde_json::json!({}));
+    assert_eq!(grant["mode"], "ask", "got: {grant}");
+
+    // Every send asks, however small.
+    let params = serde_json::json!({
+        "address": ADDRESS, "amount_sat": 1_000, "request_id": "m-1",
+    });
+    let asked = mcp.call_tool(3, "send", params.clone());
+    assert_eq!(asked["status"], "denied", "got: {asked}");
+    assert_eq!(asked["reason"], "ask_required");
+    assert_eq!(asked["approvable"], true);
+
+    // The approval executes it exactly once; the next send asks again.
+    run_sats(&dir, &["agent", "approve", "k-m-1", "--max-fee", "500"]);
+    let sent = mcp.call_tool(4, "send", params);
+    assert_eq!(sent["status"], "sent", "got: {sent}");
+    assert_eq!(sent["via_approval"], true);
+    let again = mcp.call_tool(
+        5,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 1_000, "request_id": "m-2" }),
+    );
+    assert_eq!(again["reason"], "ask_required", "got: {again}");
+
+    // Observe: reads keep working, sends hard-deny, approvals refuse.
+    run_sats(&dir, &["agent", "mode", "claude", "observe"]);
+    let grant = mcp.call_tool(6, "get_grant", serde_json::json!({}));
+    assert_eq!(grant["mode"], "observe");
+    let balance = mcp.call_tool(7, "get_balance", serde_json::json!({}));
+    assert!(balance["balance_sat"].as_u64().unwrap() > 0);
+    let poll = mcp.call_tool(
+        8,
+        "check_request",
+        serde_json::json!({ "request_id": "m-2" }),
+    );
+    assert_eq!(poll["found"], true);
+    let denied = mcp.call_tool(
+        9,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 1_000, "request_id": "m-3" }),
+    );
+    assert_eq!(denied["reason"], "observe_only", "got: {denied}");
+    assert_eq!(denied["approvable"], false);
+    assert!(
+        !denied["message"]
+            .as_str()
+            .unwrap()
+            .contains("agent approve"),
+        "observe denials carry no approval hint: {denied}"
+    );
+    let refused = Command::new(sats_bin())
+        .args(["agent", "approve", "k-m-3", "--max-fee", "500"])
+        .env("SATS_DIR", dir.path())
+        .env("SATS_PASSWORD", PASSWORD)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert!(!refused.status.success(), "observe denials cannot be armed");
+
+    // Auto again (password-gated): the same send now just executes.
+    run_sats(&dir, &["agent", "mode", "claude", "auto"]);
+    let sent = mcp.call_tool(
+        10,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 1_000, "request_id": "m-4" }),
+    );
+    assert_eq!(sent["status"], "sent", "got: {sent}");
+    assert!(
+        sent.get("via_approval").is_none(),
+        "grant authority, no exception"
+    );
+}
+
 /// Recorded truth outranks revocation, read-only: after the grant is
 /// gone, a keyed retry of a send that signed still answers with the
 /// recorded txid, and nothing new is written.

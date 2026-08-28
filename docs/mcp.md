@@ -161,6 +161,7 @@ Returns this server identity's current authority:
   "active": true,
   "agent": "claude",
   "network": "signet",
+  "mode": "auto",
   "budget_sat": 50000,
   "spent_sat": 4781,
   "remaining_sat": 45219,

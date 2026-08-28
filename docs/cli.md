@@ -80,6 +80,7 @@ hold the explicit advanced workflows.
 | `sats daemon stop` | Stop the daemon |
 | `sats agent grant <name>` | Create bounded unattended signing authority |
 | `sats agent revoke <name>` | Delete an agent grant immediately |
+| `sats agent mode <name> <mode>` | Switch auto/ask/observe; widening needs the password |
 | `sats agent list` | List non-expired grants and remaining budgets |
 | `sats agent requests [--all\|--watch]` | Review agent send requests; `--watch` streams newly pending asks |
 | `sats agent approve <id>` | Authorize one denied request exactly once (password required) |
@@ -265,7 +266,9 @@ Human commands never use the daemon. `sats send`, `sats psbt sign`, and
 
 ```sh
 sats agent grant <name> --budget <SATS> [--for <DURATION>] \
+  [--mode auto|ask|observe] \
   [--max-tx <SATS>] [--ask-max-tx <SATS>] [--max-fee <SATS> | --no-max-fee]
+sats agent mode <name> <auto|ask|observe>
 ```
 
 `--for` defaults to `24h` and accepts human-readable durations such as `30m`,
@@ -280,6 +283,20 @@ miner fees; `--no-max-fee` issues a grant without any fee cap. Grant
 creation requires the wallet password, which authorizes the grant and is not
 otherwise used: the grant file holds a budget and a token hash, never key
 material.
+
+`--mode` sets how much standing autonomy the grant carries. `auto` (the
+default) lets sends inside the caps execute without you. `ask` proposes
+everything: every send — however small — is the approvable denial
+`ask_required`, executed only through `sats agent approve`, one request
+at a time. `observe` is read-only: balance, addresses, grant status, and
+request polling keep working, but no send can be authorized and no
+approval can lift `observe_only`. Revocation remains the off switch.
+
+`sats agent mode` switches a live grant between them, mid-session, and
+carries the attenuation rule mechanically: tightening authority
+(`auto→ask→observe`) never asks for the password — reducing what an agent
+may do stays cheap — while widening requires it, exactly like issuing the
+grant did. Every transition lands in the event log with its direction.
 
 The two amount caps split sends into three bands. Up to `--max-tx` a send
 is automatic. Above it, the send is denied but the denial is approvable:

@@ -75,6 +75,15 @@ pub enum EventKind {
     Replayed,
     /// A request key was reused for a different intent.
     Conflicted,
+    /// A human changed the grant's authority mode. Control-plane events
+    /// carry "-" for the request id and intent digest: they belong to
+    /// the grant, not to any one request.
+    ModeChanged {
+        from: String,
+        to: String,
+        /// Whether the transition widened authority (password-gated).
+        widened: bool,
+    },
 }
 
 impl AgentEvent {
@@ -98,9 +107,14 @@ impl AgentEvent {
             EventKind::Failed { .. } => "failed",
             EventKind::Replayed => "replayed",
             EventKind::Conflicted => "conflicted",
+            EventKind::ModeChanged { .. } => "mode_changed",
         }
     }
 }
+
+/// The placeholder request id and intent digest for control-plane events
+/// (mode changes, suspensions): they belong to the grant, not a request.
+pub const CONTROL_EVENT_ID: &str = "-";
 
 #[cfg(test)]
 mod tests {
@@ -183,11 +197,35 @@ mod tests {
                 message: "m".into(),
             }),
             event(EventKind::Conflicted),
+            event(EventKind::ModeChanged {
+                from: "auto".into(),
+                to: "observe".into(),
+                widened: false,
+            }),
         ];
         for e in kinds {
             let json = serde_json::to_value(&e).unwrap();
             assert_eq!(json["event"], e.kind_str());
         }
+    }
+
+    #[test]
+    fn mode_changed_round_trips_with_direction() {
+        let e = event(EventKind::ModeChanged {
+            from: "observe".into(),
+            to: "auto".into(),
+            widened: true,
+        });
+        let json = serde_json::to_value(&e).unwrap();
+        assert_eq!(json["event"], "mode_changed");
+        assert_eq!(json["from"], "observe");
+        assert_eq!(json["to"], "auto");
+        assert_eq!(json["widened"], true);
+        let back: AgentEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            back.kind,
+            EventKind::ModeChanged { widened: true, .. }
+        ));
     }
 
     #[test]

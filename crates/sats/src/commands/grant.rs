@@ -17,6 +17,8 @@ pub fn run(
     let agent = args.name.as_str();
     let budget = args.budget;
     validate_agent_name(agent)?;
+    let mode: sats_core::authz::GrantMode =
+        args.mode.parse().map_err(|e: String| anyhow::anyhow!(e))?;
     if budget == 0 {
         bail!("budget must be greater than 0");
     }
@@ -55,6 +57,9 @@ pub fn run(
             ("Grant", agent.to_string()),
             ("Budget", format!("{} sat", format_sats(budget))),
         ];
+        if mode != sats_core::authz::GrantMode::Auto {
+            rows.push(("Mode", mode.as_str().to_string()));
+        }
         if let Some(max_tx) = args.max_tx {
             rows.push(("Max tx", format!("{} sat", format_sats(max_tx))));
         }
@@ -105,7 +110,7 @@ pub fn run(
         tx_count: 0,
         token_id: issued.token_id.clone(),
         token_hash: issued.token_hash.clone(),
-        mode: Default::default(),
+        mode,
         ask_max_tx_sat: args.ask_max_tx,
         allowed_recipients: None,
         suspended: None,
@@ -125,6 +130,7 @@ pub fn run(
             "{}",
             serde_json::json!({
                 "agent": grant.agent,
+                "mode": grant.mode.as_str(),
                 "budget_sat": grant.budget_sat,
                 "max_tx_sat": grant.max_tx_sat,
                 "ask_max_tx_sat": grant.ask_max_tx_sat,

@@ -25,10 +25,12 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
             .map(|g| {
                 serde_json::json!({
                     "agent": g.agent,
+                    "mode": g.mode.as_str(),
                     "budget_sat": g.budget_sat,
                     "spent_sat": g.spent_sat,
                     "remaining_sat": g.remaining_sat(),
                     "max_tx_sat": g.max_tx_sat,
+                    "ask_max_tx_sat": g.ask_max_tx_sat,
                     "max_fee_sat": g.max_fee_sat,
                     "tx_count": g.tx_count,
                     "expires_at": g.expires_at,
@@ -58,6 +60,7 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
 
     let header = [
         "Agent",
+        "Mode",
         "Budget",
         "Spent",
         "Remaining",
@@ -66,11 +69,12 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
         "Txs",
         "Expires",
     ];
-    let rows: Vec<[String; 8]> = grants
+    let rows: Vec<[String; 9]> = grants
         .iter()
         .map(|g| {
             [
                 g.agent.clone(),
+                g.mode.as_str().to_string(),
                 format_sats(g.budget_sat),
                 format_sats(g.spent_sat),
                 format_sats(g.remaining_sat()),

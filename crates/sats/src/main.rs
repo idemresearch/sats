@@ -101,6 +101,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cli::AgentCommand::Revoke { name } => {
                 commands::revoke::run(&store, network, &name, json)
             }
+            cli::AgentCommand::Mode { name, mode } => {
+                commands::mode::run(&store, network, &name, &mode, json)
+            }
             cli::AgentCommand::List => commands::grants::run(&store, network, json),
             cli::AgentCommand::Approve {
                 id,

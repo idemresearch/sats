@@ -1019,6 +1019,98 @@ fn agent_requests_watch_streams_newly_pending_asks() {
     );
 }
 
+/// Mode transitions carry the attenuation rule: tightening never asks
+/// for the password, widening always does, and both land in the file
+/// and the causal log.
+#[test]
+fn agent_mode_transitions_gate_on_widening() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let issued = json_stdout(
+        sats(&dir)
+            .args([
+                "--json", "agent", "grant", "claude", "--budget", "50000", "--mode", "ask",
+            ])
+            .assert()
+            .success(),
+    );
+    assert_eq!(issued["mode"], "ask");
+    let grant_mode = |dir: &TempDir| {
+        serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(dir.path().join("signet/grants/claude.json")).unwrap(),
+        )
+        .unwrap()["mode"]
+            .clone()
+    };
+    assert_eq!(grant_mode(&dir), "ask");
+
+    // Tightening works even with the wrong password on hand: no prompt
+    // runs at all.
+    sats(&dir)
+        .args(["agent", "mode", "claude", "observe"])
+        .env("SATS_PASSWORD", "wrong-password")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("observe mode"));
+    assert_eq!(grant_mode(&dir), "observe");
+
+    // Widening with the wrong password fails and changes nothing.
+    sats(&dir)
+        .args(["agent", "mode", "claude", "auto"])
+        .env("SATS_PASSWORD", "wrong-password")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("wrong password"));
+    assert_eq!(grant_mode(&dir), "observe");
+
+    // Widening with the right password succeeds; repeating is a no-op.
+    sats(&dir)
+        .args(["agent", "mode", "claude", "auto"])
+        .assert()
+        .success();
+    assert_eq!(grant_mode(&dir), "auto");
+    sats(&dir)
+        .args(["agent", "mode", "claude", "auto"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already"));
+    sats(&dir)
+        .args(["agent", "mode", "claude", "sideways"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown mode"));
+
+    // Both real transitions are attributable in the log, with direction.
+    let log = json_stdout(
+        sats(&dir)
+            .args(["agent", "log", "--json"])
+            .assert()
+            .success(),
+    );
+    let changes: Vec<&serde_json::Value> = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["event"] == "mode_changed")
+        .collect();
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[0]["from"], "ask");
+    assert_eq!(changes[0]["to"], "observe");
+    assert_eq!(changes[0]["widened"], false);
+    assert_eq!(changes[1]["from"], "observe");
+    assert_eq!(changes[1]["to"], "auto");
+    assert_eq!(changes[1]["widened"], true);
+
+    // The list shows the mode column.
+    let list = json_stdout(
+        sats(&dir)
+            .args(["--json", "agent", "list"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(list.as_array().unwrap()[0]["mode"], "auto");
+}
+
 fn fabricate_denied_request(dir: &TempDir, id: &str) {
     let requests_dir = dir.path().join("signet/agent-requests/claude");
     std::fs::create_dir_all(&requests_dir).unwrap();
