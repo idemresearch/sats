@@ -271,10 +271,27 @@ fn dispatch(
             out_of_sequence("unlock prompts require a dedicated connection")
         }
 
-        Request::Finish { outcome, .. } => {
+        Request::Finish { token, outcome, .. } => {
             let Some(claimed) = flight.as_mut() else {
                 return out_of_sequence("finish without a signed request");
             };
+            // Only the token that began this send may close it out. The
+            // comparison is against the Begin-time hash, not a grant
+            // re-read, so a send signed just before a revocation can still
+            // record its broadcast outcome. Refuse without recording and
+            // keep the claim: the same connection can retry with the
+            // right token.
+            if !claimed.authorizes(&token) {
+                return Response::Outcome(
+                    SendOutcome::op_error(
+                        "unauthorized",
+                        "the presented token is not the one that began this send — \
+                         the outcome was not recorded"
+                            .into(),
+                    )
+                    .with_request(&claimed.request.id),
+                );
+            }
             let result = send::finish(store, session.net_name, claimed, outcome);
             *flight = None;
             Response::Outcome(result)
