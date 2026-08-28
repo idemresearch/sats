@@ -1135,6 +1135,83 @@ fn a_traversal_agent_name_is_refused_before_any_io() {
     assert!(!dir.path().join("signet/agent-requests").exists());
 }
 
+/// A persistent connection to satsd, for tests that span several calls
+/// on one claim — `daemon_begin_send` opens a fresh connection per call,
+/// which releases the claim it took.
+struct DaemonConn {
+    stream: std::os::unix::net::UnixStream,
+    reader: BufReader<std::os::unix::net::UnixStream>,
+}
+
+impl DaemonConn {
+    fn open(dir: &TempDir) -> DaemonConn {
+        let stream = std::os::unix::net::UnixStream::connect(dir.path().join("signet/d.sock"))
+            .expect("satsd socket");
+        let reader = BufReader::new(stream.try_clone().unwrap());
+        DaemonConn { stream, reader }
+    }
+
+    fn call(&mut self, request: serde_json::Value) -> serde_json::Value {
+        writeln!(self.stream, "{request}").unwrap();
+        self.stream.flush().unwrap();
+        let mut line = String::new();
+        self.reader.read_line(&mut line).unwrap();
+        serde_json::from_str(line.trim()).unwrap()
+    }
+}
+
+/// The `Finish` token is enforced against the token that began the send:
+/// a wrong one records nothing and keeps the claim, so the right token
+/// can still close the request out on the same connection.
+#[test]
+fn finish_requires_the_token_that_began_the_send() {
+    let dir = TempDir::new().unwrap();
+    run_sats(&dir, &["init"]);
+    let token = grant_token(&dir, "claude", &["--budget", "50000"]);
+    let _daemon = Daemon::start(&dir);
+
+    let mut conn = DaemonConn::open(&dir);
+    let begun = conn.call(serde_json::json!({
+        "op": "begin_send", "protocol": 1, "token": token, "agent": "claude",
+        "request_id": "fin-1", "recipient": ADDRESS, "amount_sat": 1_000,
+    }));
+    assert_eq!(begun["reply"], "proceed", "got: {begun}");
+    assert_eq!(begun["request_id"], "k-fin-1");
+
+    // Wrong and malformed tokens are refused with a typed operational
+    // error — never a policy denial — and no outcome is recorded.
+    for bad in ["11".repeat(32), "not-a-token".into()] {
+        let refused = conn.call(serde_json::json!({
+            "op": "finish", "protocol": 1, "token": bad,
+            "outcome": { "broadcast": "failed", "message": "prep failed" },
+        }));
+        assert_eq!(refused["reply"], "outcome");
+        assert_eq!(refused["error_code"], "unauthorized", "got: {refused}");
+        assert!(refused.get("reason").is_none(), "not a policy denial");
+        assert_eq!(refused["request_id"], "k-fin-1");
+    }
+    let record = read_json(&dir.path().join("signet/agent-requests/claude/k-fin-1.json"));
+    assert!(
+        record.get("outcome").is_none(),
+        "a wrong token must not record an outcome: {record}"
+    );
+
+    // The claim survived the refusals: the begin token closes it out.
+    let closed = conn.call(serde_json::json!({
+        "op": "finish", "protocol": 1, "token": token,
+        "outcome": { "broadcast": "failed", "message": "prep failed" },
+    }));
+    assert_eq!(closed["status"], "error", "got: {closed}");
+    assert_eq!(closed["request_id"], "k-fin-1");
+    let record = read_json(&dir.path().join("signet/agent-requests/claude/k-fin-1.json"));
+    assert_eq!(record["outcome"]["status"], "failed");
+    assert!(
+        record["outcome"].get("txid").is_none(),
+        "nothing was signed: {record}"
+    );
+    assert_eq!(event_kinds(&dir), ["request_received", "failed"]);
+}
+
 /// Recorded truth outranks revocation, read-only: after the grant is
 /// gone, a keyed retry of a send that signed still answers with the
 /// recorded txid, and nothing new is written.

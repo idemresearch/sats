@@ -37,9 +37,21 @@ pub struct InFlight {
     pub agent: String,
     pub recipient: String,
     pub amount_sat: u64,
+    /// SHA-256 of the bearer token `BeginSend` authenticated. Later calls
+    /// closing out this send must present the same token; the wire field
+    /// on `Finish` is enforced against this, not decorative.
+    token_hash: String,
     /// Set by [`authorize`] so [`finish`] can close out the right record.
     pub signed: Option<Signed>,
     _claim: RequestClaim,
+}
+
+impl InFlight {
+    /// Whether a presented token is the one that began this send.
+    /// Constant time in the token contents.
+    pub fn authorizes(&self, token: &str) -> bool {
+        sats_core::token::verify(token, &self.token_hash)
+    }
 }
 
 /// What [`authorize`] produced, pending the caller's broadcast.
@@ -551,6 +563,7 @@ pub fn begin(
         agent: agent.to_string(),
         recipient: recipient.to_string(),
         amount_sat,
+        token_hash: grant.token_hash.clone(),
         signed: None,
         _claim: claim,
     }))
@@ -818,6 +831,10 @@ pub fn authorize(
     let remaining_sat = grant.remaining_sat();
     drop(grant_lock);
 
+    // The txid excludes witness data, so it is fixed before extraction. A
+    // signature exists from here on: any failure must record the txid, so
+    // a keyed retry replays instead of signing a second transaction.
+    let signed_txid = psbt.unsigned_tx.compute_txid().to_string();
     let tx = match psbt.extract_tx() {
         Ok(tx) => tx,
         Err(e) => {
@@ -828,7 +845,7 @@ pub fn authorize(
                 &mut flight.request,
                 RequestOutcome::Failed {
                     message: message.clone(),
-                    txid: None,
+                    txid: Some(signed_txid),
                     resolved_at: unix_now(),
                 },
             );
@@ -1029,5 +1046,208 @@ pub fn finish(
             );
             SendOutcome::error(message).with_request(&request_id)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+    use std::time::Duration;
+
+    use bdk_wallet::Wallet;
+    use bdk_wallet::bitcoin::hashes::Hash;
+    use bdk_wallet::bitcoin::{Address, Amount, BlockHash, Network};
+    use bdk_wallet::chain::{BlockId, ConfirmationBlockTime};
+    use bdk_wallet::test_utils::{insert_checkpoint, receive_output};
+    use sats_core::authz::GRANT_FORMAT_VERSION;
+    use sats_core::{seal, seed, token};
+
+    use super::*;
+    use crate::daemon::session::Session;
+    use crate::store::AAD_SEED;
+
+    const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const ADDRESS: &str = "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n";
+
+    /// A signing key obtained the way the daemon obtains one: seal the
+    /// seed into the store, unlock a session, take the handle.
+    fn unlocked_key(store: &Store) -> SigningKey {
+        let blob = seal::seal(MNEMONIC.as_bytes(), b"pw", AAD_SEED).unwrap();
+        store.write_seed(&blob).unwrap();
+        let session = Session::new(Network::Signet, "signet", Duration::from_secs(600));
+        session.unlock(store, "pw").unwrap();
+        session.signing_key().unwrap()
+    }
+
+    /// Persist a capless signet grant for "claude" and hand back the one
+    /// emission of its bearer token.
+    fn grant_with_token(store: &Store, budget_sat: u64) -> String {
+        let minted = token::generate().unwrap();
+        let now = unix_now();
+        let grant = Grant {
+            format_version: GRANT_FORMAT_VERSION,
+            agent: "claude".into(),
+            network: "signet".into(),
+            budget_sat,
+            spent_sat: 0,
+            max_tx_sat: None,
+            max_fee_sat: None,
+            created_at: now,
+            expires_at: now + 3_600,
+            tx_count: 0,
+            token_id: minted.token_id.clone(),
+            token_hash: minted.token_hash.clone(),
+        };
+        store.save_grant("signet", &grant).unwrap();
+        minted.secret.to_string()
+    }
+
+    /// A wallet-owned, signable PSBT whose absolute fee is absurd enough
+    /// that `Psbt::extract_tx` refuses it (its ceiling is 25k sat/vB) —
+    /// the only way to reach the post-signature extraction failure.
+    fn absurd_fee_psbt(amount_sat: u64, fee_sat: u64) -> Psbt {
+        let mnemonic = seed::parse_mnemonic(MNEMONIC).unwrap();
+        let (external, internal) = seed::public_descriptors(&mnemonic, Network::Signet).unwrap();
+        let mut wallet = Wallet::create(external, internal)
+            .network(Network::Signet)
+            .create_wallet_no_persist()
+            .unwrap();
+        let block_900 = BlockId {
+            height: 900,
+            hash: BlockHash::all_zeros(),
+        };
+        insert_checkpoint(&mut wallet, block_900);
+        insert_checkpoint(
+            &mut wallet,
+            BlockId {
+                height: 1_000,
+                hash: BlockHash::all_zeros(),
+            },
+        );
+        receive_output(
+            &mut wallet,
+            Amount::from_sat(20_000_000),
+            ConfirmationBlockTime {
+                block_id: block_900,
+                confirmation_time: 100,
+            },
+        );
+        let recipient = Address::from_str(ADDRESS)
+            .unwrap()
+            .require_network(Network::Signet)
+            .unwrap();
+        let mut builder = wallet.build_tx();
+        builder.add_recipient(recipient.script_pubkey(), Amount::from_sat(amount_sat));
+        builder.fee_absolute(Amount::from_sat(fee_sat));
+        builder.finish().unwrap()
+    }
+
+    fn event_kinds(store: &Store) -> Vec<String> {
+        store
+            .list_events("signet")
+            .unwrap()
+            .into_iter()
+            .map(|event| event.kind_str().to_string())
+            .collect()
+    }
+
+    /// The full extraction-failure path, live: signing succeeds, extract
+    /// refuses the absurd fee, the recorded outcome carries the txid the
+    /// signature fixed — so a keyed retry replays instead of producing a
+    /// second signature, and the reservation stands.
+    #[test]
+    fn extract_failure_records_the_txid_and_the_keyed_retry_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let key = unlocked_key(&store);
+        let token = grant_with_token(&store, 20_000_000);
+        let amount_sat = 1_000;
+        let fee_sat = 9_000_000; // ~58k sat/vB on this tx, over the 25k ceiling
+        let psbt = absurd_fee_psbt(amount_sat, fee_sat);
+        let expected_txid = psbt.unsigned_tx.compute_txid().to_string();
+
+        let mut flight = match begin(
+            &store,
+            "signet",
+            "claude",
+            &token,
+            Some("stuck"),
+            ADDRESS,
+            amount_sat,
+        ) {
+            Begin::Proceed(flight) => flight,
+            Begin::Done(outcome) => panic!("begin refused: {outcome:?}"),
+        };
+        assert!(flight.authorizes(&token));
+        assert!(!flight.authorizes(&"1".repeat(64)), "wrong token");
+        assert!(!flight.authorizes("not-hex"), "malformed token");
+
+        let outcome = authorize(
+            &store,
+            &key,
+            "signet",
+            &token,
+            &mut flight,
+            &psbt.to_string(),
+            0,
+        );
+        assert_eq!(outcome.status, "error");
+        assert!(
+            outcome
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("budget remains reserved"),
+            "got: {:?}",
+            outcome.message
+        );
+        assert!(flight.signed.is_none(), "extraction failed before handoff");
+
+        // The recorded truth names the transaction the signature created.
+        let record = store
+            .load_agent_request("signet", "claude", "k-stuck")
+            .unwrap()
+            .unwrap();
+        assert!(record.has_side_effect(), "a signature is a side effect");
+        match &record.outcome {
+            Some(RequestOutcome::Failed {
+                txid: Some(txid), ..
+            }) => assert_eq!(txid, &expected_txid),
+            other => panic!("expected a signed failure, got {other:?}"),
+        }
+        // The reservation stands: the signed transaction is out of reach,
+        // not undone.
+        let grant = store.load_grant("signet", "claude").unwrap().unwrap();
+        assert_eq!(grant.spent_sat, amount_sat + fee_sat);
+
+        // A keyed retry replays the recorded outcome; nothing re-executes.
+        drop(flight);
+        let replay = match begin(
+            &store,
+            "signet",
+            "claude",
+            &token,
+            Some("stuck"),
+            ADDRESS,
+            amount_sat,
+        ) {
+            Begin::Done(outcome) => *outcome,
+            Begin::Proceed(_) => panic!("a signed failure must replay, never re-execute"),
+        };
+        assert_eq!(replay.status, "error");
+        assert_eq!(replay.request_id.as_deref(), Some("k-stuck"));
+        assert!(
+            replay
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("budget remains reserved")
+        );
+        let grant = store.load_grant("signet", "claude").unwrap().unwrap();
+        assert_eq!(grant.spent_sat, amount_sat + fee_sat, "no second draw");
+        assert_eq!(
+            event_kinds(&store),
+            ["request_received", "reserved", "failed", "replayed"]
+        );
     }
 }
