@@ -341,6 +341,8 @@ It exposes only:
 - balance lookup;
 - fresh receive address;
 - the caller's grant status;
+- read-only status of the caller's own send requests, so an agent can
+  wait for a human decision without retrying sends;
 - a bounded send operation.
 
 Agents never receive the password, mnemonic, raw signer, arbitrary PSBT

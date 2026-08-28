@@ -615,19 +615,17 @@ fn mcp_serves_tools_and_enforces_the_grant() {
     assert_eq!(init["result"]["serverInfo"]["name"], "sats");
     mcp.send(serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
 
-    // All six tools are exposed.
+    // The whole tool surface is exposed, and the annotations advertise
+    // what each tool is — hints for clients, never the enforcement.
     mcp.send(serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let list = mcp.recv();
-    let mut names: Vec<&str> = list["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let tools = list["result"]["tools"].as_array().unwrap();
+    let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     names.sort_unstable();
     assert_eq!(
         names,
         [
+            "check_request",
             "get_balance",
             "get_grant",
             "get_receive_address",
@@ -635,6 +633,27 @@ fn mcp_serves_tools_and_enforces_the_grant() {
             "request_unlock",
             "send"
         ]
+    );
+    let annotation = |name: &str, key: &str| {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap()
+            .get("annotations")
+            .and_then(|a| a.get(key))
+            .cloned()
+    };
+    assert_eq!(
+        annotation("check_request", "readOnlyHint"),
+        Some(true.into())
+    );
+    assert_eq!(annotation("get_grant", "readOnlyHint"), Some(true.into()));
+    assert_eq!(annotation("send", "readOnlyHint"), Some(false.into()));
+    assert_eq!(annotation("send", "destructiveHint"), Some(true.into()));
+    assert_eq!(
+        annotation("get_receive_address", "readOnlyHint"),
+        Some(false.into()),
+        "address derivation persists an index and is not read-only"
     );
 
     // The grant snapshot lets the agent plan.
@@ -1308,6 +1327,143 @@ fn amount_bands_split_auto_ask_and_hard_deny() {
             .join("signet/agent-requests/claude/k-hard-1.json"),
     );
     assert!(record.get("approval").is_none());
+}
+
+/// check_request is the sanctioned wait: it reads the durable record,
+/// reports approval readiness, and repeated polling writes nothing —
+/// no events, no record changes, no cross-agent visibility.
+#[test]
+fn check_request_polls_without_side_effects() {
+    let dir = TempDir::new().unwrap();
+    let fx = funded_setup(
+        &dir,
+        &[
+            "--budget",
+            "100000",
+            "--max-tx",
+            "10000",
+            "--ask-max-tx",
+            "25000",
+        ],
+        &[200_000],
+    );
+    let mut mcp = McpSession::start(&dir, "claude", &fx.token);
+    handshake(&mut mcp);
+
+    // Unknown and malformed ids are typed results, never errors.
+    let missing = mcp.call_tool(
+        2,
+        "check_request",
+        serde_json::json!({ "request_id": "never-sent" }),
+    );
+    assert_eq!(missing["found"], false, "got: {missing}");
+    let malformed = mcp.call_tool(
+        3,
+        "check_request",
+        serde_json::json!({ "request_id": "../../etc" }),
+    );
+    assert_eq!(malformed["found"], false);
+    assert!(malformed["message"].as_str().unwrap().contains("malformed"));
+
+    // An ask-band denial, then the poll loop around its approval.
+    let denied = mcp.call_tool(
+        4,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 20_000, "request_id": "poll-1" }),
+    );
+    assert_eq!(denied["status"], "denied", "got: {denied}");
+
+    let record_path = dir
+        .path()
+        .join("signet/agent-requests/claude/k-poll-1.json");
+    let record_before = std::fs::read(&record_path).unwrap();
+    let events_before = std::fs::read(dir.path().join("signet/events/log.jsonl")).unwrap();
+    // The bare client key resolves to the same record as the server id.
+    for (id, key) in [(5, "poll-1"), (6, "k-poll-1"), (7, "poll-1")] {
+        let poll = mcp.call_tool(
+            id,
+            "check_request",
+            serde_json::json!({ "request_id": key }),
+        );
+        assert_eq!(poll["found"], true, "got: {poll}");
+        assert_eq!(poll["request_id"], "k-poll-1");
+        assert_eq!(poll["status"], "denied");
+        assert_eq!(poll["reason"], "over_max_tx");
+        assert_eq!(poll["approvable"], true);
+        assert_eq!(poll["approval_ready"], false);
+        assert!(poll["message"].as_str().unwrap().contains("agent approve"));
+    }
+    assert_eq!(
+        std::fs::read(&record_path).unwrap(),
+        record_before,
+        "polling must not touch the record"
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("signet/events/log.jsonl")).unwrap(),
+        events_before,
+        "polling must not journal"
+    );
+
+    // Approval flips the poll; the retry consumes it; the poll settles.
+    run_sats(&dir, &["agent", "approve", "k-poll-1", "--max-fee", "5000"]);
+    let ready = mcp.call_tool(
+        8,
+        "check_request",
+        serde_json::json!({ "request_id": "poll-1" }),
+    );
+    assert_eq!(ready["approval_ready"], true, "got: {ready}");
+    assert!(ready["approval_expires_at"].as_u64().unwrap() > 0);
+    assert!(
+        ready["message"]
+            .as_str()
+            .unwrap()
+            .contains("retry the identical send")
+    );
+    let sent = mcp.call_tool(
+        9,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 20_000, "request_id": "poll-1" }),
+    );
+    assert_eq!(sent["status"], "sent", "got: {sent}");
+    let settled = mcp.call_tool(
+        10,
+        "check_request",
+        serde_json::json!({ "request_id": "poll-1" }),
+    );
+    assert_eq!(settled["status"], "sent");
+    assert_eq!(settled["txid"], sent["txid"]);
+    assert_eq!(settled["approval_ready"], false, "consumed");
+
+    // A hard denial polls as not approvable.
+    let hard = mcp.call_tool(
+        11,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 30_000, "request_id": "hard-1" }),
+    );
+    assert_eq!(hard["reason"], "over_ask_max", "got: {hard}");
+    let hard_poll = mcp.call_tool(
+        12,
+        "check_request",
+        serde_json::json!({ "request_id": "hard-1" }),
+    );
+    assert_eq!(hard_poll["approvable"], false);
+    assert!(
+        hard_poll["message"]
+            .as_str()
+            .unwrap()
+            .contains("not approvable")
+    );
+
+    // Another agent cannot see this agent's records through the tool.
+    let ghost_token = grant_token(&dir, "ghost", &["--budget", "1000"]);
+    let mut ghost = McpSession::start(&dir, "ghost", &ghost_token);
+    handshake(&mut ghost);
+    let cross = ghost.call_tool(
+        2,
+        "check_request",
+        serde_json::json!({ "request_id": "k-poll-1" }),
+    );
+    assert_eq!(cross["found"], false, "got: {cross}");
 }
 
 /// Recorded truth outranks revocation, read-only: after the grant is

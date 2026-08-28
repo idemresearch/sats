@@ -85,7 +85,7 @@ hold the explicit advanced workflows.
 | `sats agent approve <id>` | Authorize one denied request exactly once (password required) |
 | `sats agent deny <id>` | Dismiss a request and revoke its unconsumed approval |
 | `sats agent log [--limit N] [--request ID]` | Show the causal event log of agent activity |
-| `sats agent serve <name>` | Serve five wallet tools for one granted agent over MCP stdio |
+| `sats agent serve <name>` | Serve the bounded wallet tool surface for one granted agent over MCP stdio |
 | `sats alkanes inspect <BLOCK:TX>` | Fetch a contract's bytecode and show its sha256 code hash |
 | `sats alkanes simulate <BLOCK:TX> <INPUTS...>` | Simulate a contract call and show the interpreted result |
 | `sats alkanes execute <BLOCK:TX> <INPUTS...>` | Simulate, confirm, sign, and broadcast a contract call (refuses mainnet) |

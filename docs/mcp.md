@@ -175,6 +175,44 @@ When the grant has been revoked or expired, `active` is false, limit and
 accounting fields are omitted, and `message` tells the agent to ask its human
 for a new grant.
 
+### `check_request`
+
+The sanctioned way for an agent to wait on a human decision. Takes the
+`request_id` a send result returned (or the bare idempotency key) and
+reads the durable request record: no chain access, no events, no strikes,
+no mutation of any kind — polling it is free, however often it runs.
+Lookup is scoped to the serving agent's own records; another agent's
+request answers `found: false`, exactly like one that never existed.
+
+```json
+{
+  "found": true,
+  "request_id": "k-invoice-7012",
+  "status": "denied",
+  "reason": "over_max_tx",
+  "approvable": true,
+  "approval_ready": false,
+  "message": "denied over_max_tx — awaiting the human: sats agent approve k-invoice-7012"
+}
+```
+
+`status` reuses send's vocabulary — `sent` (with `txid`), `denied` (with
+`reason` and `approvable`), `error`, or `pending` when no outcome is
+recorded yet. `approval_ready: true` means an unconsumed, unexpired
+one-time approval currently authorizes exactly this request's intent
+(`approval_expires_at` says until when): the agent should retry the
+identical send once, with the same `request_id`, to consume it. A
+malformed or unknown id is a typed `found: false` result, never a
+transport error.
+
+### Tool annotations
+
+Every tool declares standard MCP annotations — the read tools and
+`check_request` as read-only and idempotent, `send` as destructive and
+open-world, address derivation and unlock as neither. They are hints for
+clients; the daemon's policy ladder is the security boundary, and a
+client that ignores them changes nothing about what can be signed.
+
 ### `send`
 
 Parameters:

@@ -61,6 +61,57 @@ pub struct StatusResult {
 #[serde(deny_unknown_fields)]
 pub struct UnlockParams {}
 
+#[derive(Deserialize, JsonSchema)]
+pub struct CheckRequestParams {
+    /// The request id a send result returned (k-<key> or r-<hex>), or the
+    /// bare idempotency key that was passed to send.
+    pub request_id: String,
+}
+
+/// The recorded state of one of this agent's own requests. Reading it
+/// costs nothing: no chain access, no events, no strikes, no mutation.
+#[derive(Serialize, JsonSchema)]
+pub struct CheckRequestResult {
+    /// Whether a request with this id exists for this agent.
+    pub found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// "sent", "denied", "error", or "pending" (no outcome recorded yet:
+    /// still executing, or its execution stopped before recording one).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Denial code, when denied — the same vocabulary send uses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Whether a one-time human approval can lift the recorded denial.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approvable: Option<bool>,
+    /// True when an unconsumed, unexpired approval currently authorizes
+    /// exactly this request's intent: retry the identical send once.
+    pub approval_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_expires_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub txid: Option<String>,
+    pub message: String,
+}
+
+impl CheckRequestResult {
+    fn not_found(message: String) -> Self {
+        CheckRequestResult {
+            found: false,
+            request_id: None,
+            status: None,
+            reason: None,
+            approvable: None,
+            approval_ready: false,
+            approval_expires_at: None,
+            txid: None,
+            message,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SatsMcp {
     dir: Option<PathBuf>,
@@ -262,7 +313,12 @@ impl SatsMcp {
 #[tool_router]
 impl SatsMcp {
     #[tool(
-        description = "Request a local macOS wallet password dialog, only after the human agrees to unlock. Takes no password. Never ask for a password in chat or tool arguments. The daemon verifies your grant and prompts the human directly; unlocking enables ALL active grants for this wallet/network within their limits, not a single payment. No send is performed. Cancel/timeout must not be automatically retried. Other platforms require sats daemon unlock in a terminal."
+        description = "Request a local macOS wallet password dialog, only after the human agrees to unlock. Takes no password. Never ask for a password in chat or tool arguments. The daemon verifies your grant and prompts the human directly; unlocking enables ALL active grants for this wallet/network within their limits, not a single payment. No send is performed. Cancel/timeout must not be automatically retried. Other platforms require sats daemon unlock in a terminal.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn request_unlock(
         &self,
@@ -317,7 +373,8 @@ impl SatsMcp {
     }
 
     #[tool(
-        description = "Check signing daemon availability without chain access. This does not unlock the wallet or grant spending authority. unavailable means a human must start satsd; locked means a human must unlock it. Safe to retry after a human fixes the condition."
+        description = "Check signing daemon availability without chain access. This does not unlock the wallet or grant spending authority. unavailable means a human must start satsd; locked means a human must unlock it. Safe to retry after a human fixes the condition.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn get_status(&self) -> Result<Json<StatusResult>, ErrorData> {
         self.blocking(|dir, network, agent, _providers| {
@@ -337,7 +394,8 @@ impl SatsMcp {
 
     #[tool(
         description = "Get the wallet balance in satoshis. synced=false means the \
-        chain could not be reached and the value is from cache."
+        chain could not be reached and the value is from cache.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = true)
     )]
     async fn get_balance(&self) -> Result<Json<BalanceResult>, ErrorData> {
         self.blocking(|dir, network, _agent, providers| {
@@ -358,7 +416,16 @@ impl SatsMcp {
         .map(Json)
     }
 
-    #[tool(description = "Get a fresh receive address for this wallet.")]
+    // Not read-only: revealing an address advances and persists the
+    // wallet's derivation index.
+    #[tool(
+        description = "Get a fresh receive address for this wallet.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
     async fn get_receive_address(&self) -> Result<Json<AddressResult>, ErrorData> {
         self.blocking(|dir, network, _agent, _providers| {
             let store = Store::open(dir.as_deref())?;
@@ -379,7 +446,8 @@ impl SatsMcp {
 
     #[tool(
         description = "Get this agent's spending grant: budget, spent, remaining, \
-        per-tx caps, and expiry. Check this before sending."
+        per-tx caps, and expiry. Check this before sending.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn get_grant(&self) -> Result<Json<GrantResult>, ErrorData> {
         self.blocking(|dir, network, agent, _providers| {
@@ -424,6 +492,34 @@ impl SatsMcp {
         .map(Json)
     }
 
+    #[tool(
+        description = "Check the recorded state of one of your own send requests, by the \
+        request_id a send result returned (or your bare idempotency key). This is the \
+        sanctioned way to wait for a human decision: it reads the durable record only — \
+        no chain access, no retry, no side effects, and polling it never counts against \
+        you. When a denial is awaiting approval, approval_ready=false; once the human \
+        approves, approval_ready=true — then retry the identical send once with the same \
+        request_id to consume the approval. A sent request reports its txid.",
+        annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn check_request(
+        &self,
+        Parameters(params): Parameters<CheckRequestParams>,
+    ) -> Result<Json<CheckRequestResult>, ErrorData> {
+        self.blocking(move |dir, network, agent, _providers| {
+            let store = Store::open(dir.as_deref())?;
+            let net_name = network_name(network);
+            Ok(check_request_record(
+                &store,
+                net_name,
+                &agent,
+                &params.request_id,
+            ))
+        })
+        .await
+        .map(Json)
+    }
+
     #[tool(description = "Send bitcoin. Enforced deterministically against the \
         human-authorized grant (budget, per-tx cap, hard ceiling, fee cap, expiry, \
         mode, recipient rules). Returns status='sent' with the txid, or \
@@ -435,7 +531,13 @@ impl SatsMcp {
         the human changing the grant can, so do not ask repeatedly. Pass \
         request_id (1-64 chars of A-Za-z0-9_-) to make retries safe: the same \
         key with the same address and amount never pays twice, and returns the \
-        recorded outcome instead.")]
+        recorded outcome instead. While waiting on a human decision, poll \
+        check_request instead of retrying send.",
+        // Client-side hints only: the annotations describe the tool, the
+        // daemon's policy ladder is the security boundary. A client that
+        // ignores them changes nothing about what can be signed.
+        annotations(read_only_hint = false, destructive_hint = true, open_world_hint = true)
+    )]
     async fn send(
         &self,
         Parameters(params): Parameters<SendParams>,
@@ -612,6 +714,118 @@ fn execute_send(
     }
 }
 
+/// The read-only request lookup behind `check_request`.
+///
+/// Lookup is scoped to this agent's own directory, so another agent's
+/// record can never be exposed, and a malformed id is answered as a
+/// typed not-found before anything touches the disk. Nothing here
+/// mutates: no claim, no event, no strike, no approval consumption.
+fn check_request_record(
+    store: &Store,
+    net_name: &'static str,
+    agent: &str,
+    raw_id: &str,
+) -> CheckRequestResult {
+    // Accept the server-assigned id or the bare client key.
+    let id = if raw_id.starts_with("k-") || raw_id.starts_with("r-") {
+        raw_id.to_string()
+    } else {
+        format!("k-{raw_id}")
+    };
+    if !crate::daemon::send::valid_request_key(&id[2..]) {
+        return CheckRequestResult::not_found(format!(
+            "malformed request id {raw_id:?} — pass the request_id a send result returned"
+        ));
+    }
+    let record = match store.load_agent_request(net_name, agent, &id) {
+        Ok(Some(record)) => record,
+        Ok(None) => {
+            return CheckRequestResult::not_found(format!(
+                "no request {id} recorded for agent {agent:?}"
+            ));
+        }
+        Err(e) => return CheckRequestResult::not_found(format!("cannot read request: {e:#}")),
+    };
+
+    // An unconsumed, unexpired approval bound to this exact intent —
+    // held by this record or by a sibling with the same digest.
+    let now = unix_now();
+    let approval = record
+        .approval
+        .clone()
+        .filter(|approval| approval.is_valid_for(&record.intent_digest, now))
+        .or_else(|| {
+            let all = store.list_agent_requests(net_name).unwrap_or_default();
+            all.into_iter()
+                .filter(|holder| holder.agent == agent)
+                .filter_map(|holder| holder.approval)
+                .find(|approval| approval.is_valid_for(&record.intent_digest, now))
+        });
+    let approval_ready = approval.is_some();
+
+    let (status, reason, approvable, txid, message) = match &record.outcome {
+        None => (
+            "pending",
+            None,
+            None,
+            None,
+            "no outcome recorded: still executing, or its execution stopped early — if it \
+             stays pending, retry the identical send with this request_id to settle it"
+                .to_string(),
+        ),
+        Some(sats_core::request::RequestOutcome::Sent { txid, .. }) => (
+            "sent",
+            None,
+            None,
+            Some(txid.clone()),
+            "sent — this request is complete".to_string(),
+        ),
+        Some(sats_core::request::RequestOutcome::Failed { message, txid, .. }) => {
+            ("error", None, None, txid.clone(), message.clone())
+        }
+        Some(sats_core::request::RequestOutcome::Denied { deny, .. }) => {
+            let message = if record.dismissed_at.is_some() && !approval_ready {
+                "the human dismissed this request — do not retry it; ask your human before \
+                 proposing it again"
+                    .to_string()
+            } else if approval_ready {
+                "approved — retry the identical send once with this request_id to consume \
+                 the approval"
+                    .to_string()
+            } else if deny.approvable() {
+                format!(
+                    "denied {} — awaiting the human: sats agent approve {}",
+                    deny.code(),
+                    record.id
+                )
+            } else {
+                format!(
+                    "denied {} — not approvable; only the human changing the grant lifts it",
+                    deny.code()
+                )
+            };
+            (
+                "denied",
+                Some(deny.code().to_string()),
+                Some(deny.approvable()),
+                None,
+                message,
+            )
+        }
+    };
+    CheckRequestResult {
+        found: true,
+        request_id: Some(record.id.clone()),
+        status: Some(status.to_string()),
+        reason,
+        approvable,
+        approval_ready,
+        approval_expires_at: approval.map(|approval| approval.expires_at),
+        txid,
+        message,
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for SatsMcp {
     fn get_info(&self) -> ServerInfo {
@@ -628,7 +842,10 @@ impl ServerHandler for SatsMcp {
              request_id after approval: the one-time approval is consumed by exactly that \
              intent. A denial with approvable=false cannot be approved at all — only the \
              human changing the grant lifts it, so report it once and stop. \
-             Pass request_id on every send so retries can never pay twice. Use get_grant() \
+             Pass request_id on every send so retries can never pay twice. While a request \
+             waits on a human, poll check_request(request_id) — it is free, has no side \
+             effects, and reports approval_ready when the retry will succeed; do not poll \
+             by retrying send. Use get_grant() \
              to see the remaining budget before sending. Use get_status() for daemon \
              availability; unavailable or locked is an operational condition, not a policy \
              denial. With human consent, request_unlock() opens a local macOS password dialog; never ask for passwords in chat. Do not retry a cancelled prompt unless asked. Closing this client can interrupt a send; retain its request_id and \
