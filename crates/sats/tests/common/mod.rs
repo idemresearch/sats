@@ -90,3 +90,88 @@ pub fn fund_wallet(dir: &TempDir, values_sat: &[u64]) -> Vec<OutPoint> {
 pub fn json_stdout(assert: assert_cmd::assert::Assert) -> serde_json::Value {
     serde_json::from_slice(&assert.get_output().stdout).expect("json output")
 }
+
+/// Local HTTP fixture. A None response holds the connection open until drop,
+/// allowing tests to exercise the production timeout without sleeping servers.
+pub struct HttpServer {
+    pub url: String,
+    pub requests: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HttpServer {
+    pub fn start(handler: impl Fn(&str) -> Option<(u16, String)> + Send + 'static) -> Self {
+        use std::io::{BufRead, Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&requests);
+        let (stop, stopped) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            loop {
+                if stopped.try_recv() != Err(std::sync::mpsc::TryRecvError::Empty) {
+                    break;
+                }
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                            .unwrap();
+                        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                        let mut line = String::new();
+                        reader.read_line(&mut line).unwrap();
+                        let request = line.clone();
+                        let mut length = 0;
+                        loop {
+                            line.clear();
+                            if reader.read_line(&mut line).unwrap() == 0 || line == "\r\n" {
+                                break;
+                            }
+                            if let Some(value) =
+                                line.to_ascii_lowercase().strip_prefix("content-length:")
+                            {
+                                length = value.trim().parse::<usize>().unwrap();
+                            }
+                        }
+                        reader.read_exact(&mut vec![0; length]).unwrap();
+                        count.fetch_add(1, Ordering::SeqCst);
+                        match handler(request.trim()) {
+                            Some((status, body)) => {
+                                let response = format!(
+                                    "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                    body.len()
+                                );
+                                let _ = stream.write_all(response.as_bytes());
+                            }
+                            None => held.push(stream),
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("HTTP fixture accept: {e}"),
+                }
+            }
+        });
+        Self {
+            url,
+            requests,
+            stop: Some(stop),
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for HttpServer {
+    fn drop(&mut self) {
+        self.stop.take();
+        let _ = self.thread.take().unwrap().join();
+    }
+}

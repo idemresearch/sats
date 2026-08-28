@@ -103,6 +103,7 @@ impl SubfrostClient {
             "params": params,
         });
         let response = minreq::post(&self.url)
+            .with_timeout(super::HTTP_TIMEOUT_SECS)
             .with_header("Content-Type", "application/json")
             .with_json(&body)
             .map_err(|e| self.scrub(&e.to_string()))?

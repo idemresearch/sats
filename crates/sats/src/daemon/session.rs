@@ -10,6 +10,7 @@
 //! derived key material in the shortest practical scope.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -90,13 +91,18 @@ pub struct Session {
     auto_lock_after: Duration,
     key: Mutex<Option<Unlocked>>,
     unlock_gate: Mutex<UnlockThrottle>,
+    generation: AtomicU64,
+    pub(super) prompts: super::unlock::PromptGate,
 }
 
 /// Why an unlock attempt did not unlock.
 #[derive(Debug)]
 pub enum UnlockError {
+    Cancelled,
     /// Refused without touching the sealed seed: too many recent misses.
-    Throttled { retry_in: Duration },
+    Throttled {
+        retry_in: Duration,
+    },
     /// The attempt ran and failed (wrong password, unreadable seed, …).
     Failed(anyhow::Error),
 }
@@ -104,6 +110,7 @@ pub enum UnlockError {
 impl std::fmt::Display for UnlockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            UnlockError::Cancelled => write!(f, "unlock request cancelled"),
             UnlockError::Throttled { retry_in } => write!(
                 f,
                 "too many failed unlock attempts — retry in {}s",
@@ -139,6 +146,8 @@ impl Session {
             auto_lock_after,
             key: Mutex::new(None),
             unlock_gate: Mutex::new(UnlockThrottle::new(Duration::from_secs(1))),
+            generation: AtomicU64::new(0),
+            prompts: super::unlock::PromptGate::default(),
         }
     }
 
@@ -173,17 +182,29 @@ impl Session {
     /// (64 MiB) is in memory at a time, and repeated misses back off
     /// instead of turning the socket into a guessing oracle.
     pub fn unlock(&self, store: &Store, password: &str) -> Result<(), UnlockError> {
+        self.unlock_if(store, password, || true)
+    }
+
+    /// Check consent again under the key mutex, after expensive derivation.
+    /// A delayed dialog must never undo a subsequent human lock/unlock.
+    pub(super) fn unlock_if(
+        &self,
+        store: &Store,
+        password: &str,
+        consent: impl FnOnce() -> bool,
+    ) -> Result<(), UnlockError> {
         let mut gate = self
             .unlock_gate
             .lock()
             .map_err(|_| UnlockError::Failed(poisoned()))?;
         gate.check(Instant::now())
             .map_err(|retry_in| UnlockError::Throttled { retry_in })?;
-        match self.try_unlock(store, password) {
-            Ok(()) => {
+        match self.try_unlock(store, password, consent) {
+            Ok(true) => {
                 gate.record_success();
                 Ok(())
             }
+            Ok(false) => Err(UnlockError::Cancelled),
             Err(err) => {
                 gate.record_failure(Instant::now());
                 Err(UnlockError::Failed(err))
@@ -194,7 +215,12 @@ impl Session {
     /// One ungated unlock attempt. Deriving the descriptors here also
     /// proves the phrase is usable for this network before the daemon
     /// reports itself unlocked.
-    fn try_unlock(&self, store: &Store, password: &str) -> Result<()> {
+    fn try_unlock(
+        &self,
+        store: &Store,
+        password: &str,
+        consent: impl FnOnce() -> bool,
+    ) -> Result<bool> {
         let blob = store.read_seed()?;
         let bytes = Zeroizing::new(seal::open(&blob, password.as_bytes(), AAD_SEED)?);
         let phrase = Zeroizing::new(
@@ -207,19 +233,24 @@ impl Session {
         let (external, internal) = descriptors(&seed::parse_mnemonic(&phrase)?, self.network)?;
 
         let mut key = self.key.lock().map_err(|_| poisoned())?;
+        if !consent() {
+            return Ok(false);
+        }
+        self.generation.fetch_add(1, Ordering::SeqCst);
         *key = Some(Unlocked {
             phrase,
             external,
             internal,
             touched: Instant::now(),
         });
-        Ok(())
+        Ok(true)
     }
 
     /// Drop the seed. Idempotent, so a `Lock` on an already-locked daemon
     /// is a success rather than an error.
     pub fn lock(&self) -> Result<()> {
         let mut key = self.key.lock().map_err(|_| poisoned())?;
+        self.generation.fetch_add(1, Ordering::SeqCst);
         *key = None;
         Ok(())
     }
@@ -250,9 +281,18 @@ impl Session {
             .as_ref()
             .is_some_and(|unlocked| unlocked.touched.elapsed() >= self.auto_lock_after);
         if idle {
+            self.generation.fetch_add(1, Ordering::SeqCst);
             *key = None;
         }
         idle
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn auto_lock_after(&self) -> Duration {
+        self.auto_lock_after
     }
 }
 

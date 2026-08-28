@@ -107,10 +107,18 @@ pub enum DaemonCommand {
     },
     /// Start the daemon in the background
     Start {
+        /// Idle lock duration (default: installed service setting, otherwise 8h)
+        #[arg(long, value_name = "DURATION")]
+        auto_lock: Option<String>,
+    },
+    /// Install and start a locked per-user macOS service (opt-in)
+    Install {
         /// Lock the seed after this much inactivity (e.g. 8h, 30m)
         #[arg(long, default_value = "8h", value_name = "DURATION")]
         auto_lock: String,
     },
+    /// Stop and remove the matching macOS service, preserving wallet data
+    Uninstall,
     /// Show whether the daemon is running, and whether it can sign
     Status,
     /// Unseal the wallet into the daemon so agent sends can be signed

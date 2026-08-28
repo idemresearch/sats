@@ -63,15 +63,16 @@ pub fn run(
     // The wallet must exist, and the provider config must resolve.
     walletd::open(store, network)?;
     crate::provider::resolve(config, &providers, network)?;
-    // Signing lives in the daemon, so a missing daemon is a startup
-    // failure rather than a surprise on the first send.
-    let mut client = daemon::Client::open(store, net_name)?;
-    let status = client.status().context("satsd did not answer")?;
-    if status.locked {
-        eprintln!(
-            "sats agent serve: satsd is locked — sends will refuse until a human runs: \
-             sats daemon unlock"
-        );
+    // Availability is operational, not authentication. Keep discovery and
+    // read-only tools usable while a human starts or unlocks the daemon.
+    match daemon::Client::probe(store, net_name) {
+        Ok(status) if status.locked => eprintln!(
+            "sats agent serve: satsd is locked — sends will refuse until a human runs: sats daemon unlock"
+        ),
+        Err(_) => eprintln!(
+            "sats agent serve: satsd unavailable — sends will refuse until a human starts it; use get_status for guidance"
+        ),
+        Ok(_) => {}
     }
 
     // stdout is the MCP transport; all logging goes to stderr.

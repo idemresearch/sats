@@ -91,8 +91,15 @@ sats agent grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
 claude mcp add sats --env SATS_AGENT_TOKEN=<token> -- sats agent serve claude
 ```
 
-The agent receives four tools: `get_balance`, `get_receive_address`,
-`get_grant`, and `send`. Each send is checked against the grant's expiry,
+On macOS, use `sats daemon install` instead of `start` to opt into a user
+service that starts locked at login and restarts locked after a crash. Stop
+an existing unmanaged daemon before installing. Grants and unlocking remain
+explicit; closing Claude stops its MCP adapter, not the managed daemon.
+
+The agent receives six tools: `get_balance`, `get_receive_address`,
+`get_grant`, `get_status`, `request_unlock`, and `send`. On macOS, with your
+consent, `request_unlock` opens a local password dialog without exposing the
+password to the agent. Each send is checked against the grant's expiry,
 per-transaction amount cap, fee cap, and remaining budget. Outside that
 authority the agent receives a deterministic refusal, not a signature.
 

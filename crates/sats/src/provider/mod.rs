@@ -33,6 +33,9 @@ use esplora::EsploraProvider;
 use mock::MockProvider;
 use subfrost::SubfrostClient;
 
+/// Per HTTP request, not a deadline for an entire multi-request wallet scan.
+pub const HTTP_TIMEOUT_SECS: u64 = 30;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Capability {
     ChainSync,

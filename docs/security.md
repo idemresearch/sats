@@ -71,11 +71,48 @@ list`, never by an unauthenticated socket call.
 The socket lives at `$XDG_RUNTIME_DIR/sats/<network>.sock` (or under
 `SATS_DIR`) with mode 0600, in a 0700 directory.
 
+A private lifetime lock is acquired before stale-socket cleanup; concurrent
+daemon launches cannot race to own the same socket. On macOS, optional
+`daemon install` supervision uses a per-user LaunchAgent, never root. The
+service definition stores executable/identity settings, not passwords or
+tokens. Login and crash recovery always start locked. Availability is separate
+from authority: MCP can remain connected while the daemon is missing, but
+signing still requires an unlocked daemon and the existing grant checks.
+
 What this boundary is, stated exactly: satsd runs as the wallet's own user,
 so it is a **process-memory** boundary, not a privilege boundary. It defeats
 reading a file, which is what a shell-capable agent actually does. It does
 not defeat root, a debugger attaching to the process, or a core dump, and it
 cannot stop the seed from paging to swap.
+
+### Agent-requested unlock dialogs
+
+On macOS an authenticated agent may call `request_unlock`, with no password
+or custom prompt text. satsd re-reads the matching, unexpired grant before
+opening a dialog and again under the grant lock before unlocking. A fixed,
+embedded AppleScript runs through `/usr/bin/osascript` as a child of satsd;
+its masked password field returns only through a private pipe to the daemon.
+The MCP process never sees that pipe or password. The helper inherits no
+secret environment, reads no `SATS_PASSWORD`, invokes no shell, and receives
+display text as a separate argument, never executable script text. Password
+buffers owned by Rust are zeroized on drop; macOS/AppleScript runtime memory
+is not under Rust's zeroization control. No passwords are saved to disk or
+logged by this flow.
+
+The dialog displays the agent, network, escaped canonical wallet path and
+idle auto-lock interval. Unlocking enables all valid grants for that daemon,
+not just the requesting agent or a particular payment. Limits, approvals,
+and accounting are unchanged. There is one prompt per daemon, a 30-second
+cooldown after it completes, and a two-minute deadline. Caller cancellation
+or disconnect kills the helper; human lock/unlock changes invalidate pending
+consent, including at the final seed installation boundary. Cancelling after
+an unlock has already committed does not retroactively lock the daemon.
+
+This dialog is not a privilege boundary or an unspoofable OS authentication
+surface. A process with the same user's UI/debugging access can still attack
+it. Humans should enter the wallet password only in a dialog they requested,
+check its wallet/network, and never paste it into chat. Headless or non-macOS
+users keep using the terminal unlock command.
 
 ## Agent grants
 

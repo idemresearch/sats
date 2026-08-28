@@ -797,6 +797,30 @@ pub fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
     Ok(())
 }
 
+/// Exclusive daemon ownership, including the stale-socket recovery window.
+pub fn lock_daemon(socket: &Path) -> Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let parent = socket.parent().context("socket has no parent")?;
+    fs::create_dir_all(parent)?;
+    harden_dir(parent)?;
+    let path = socket.with_extension("lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(&path)?;
+    set_secret_perms(&file, true)?;
+    file.try_lock().map_err(|e| {
+        anyhow::anyhow!(
+            "satsd is already running or starting for {}: {e}",
+            socket.display()
+        )
+    })?;
+    Ok(file)
+}
+
 #[cfg(unix)]
 fn set_secret_perms(file: &fs::File, secret: bool) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;

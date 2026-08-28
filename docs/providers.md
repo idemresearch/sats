@@ -176,6 +176,23 @@ authorize a signature.
 
 ## Failure behavior
 
+Esplora and Subfrost set a 30-second HTTP request timeout. Esplora retries a
+retryable GET response at most twice (three attempts with backoff); transport
+timeouts are not retried, and neither driver automatically retries broadcast.
+For a hostname with multiple DNS addresses, each nonfinal TCP connection
+attempt is capped at two seconds (or the remaining request deadline, if
+shorter). The last address gets the remaining deadline. This lets a healthy
+address answer when an earlier one is unreachable, without pinning IPs,
+changing providers, disabling TLS verification or resending an HTTP request.
+Single-address hosts retain the full remaining request timeout. Mempool
+remains the default; Subfrost is used only when explicitly configured.
+
+This is a request limit, not a deadline for an entire wallet scan: sync and
+guards can require multiple requests. OS DNS resolution can also outlast the
+HTTP client's timeout. A broadcast timeout is an uncertain outcome, not proof
+that the transaction was rejected; the signed transaction and reserved budget
+remain durable for recovery.
+
 - Chain sync validates the provider's genesis/network before applying data.
 - Planning fails rather than using stale wallet state after sync failure.
 - Fee estimation failure asks a human CLI caller to supply `--fee-rate`.

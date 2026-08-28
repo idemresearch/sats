@@ -18,6 +18,12 @@ use super::error::ProviderError;
 const STOP_GAP: usize = 20;
 const PARALLEL_REQUESTS: usize = 4;
 
+// Exercise the exact vendored connector in the workspace gate, without
+// running upstream's unrelated public-network integration tests.
+#[cfg(test)]
+#[path = "../../../../vendor/minreq/src/connect.rs"]
+mod connection_tests;
+
 /// One Esplora endpoint. The URL is display-safe (esplora auth travels in a
 /// header, never the URL), so errors may show it in full.
 #[derive(Clone)]
@@ -47,7 +53,9 @@ impl EsploraProvider {
     }
 
     fn client(&self) -> BlockingClient {
-        let mut builder = esplora_client::Builder::new(&self.url);
+        let mut builder = esplora_client::Builder::new(&self.url)
+            .timeout(super::HTTP_TIMEOUT_SECS)
+            .max_retries(2);
         if let Some(token) = &self.bearer {
             builder = builder.header("Authorization", &format!("Bearer {token}"));
         }

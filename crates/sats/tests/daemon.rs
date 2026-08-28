@@ -387,3 +387,234 @@ fn two_daemons_cannot_share_a_network() {
         .failure()
         .stderr(predicate::str::contains("already running"));
 }
+
+#[test]
+fn daemon_lock_is_acquired_before_stale_socket_cleanup() {
+    let dir = TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join("signet")).unwrap();
+    let socket = dir.path().join("signet/d.sock");
+    let lock = std::fs::File::create(socket.with_extension("lock")).unwrap();
+    lock.lock().unwrap();
+    let stale = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    drop(stale);
+    sats(&dir)
+        .args(["daemon", "run"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already running or starting"));
+    assert!(
+        socket.exists(),
+        "a competing process must not unlink the socket"
+    );
+    drop(lock);
+    let _daemon = Daemon::start(&dir);
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(socket.with_extension("lock"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+}
+
+/// Explicitly opt in: this touches launchd and ~/Library/LaunchAgents, but only
+/// for a disposable wallet. It never starts or stops a user's wallet service.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires a macOS GUI session and permission to register an isolated launchd service"]
+fn managed_service_lifecycle() {
+    let dir = tempfile::Builder::new()
+        .prefix("sats-service-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let binary = std::env::var("SATS_TEST_BINARY").unwrap_or_else(|_| sats_bin().into());
+    let call = |args: &[&str]| {
+        Command::new(&binary)
+            .env("SATS_DIR", dir.path())
+            .env("SATS_PASSWORD", PASSWORD)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    struct Cleanup<'a> {
+        binary: &'a str,
+        dir: &'a TempDir,
+    }
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            let _ = Command::new(self.binary)
+                .env("SATS_DIR", self.dir.path())
+                .args(["daemon", "uninstall"])
+                .output();
+        }
+    }
+    let _cleanup = Cleanup {
+        binary: &binary,
+        dir: &dir,
+    };
+    assert!(call(&["init"]).status.success());
+    let issued = call(&["--json", "agent", "grant", "smoke", "--budget", "1000"]);
+    assert!(issued.status.success());
+    let grant: serde_json::Value = serde_json::from_slice(&issued.stdout).unwrap();
+    std::fs::write(dir.path().join("preserve-me"), "wallet metadata").unwrap();
+    let mut unmanaged = Daemon(
+        Command::new(&binary)
+            .env("SATS_DIR", dir.path())
+            .args(["daemon", "run"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    assert!((0..100).any(|_| {
+        if call(&["daemon", "status"]).status.success() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        false
+    }));
+    let refused = call(&["daemon", "install"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("unmanaged"));
+    assert!(call(&["daemon", "stop"]).status.success());
+    unmanaged.0.wait().unwrap();
+    drop(unmanaged);
+    let installed = call(&["--json", "daemon", "install", "--auto-lock", "30m"]);
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let install: serde_json::Value = serde_json::from_slice(&installed.stdout).unwrap();
+    let plist = std::path::Path::new(install["plist"].as_str().unwrap());
+    let original = std::fs::read(plist).unwrap();
+    assert!(!String::from_utf8_lossy(&original).contains(PASSWORD));
+    assert!(!String::from_utf8_lossy(&original).contains(grant["token"].as_str().unwrap()));
+    assert!(
+        call(&["daemon", "install", "--auto-lock", "30m"])
+            .status
+            .success()
+    );
+    assert_eq!(std::fs::read(plist).unwrap(), original);
+    // The installer process is already gone; launchd owns this child.
+    let status: serde_json::Value =
+        serde_json::from_slice(&call(&["--json", "daemon", "status"]).stdout).unwrap();
+    assert_eq!(status["locked"], true);
+    // Launch and close two MCP adapters while the same managed daemon remains.
+    #[cfg(feature = "mcp")]
+    for _ in 0..2 {
+        use std::io::{BufRead, Write};
+        let mut child = Command::new(&binary)
+            .env("SATS_DIR", dir.path())
+            .env("SATS_AGENT_TOKEN", grant["token"].as_str().unwrap())
+            .args(["agent", "serve", "smoke"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+        writeln!(input, "{}", serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"service-smoke","version":"1"}}})).unwrap();
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        let initialized: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert!(initialized.get("result").is_some());
+        writeln!(
+            input,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
+        )
+        .unwrap();
+        writeln!(
+            input,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"get_status","arguments":{}}})
+        )
+        .unwrap();
+        line.clear();
+        output.read_line(&mut line).unwrap();
+        let status: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            status["result"]["structuredContent"]["daemon_state"],
+            "locked"
+        );
+        drop(input);
+        child.wait().unwrap();
+        assert!(call(&["daemon", "status"]).status.success());
+    }
+    assert!(
+        !call(&["daemon", "install", "--auto-lock", "1h"])
+            .status
+            .success()
+    );
+    assert!(
+        !call(&["daemon", "start", "--auto-lock", "8h"])
+            .status
+            .success()
+    );
+    assert!(call(&["daemon", "stop"]).status.success());
+    std::thread::sleep(Duration::from_secs(2));
+    let status: serde_json::Value =
+        serde_json::from_slice(&call(&["--json", "daemon", "status"]).stdout).unwrap();
+    assert_eq!(
+        status["running"], false,
+        "explicit stop must not auto-restart"
+    );
+    assert!(call(&["daemon", "start"]).status.success());
+    assert!(call(&["daemon", "unlock"]).status.success());
+    let unlocked: serde_json::Value =
+        serde_json::from_slice(&call(&["--json", "daemon", "status"]).stdout).unwrap();
+    assert_eq!(unlocked["locked"], false);
+    let label = install["service"].as_str().unwrap();
+    let uid = Command::new("/usr/bin/id").arg("-u").output().unwrap();
+    let target = format!(
+        "gui/{}/{}",
+        String::from_utf8(uid.stdout).unwrap().trim(),
+        label
+    );
+    let service_pid = || {
+        let output = Command::new("/bin/launchctl")
+            .args(["print", &target])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("pid = ").map(str::to_string))
+    };
+    let before = service_pid().unwrap();
+    assert!(
+        Command::new("/bin/launchctl")
+            .args(["kill", "SIGKILL", &target])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let restarted = (0..200).any(|_| {
+        std::thread::sleep(Duration::from_millis(100));
+        service_pid().is_some_and(|pid| pid != before)
+            && call(&["daemon", "status"]).status.success()
+    });
+    assert!(restarted, "launchd must restart an unexpected failure");
+    let status: serde_json::Value =
+        serde_json::from_slice(&call(&["--json", "daemon", "status"]).stdout).unwrap();
+    assert_eq!(status["locked"], true);
+    assert!(call(&["daemon", "stop"]).status.success());
+    assert!(
+        call(&["daemon", "install", "--auto-lock", "1h"])
+            .status
+            .success()
+    );
+    assert!(call(&["daemon", "uninstall"]).status.success());
+    assert!(!plist.exists());
+    assert!(dir.path().join("preserve-me").exists());
+    assert!(dir.path().join("seed.sealed").exists());
+    assert!(dir.path().join("signet/grants/smoke.json").exists());
+    assert!(dir.path().join("signet/satsd.log").exists());
+    assert!(call(&["daemon", "uninstall"]).status.success());
+}

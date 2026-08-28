@@ -72,6 +72,8 @@ hold the explicit advanced workflows.
 | `sats tx broadcast <FILE\|TXID>` | Broadcast a raw hex file, or a saved transaction by txid/prefix/id |
 | `sats daemon run [--auto-lock D]` | Run the signing daemon in the foreground (for a supervisor) |
 | `sats daemon start [--auto-lock D]` | Start the signing daemon in the background |
+| `sats daemon install [--auto-lock D]` | macOS: install and start a locked user service with login/crash supervision |
+| `sats daemon uninstall` | macOS: stop and remove the matching service, preserving wallet data |
 | `sats daemon status` | Show whether the daemon is running, and whether it can sign |
 | `sats daemon unlock` | Unseal the wallet into the daemon so agent sends can be signed |
 | `sats daemon lock` | Drop the seed from the daemon's memory, without stopping it |
@@ -83,7 +85,7 @@ hold the explicit advanced workflows.
 | `sats agent approve <id>` | Authorize one denied request exactly once (password required) |
 | `sats agent deny <id>` | Dismiss a request and revoke its unconsumed approval |
 | `sats agent log [--limit N] [--request ID]` | Show the causal event log of agent activity |
-| `sats agent serve <name>` | Serve the four wallet tools for one granted agent over MCP stdio |
+| `sats agent serve <name>` | Serve five wallet tools for one granted agent over MCP stdio |
 | `sats alkanes inspect <BLOCK:TX>` | Fetch a contract's bytecode and show its sha256 code hash |
 | `sats alkanes simulate <BLOCK:TX> <INPUTS...>` | Simulate a contract call and show the interpreted result |
 | `sats alkanes execute <BLOCK:TX> <INPUTS...>` | Simulate, confirm, sign, and broadcast a contract call (refuses mainnet) |
@@ -202,6 +204,15 @@ sats daemon status
 ```
 
 The daemon starts **locked** and signs nothing until a human unlocks it.
+On macOS, an agent can also request a local password dialog with the MCP
+`request_unlock` tool after you agree. Enter the password in that dialog,
+never in chat. The dialog is launched by satsd and identifies the agent,
+wallet, network, and idle timeout. It enables all active grants for that
+daemon within their existing limits; it does not approve or send a payment.
+No terminal command is required for this path, and `SATS_PASSWORD` is ignored.
+Cancel closes the request; the agent must not automatically prompt again.
+The terminal `sats daemon unlock` command remains available on every platform.
+
 `--auto-lock` (default `8h`) drops the seed after that much inactivity;
 `sats daemon lock` drops it immediately without stopping the process. While
 locked, agent sends return the typed error code `wallet_locked` rather than a
@@ -212,13 +223,40 @@ each further miss doubles a required wait (capped at one minute) during
 which every attempt — right password included — is refused with the typed
 code `unlock_throttled` and the remaining wait.
 
-For anything long-lived, prefer `sats daemon run` under a supervisor — a
-systemd user unit or a launchd agent. A backgrounded `sats daemon start` dies
-with its session, and only a supervisor will bring it back.
+For reliable operation on macOS, opt into a per-user launchd service:
+
+```sh
+sats daemon install --auto-lock 8h
+sats daemon unlock
+# To remove the service, preserving all wallet state:
+sats daemon uninstall
+```
+
+Installation requires a logged-in macOS GUI session, not root. It records the
+absolute executable path, network, wallet directory and required socket setting
+in a private `~/Library/LaunchAgents/sh.sats.satsd.<network>.<id>.plist`.
+No password or agent token is recorded. Keep the binary at that path; after
+moving it, stop the service and reinstall using the new binary.
+
+The service starts **locked** at login and restarts **locked** after unexpected
+failure. `daemon stop` exits cleanly and remains stopped until `daemon start`
+or the next login. Installation with identical settings is idempotent; changing
+a running service's settings or replacing an unmanaged daemon requires an
+explicit stop first. `daemon start` uses the installed service and its configured
+auto-lock duration; a conflicting explicit `--auto-lock` is refused. Reinstall
+after stopping to change that duration. `daemon uninstall` removes only the
+matching wallet/network service, not wallet data, grants, or logs.
+
+Without an installed service, `daemon start` retains its session-dependent
+background behavior. On Linux, run `sats daemon run` under your own supervisor;
+managed install/uninstall are macOS-only. Installing or starting a service
+does not grant authority or unlock the wallet. Closing Claude does not stop a
+managed daemon, but an in-flight MCP send is not a durable background job.
 
 The socket is `$XDG_RUNTIME_DIR/sats/<network>.sock`, mode 0600, or
 `<network>/d.sock` under `SATS_DIR`. One daemon serves one network; a second
-on the same network is refused.
+on the same socket is refused. A private lifetime lock prevents concurrent
+starts from racing during stale-socket recovery.
 
 Human commands never use the daemon. `sats send`, `sats psbt sign`, and
 `sats init` unseal the seed for the duration of one command, as before.
@@ -360,6 +398,7 @@ protects from later coin selection automatically.
 - `psbt sign`;
 - `tx broadcast`;
 - `daemon start`, `daemon status`, `daemon unlock`, `daemon lock`, `daemon stop`;
+- `daemon install`, `daemon uninstall` (macOS);
 - `agent grant`;
 - `agent revoke`;
 - `agent list`;

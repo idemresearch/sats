@@ -32,6 +32,14 @@ pub enum Request {
     /// Human authorization. The password unseals the master seed into the
     /// daemon's memory; it is never stored and never leaves this call.
     Unlock { protocol: u32, password: String },
+    /// Request a human password dialog. No password crosses this request
+    /// or its response; only the daemon owns the prompt helper.
+    #[serde(rename = "request_unlock")]
+    PromptUnlock {
+        protocol: u32,
+        token: String,
+        agent: String,
+    },
     /// Zeroize the in-memory seed. The daemon keeps running and keeps
     /// refusing every signature until it is unlocked again.
     Lock { protocol: u32 },
@@ -72,6 +80,7 @@ impl Request {
         match self {
             Request::Status { protocol }
             | Request::Unlock { protocol, .. }
+            | Request::PromptUnlock { protocol, .. }
             | Request::Lock { protocol }
             | Request::BeginSend { protocol, .. }
             | Request::Authorize { protocol, .. }
@@ -95,6 +104,7 @@ pub enum BroadcastOutcome {
 #[serde(tag = "reply", rename_all = "snake_case")]
 pub enum Response {
     Status(StatusInfo),
+    Unlock(super::unlock::UnlockResult),
     Ok,
     /// The request is claimed and passed the precheck. Prepare the
     /// transaction, then send `Authorize` on this same connection.
@@ -212,7 +222,7 @@ impl SendOutcome {
 
 /// Write one framed message.
 pub fn write_message<W: Write, T: Serialize>(out: &mut W, message: &T) -> Result<()> {
-    let mut line = serde_json::to_vec(message)?;
+    let mut line = zeroize::Zeroizing::new(serde_json::to_vec(message)?);
     line.push(b'\n');
     out.write_all(&line)?;
     out.flush()?;
@@ -224,7 +234,7 @@ pub fn write_message<W: Write, T: Serialize>(out: &mut W, message: &T) -> Result
 /// Bounded: a peer that never sends a newline hits [`MAX_LINE`] and is
 /// refused rather than growing this process's memory without limit.
 pub fn read_message<R: BufRead, T: for<'de> Deserialize<'de>>(input: &mut R) -> Result<Option<T>> {
-    let mut buf = Vec::new();
+    let mut buf = zeroize::Zeroizing::new(Vec::new());
     // Call-syntax, not method-syntax: `input.take(..)` would resolve to
     // `R::take` and move the caller's reader instead of borrowing it.
     let mut limited = std::io::Read::take(&mut *input, MAX_LINE);
@@ -299,6 +309,7 @@ mod tests {
     fn every_response_variant_round_trips() {
         let responses = vec![
             Response::Ok,
+            Response::Unlock(super::super::unlock::UnlockResult::cancelled()),
             Response::Proceed {
                 request_id: "k-1".into(),
             },
@@ -337,6 +348,11 @@ mod tests {
     #[test]
     fn every_request_variant_round_trips() {
         let requests = vec![
+            Request::PromptUnlock {
+                protocol: PROTOCOL_VERSION,
+                agent: "claude".into(),
+                token: "aa".repeat(32),
+            },
             Request::Status {
                 protocol: PROTOCOL_VERSION,
             },

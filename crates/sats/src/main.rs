@@ -85,8 +85,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 commands::daemon::run(&store, network, &auto_lock)
             }
             cli::DaemonCommand::Start { auto_lock } => {
-                commands::daemon::start(&store, network, &auto_lock, json)
+                commands::daemon::start(&store, network, auto_lock.as_deref(), json)
             }
+            cli::DaemonCommand::Install { auto_lock } => {
+                commands::daemon::install(&store, network, &auto_lock, json)
+            }
+            cli::DaemonCommand::Uninstall => commands::daemon::uninstall(&store, network, json),
             cli::DaemonCommand::Status => commands::daemon::status(&store, network, json),
             cli::DaemonCommand::Unlock => commands::daemon::unlock(&store, network, json),
             cli::DaemonCommand::Lock => commands::daemon::lock(&store, network, json),

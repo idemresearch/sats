@@ -14,6 +14,9 @@ use crate::daemon::{self, Client};
 use crate::store::Store;
 use crate::{password, ui};
 
+#[cfg(target_os = "macos")]
+mod service;
+
 /// How long `start` waits for the spawned daemon to answer before
 /// reporting failure. Binding a unix socket is fast; this is slack.
 const START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -29,7 +32,12 @@ pub fn run(store: &Store, network: Network, auto_lock: &str) -> Result<()> {
 /// For anything long-lived, prefer `sats daemon run` under a supervisor
 /// (a systemd user unit or a launchd agent): a detached child dies with
 /// its session, and only a supervisor will bring it back.
-pub fn start(store: &Store, network: Network, auto_lock: &str, json: bool) -> Result<()> {
+pub fn start(store: &Store, network: Network, auto_lock: Option<&str>, json: bool) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if service::start_installed(store, network, auto_lock, json)? {
+        return Ok(());
+    }
+    let auto_lock = auto_lock.unwrap_or("8h");
     let net_name = network_name(network);
     parse_duration(auto_lock)?;
 
@@ -115,9 +123,32 @@ pub fn start(store: &Store, network: Network, auto_lock: &str, json: bool) -> Re
     Ok(())
 }
 
+pub fn install(store: &Store, network: Network, auto_lock: &str, json: bool) -> Result<()> {
+    parse_duration(auto_lock)?;
+    #[cfg(target_os = "macos")]
+    return service::install(store, network, auto_lock, json);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (store, network, json);
+        bail!(
+            "managed daemon installation is supported on macOS only; use sats daemon run with your supervisor"
+        )
+    }
+}
+
+pub fn uninstall(store: &Store, network: Network, json: bool) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    return service::uninstall(store, network, json);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (store, network, json);
+        bail!("managed daemon installation is supported on macOS only")
+    }
+}
+
 pub fn status(store: &Store, network: Network, json: bool) -> Result<()> {
     let net_name = network_name(network);
-    let Ok(mut client) = Client::open(store, net_name) else {
+    let Ok(info) = Client::probe(store, net_name) else {
         if json {
             println!(
                 "{}",
@@ -127,7 +158,6 @@ pub fn status(store: &Store, network: Network, json: bool) -> Result<()> {
         }
         bail!("satsd is not running for {net_name} — start it with: sats daemon start");
     };
-    let info = client.status()?;
 
     if json {
         println!(

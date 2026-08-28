@@ -27,6 +27,7 @@ pub mod protocol;
 pub mod send;
 pub mod server;
 pub mod session;
+pub mod unlock;
 
 pub use client::Client;
 pub use server::run;

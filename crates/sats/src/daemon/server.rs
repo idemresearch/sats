@@ -9,7 +9,7 @@
 //! lives on the connection, so a caller that dies between preparing and
 //! authorizing releases it without leaving anything locked.
 
-use std::io::BufReader;
+use std::io::{BufReader, ErrorKind, Read};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,6 +31,10 @@ const SWEEP: Duration = Duration::from_secs(15);
 pub fn run(store: Store, network: Network, auto_lock_after: Duration) -> Result<()> {
     let net_name = network_name(network);
     let path = store.socket_path(net_name);
+
+    // Hold a stable inode for the process lifetime, before touching the socket.
+    // Never unlink this lock: another contender may already have it open.
+    let _lifetime_lock = crate::store::lock_daemon(&path)?;
 
     // A live daemon on this socket is a conflict; a dead one is litter.
     if path.exists() {
@@ -120,6 +124,31 @@ fn serve_connection(store: &Store, session: &Session, stream: UnixStream) -> Res
             eprintln!("satsd: stopped");
             std::process::exit(0);
         }
+        if let Request::PromptUnlock { agent, token, .. } = request {
+            if flight.is_some() {
+                protocol::write_message(
+                    &mut writer,
+                    &out_of_sequence("a send is already in progress"),
+                )?;
+                continue;
+            }
+            let token = zeroize::Zeroizing::new(token);
+            // Dedicated connection: any extra bytes, EOF, or read failure
+            // cancels consent. A tiny read timeout lets the helper poll
+            // without requiring nonportable socket-peek APIs.
+            reader
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_millis(1)))?;
+            let result = super::unlock::request(
+                store,
+                session,
+                &agent,
+                &token,
+                || matches!(reader.read(&mut [0; 1]), Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted)),
+            );
+            protocol::write_message(&mut writer, &Response::Unlock(result))?;
+            return Ok(());
+        }
         let response = dispatch(store, session, &mut flight, request);
         protocol::write_message(&mut writer, &response)?;
     }
@@ -145,19 +174,21 @@ fn dispatch(
             locks_in: session.locks_in(),
         }),
 
-        Request::Unlock { password, .. } => match session.unlock(store, &password) {
-            Ok(()) => Response::Ok,
-            // A throttled attempt is a distinct, typed condition: the
-            // password was not even tried, and retrying sooner cannot help.
-            Err(err @ UnlockError::Throttled { .. }) => Response::Error {
-                code: "unlock_throttled".into(),
-                message: err.to_string(),
-            },
-            Err(err) => Response::Error {
-                code: "unlock_failed".into(),
-                message: err.to_string(),
-            },
-        },
+        Request::Unlock { password, .. } => {
+            match session.unlock(store, &zeroize::Zeroizing::new(password)) {
+                Ok(()) => Response::Ok,
+                // A throttled attempt is a distinct, typed condition: the
+                // password was not even tried, and retrying sooner cannot help.
+                Err(err @ UnlockError::Throttled { .. }) => Response::Error {
+                    code: "unlock_throttled".into(),
+                    message: err.to_string(),
+                },
+                Err(err) => Response::Error {
+                    code: "unlock_failed".into(),
+                    message: err.to_string(),
+                },
+            }
+        }
 
         Request::Lock { .. } => match session.lock() {
             Ok(()) => Response::Ok,
@@ -236,6 +267,9 @@ fn dispatch(
 
         // Handled before dispatch so it can answer and then exit.
         Request::Shutdown { .. } => Response::Ok,
+        Request::PromptUnlock { .. } => {
+            out_of_sequence("unlock prompts require a dedicated connection")
+        }
 
         Request::Finish { outcome, .. } => {
             let Some(claimed) = flight.as_mut() else {

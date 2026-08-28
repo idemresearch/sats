@@ -13,9 +13,11 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::Result;
+use rmcp::RoleServer;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use rmcp::model::{ErrorData, ServerCapabilities, ServerInfo};
+use rmcp::model::{ErrorData, ProgressNotificationParam, ServerCapabilities, ServerInfo};
+use rmcp::service::RequestContext;
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use sats_core::bitcoin::{Address, Network};
 use schemars::JsonSchema;
@@ -26,6 +28,7 @@ use crate::commands::prepare;
 use crate::config::{Config, network_name};
 use crate::daemon::client::{Begun, Client};
 use crate::daemon::protocol::{BroadcastOutcome, SendOutcome};
+use crate::daemon::unlock::{UnlockCode, UnlockResult};
 use crate::provider;
 use crate::store::{Store, unix_now};
 use crate::walletd;
@@ -33,6 +36,30 @@ use crate::walletd;
 /// Environment variable carrying the agent's bearer token, as printed
 /// once by `sats agent grant`.
 pub const TOKEN_ENV: &str = "SATS_AGENT_TOKEN";
+
+#[derive(Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonState {
+    Unavailable,
+    Locked,
+    Unlocked,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct StatusResult {
+    pub agent: String,
+    pub network: String,
+    pub daemon_state: DaemonState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    pub message: String,
+}
+
+/// Reject accidental password or prompt-text arguments, rather than
+/// silently accepting secrets that never belonged in a tool call.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UnlockParams {}
 
 #[derive(Clone)]
 pub struct SatsMcp {
@@ -227,6 +254,80 @@ impl SatsMcp {
 #[tool_router]
 impl SatsMcp {
     #[tool(
+        description = "Request a local macOS wallet password dialog, only after the human agrees to unlock. Takes no password. Never ask for a password in chat or tool arguments. The daemon verifies your grant and prompts the human directly; unlocking enables ALL active grants for this wallet/network within their limits, not a single payment. No send is performed. Cancel/timeout must not be automatically retried. Other platforms require sats daemon unlock in a terminal."
+    )]
+    async fn request_unlock(
+        &self,
+        Parameters(_params): Parameters<UnlockParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<UnlockResult>, ErrorData> {
+        let (dir, network, agent, token) = (
+            self.dir.clone(),
+            self.network,
+            self.agent.clone(),
+            self.token.clone(),
+        );
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let work = tokio::task::spawn_blocking(move || {
+            let unavailable = || {
+                UnlockResult::error(
+                    UnlockCode::DaemonUnavailable,
+                    "Daemon unavailable or incompatible. Start/restart it with the updated sats binary using the same wallet directory and network; then check get_status.",
+                )
+            };
+            let Ok(store) = Store::open(dir.as_deref()) else {
+                return unavailable();
+            };
+            let Ok(mut client) = Client::open(&store, network_name(network)) else {
+                return unavailable();
+            };
+            let Ok(disconnect) = client.disconnect_on_drop() else {
+                return unavailable();
+            };
+            if sender.send(disconnect).is_err() {
+                return UnlockResult::cancelled();
+            }
+            client
+                .request_unlock(&agent, &token)
+                .unwrap_or_else(|_| unavailable())
+        });
+        // The guard is delivered before the request. If this future is
+        // dropped at any await, its socket closes and the daemon cancels UI.
+        let _disconnect = receiver.await.ok();
+        tokio::select! {
+            _ = async {
+                loop {
+                    if context.peer.is_transport_closed() { break; }
+                    tokio::select! {
+                        _ = context.ct.cancelled() => break,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+                    }
+                }
+            } => Ok(Json(UnlockResult::cancelled())),
+            result = work => result.map(Json).map_err(|_| ErrorData::internal_error("unlock worker failed", None)),
+        }
+    }
+
+    #[tool(
+        description = "Check signing daemon availability without chain access. This does not unlock the wallet or grant spending authority. unavailable means a human must start satsd; locked means a human must unlock it. Safe to retry after a human fixes the condition."
+    )]
+    async fn get_status(&self) -> Result<Json<StatusResult>, ErrorData> {
+        self.blocking(|dir, network, agent, _providers| {
+            let store = Store::open(dir.as_deref())?;
+            let net_name = network_name(network);
+            let (daemon_state, error_code, message) = match Client::probe(&store, net_name) {
+                Ok(status) if status.locked => (DaemonState::Locked, Some("wallet_locked".into()),
+                    format!("Wallet locked; with the human's consent, call request_unlock for a local macOS password dialog, or ask them to run sats daemon unlock --network {net_name} using the same SATS_DIR. Never ask for a password in chat.")),
+                Ok(_) => (DaemonState::Unlocked, None,
+                    "Daemon available and unlocked. Every send still requires an active matching grant and policy authorization.".into()),
+                Err(_) => (DaemonState::Unavailable, Some("daemon_unavailable".into()),
+                    format!("Daemon unavailable or unresponsive; a human must run sats daemon start --network {net_name} using the same SATS_DIR. On macOS, sats daemon install opts into login/crash supervision.")),
+            };
+            Ok(StatusResult { agent, network: net_name.into(), daemon_state, error_code, message })
+        }).await.map(Json)
+    }
+
+    #[tool(
         description = "Get the wallet balance in satoshis. synced=false means the \
         chain could not be reached and the value is from cache."
     )]
@@ -325,17 +426,52 @@ impl SatsMcp {
     async fn send(
         &self,
         Parameters(params): Parameters<SendParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<Json<SendResult>, ErrorData> {
         let token = self.token.clone();
-        self.blocking(move |dir, network, agent, providers| {
+        let progress_token = context.meta.get_progress_token();
+        let (updates, mut receiver) = tokio::sync::mpsc::unbounded_channel::<prepare::Stage>();
+        let work = self.blocking(move |dir, network, agent, providers| {
             let store = Store::open(dir.as_deref())?;
             let config = Config::load(&store)?;
             Ok(execute_send(
-                &store, &config, network, &agent, &token, &providers, &params,
+                &store,
+                &config,
+                network,
+                &agent,
+                &token,
+                &providers,
+                &params,
+                &mut |stage| {
+                    let _ = updates.send(stage);
+                },
             ))
-        })
-        .await
-        .map(Json)
+        });
+        let notifications = async move {
+            let Some(progress_token) = progress_token else {
+                return;
+            };
+            let mut step = 0;
+            while let Some(stage) = receiver.recv().await {
+                step += 1;
+                let notification =
+                    ProgressNotificationParam::new(progress_token.clone(), f64::from(step))
+                        .with_message(stage.message());
+                // A slow/disconnected client must never stall the wallet worker.
+                if !matches!(
+                    tokio::time::timeout(
+                        std::time::Duration::from_millis(250),
+                        context.peer.notify_progress(notification)
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    break;
+                }
+            }
+        };
+        let (result, ()) = tokio::join!(work, notifications);
+        result.map(Json)
     }
 }
 
@@ -345,6 +481,7 @@ impl SatsMcp {
 /// back. Every decision — idempotency, the amount and fee, the grant
 /// check, the budget draw — happens on the other side of the socket,
 /// against a transaction the daemon derived for itself.
+#[allow(clippy::too_many_arguments)]
 fn execute_send(
     store: &Store,
     config: &Config,
@@ -353,8 +490,10 @@ fn execute_send(
     token: &str,
     providers: &[provider::CliProvider],
     params: &SendParams,
+    observe: &mut dyn FnMut(prepare::Stage),
 ) -> SendResult {
     let net_name = network_name(network);
+    observe(prepare::Stage::CheckingRequest);
 
     // Normalize the recipient first: the canonical intent hashes one
     // spelling of the address, so textual variants deduplicate.
@@ -397,7 +536,7 @@ fn execute_send(
         // prepare::build syncs internally and hard-fails on stale state;
         // the agent request form carries no safety bypasses.
         let request = prepare::PrepareRequest::for_agent(&params.address, params.amount_sat);
-        let prepared = prepare::build(&mut ctx, &services, &request)?;
+        let prepared = prepare::build_with_observer(&mut ctx, &services, &request, observe)?;
         ctx.persist()?;
         Ok((ctx, services, prepared))
     })();
@@ -419,6 +558,7 @@ fn execute_send(
         }
     };
 
+    observe(prepare::Stage::Authorizing);
     let signed =
         match daemon.authorize(token, &prepared.psbt().to_string(), prepared.excluded_utxos) {
             Ok(outcome) => outcome,
@@ -435,6 +575,7 @@ fn execute_send(
     let broadcast = (|| -> Result<String> {
         let record = store.load_transaction(net_name, &txid)?;
         let tx = record.tx()?;
+        observe(prepare::Stage::Broadcasting);
         Ok(services.broadcast(&mut ctx, &tx)?.to_string())
     })();
     let outcome = match broadcast {
@@ -472,7 +613,10 @@ impl ServerHandler for SatsMcp {
              human approves the request (sats agent approve), retry the identical send with \
              the same request_id: the one-time approval is consumed by exactly that intent. \
              Pass request_id on every send so retries can never pay twice. Use get_grant() \
-             to see the remaining budget before sending.",
+             to see the remaining budget before sending. Use get_status() for daemon \
+             availability; unavailable or locked is an operational condition, not a policy \
+             denial. With human consent, request_unlock() opens a local macOS password dialog; never ask for passwords in chat. Do not retry a cancelled prompt unless asked. Closing this client can interrupt a send; retain its request_id and \
+             identical payment details to recover an uncertain outcome.",
             self.agent,
             network_name(self.network),
         ))

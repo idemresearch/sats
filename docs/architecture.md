@@ -107,6 +107,7 @@ isolated runs.
 | Grants | `<network>/grants/<agent>.json` | Limits, accounting, and the bearer token's hash — no key material |
 | Daemon socket | `$XDG_RUNTIME_DIR/sats/<network>.sock`, or `<network>/d.sock` under `SATS_DIR` | satsd's owner-only control socket |
 | Daemon log | `<network>/satsd.log` | Diagnostics from a backgrounded `sats daemon start` |
+| Daemon lifetime lock | Socket path with `.lock` extension | Private OS file lock held until process exit; not deleted on shutdown |
 | Agent requests | `<network>/agent-requests/<agent>/<id>.json` | One durable record per agent send: canonical intent digest, idempotency key, and resolved outcome |
 | Event log | `<network>/events/log.jsonl` | Append-only causal record of the agent path: one JSON line per state transition |
 
@@ -114,6 +115,30 @@ Wallet state, sessions, transactions, legacy plans, and grants are namespaced
 by Bitcoin network. The sealed master seed is shared so each network derives
 from the same mnemonic. Sensitive files are written atomically with
 restrictive permissions.
+
+On macOS, an opt-in user LaunchAgent can supervise `daemon run` independently
+of the MCP client. Its identity includes the network and canonical socket
+path; startup remains locked. Service management lives in native commands,
+not core or the MCP process. MCP startup validates grant/token/wallet/config,
+but daemon unavailability is operational and discoverable through `get_status`.
+Preparation stage observers send MCP progress without changing authorization.
+The MCP process still owns preparation and broadcast; supervision of the
+signer does not make interrupted sends durable jobs.
+
+Native HTTP uses a pinned local `minreq` patch for bounded TCP address
+fallback. A failed address cannot consume the whole request deadline while
+other DNS candidates remain. No HTTP bytes are sent during this fallback;
+provider identity, TLS hostname verification and broadcast retry semantics
+remain unchanged. The portable core has no transport dependency.
+
+On macOS, `daemon::unlock` owns authenticated human unlock requests. MCP
+forwards the named grant/token over a dedicated, cancellable connection.
+satsd launches a fixed local dialog helper, receives its password through a
+private pipe, revalidates the grant and human consent, then unlocks using the
+existing throttled session path. Only a typed outcome returns to MCP. No
+password, helper pipe, or key material is available to the MCP process, and
+no new wallet/grant format is introduced. Other daemon connections remain
+available while a dialog is open.
 
 ## Human send
 

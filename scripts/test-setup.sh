@@ -23,8 +23,8 @@ case "$(uname -m)" in
     *) printf 'unsupported test architecture\n' >&2; exit 1 ;;
 esac
 case "$(uname -s)" in
-    Linux) target="${arch}-unknown-linux-gnu" ;;
-    Darwin) target="${arch}-apple-darwin" ;;
+    Linux) target="${arch}-unknown-linux-gnu"; bash_profile_name=".bashrc" ;;
+    Darwin) target="${arch}-apple-darwin"; bash_profile_name=".bash_profile" ;;
     *) printf 'unsupported test operating system\n' >&2; exit 1 ;;
 esac
 
@@ -81,12 +81,12 @@ SHELL=/bin/bash \
 SATS_RELEASE_BASE_URL="file://$release_root" \
     sh "$repo_root/setup.sh" > "$tmp_dir/default.out"
 test -x "$tmp_dir/default-home/.local/bin/sats"
-grep -F 'export PATH="$HOME/.local/bin:$PATH"' "$tmp_dir/default-home/.bashrc" >/dev/null
+grep -F 'export PATH="$HOME/.local/bin:$PATH"' "$tmp_dir/default-home/$bash_profile_name" >/dev/null
 HOME="$tmp_dir/default-home" \
 SHELL=/bin/bash \
 SATS_RELEASE_BASE_URL="file://$release_root" \
     sh "$repo_root/setup.sh" > "$tmp_dir/default-second.out"
-test "$(grep -c 'Added by the sats installer' "$tmp_dir/default-home/.bashrc")" -eq 1
+test "$(grep -c 'Added by the sats installer' "$tmp_dir/default-home/$bash_profile_name")" -eq 1
 
 printf 'corrupt' >> "$latest_dir/$asset"
 if SATS_RELEASE_BASE_URL="file://$release_root" \

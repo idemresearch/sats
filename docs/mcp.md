@@ -44,14 +44,84 @@ At startup the server verifies:
 - the named grant exists and has not expired;
 - `SATS_AGENT_TOKEN` is present and matches that grant;
 - the selected network wallet exists;
-- provider configuration resolves without ambiguity;
-- satsd is reachable.
+- provider configuration resolves without ambiguity.
 
-Failure is reported immediately, before the client begins a conversation. A
-daemon that is running but locked is a warning rather than a refusal — a
-human can unlock it while the client is already connected.
+Authentication, wallet, or configuration failure is reported before the client
+begins a conversation. A missing, unresponsive, or locked daemon is a warning,
+not a startup refusal: discovery and read-only tools remain available. A human
+can start/unlock satsd while the client stays connected. No MCP tool installs
+a service or starts the daemon. `request_unlock` can ask a human to unlock
+through a local macOS dialog; it cannot supply a password or unlock unattended.
+
+On macOS, `sats daemon install` opts into login/crash supervision instead of
+session-dependent `daemon start`; every launch starts locked. See
+[CLI](cli.md#the-signing-daemon) for setup and removal.
 
 ## Tool surface
+
+### `get_status`
+
+Reports agent, network, and `daemon_state`: `unavailable`, `locked`, or
+`unlocked`. The probe uses a two-second response deadline and no chain access.
+Unavailable/locked results include `error_code: "daemon_unavailable"` or
+`"wallet_locked"` and a human-readable remedy; an unlocked result omits the
+error code. These are operational states, not policy denials. Unlocked does
+not imply the grant permits a particular spend. Subsequent calls discover
+daemon recovery without reconnecting MCP.
+
+```json
+{
+  "agent": "claude",
+  "network": "signet",
+  "daemon_state": "locked",
+  "error_code": "wallet_locked",
+  "message": "Wallet locked; with the human's consent, call request_unlock for a local macOS password dialog, or ask them to run sats daemon unlock --network signet using the same SATS_DIR. Never ask for a password in chat."
+}
+```
+
+### `request_unlock`
+
+Takes an empty object `{}`. After the human agrees, requests a native macOS
+password dialog from the signing daemon. Never pass passwords in chat or
+tool arguments; extra arguments are rejected. The dialog identifies the
+requesting agent, network, canonical wallet path, and configured idle
+auto-lock duration. It explicitly warns that unlocking enables **all active
+grants for that daemon**, within their existing limits, not one payment.
+
+The password travels from the local dialog helper directly to satsd through
+a private pipe. It never enters the MCP process or result. `SATS_PASSWORD`
+is not used by this flow. No transaction is prepared or sent, grants are not
+changed, and an already-unlocked daemon returns without prompting or extending
+its idle deadline.
+
+Results contain `status: "unlocked"`, `"cancelled"`, or `"error"`, and a
+human-readable `message`. Errors add `error_code`; throttles also include
+`retry_after_seconds`. No unlock result is a spending-policy denial.
+
+| `error_code` | Remedy |
+|---|---|
+| `daemon_unavailable` | Start/restart the daemon with the current binary and matching wallet/network |
+| `unauthorized` | Have the human check the grant/token; revoked, expired, or replaced grants cannot prompt |
+| `clock_unavailable` | Restore a working system clock so expiry can be verified |
+| `unsupported_platform` | Use `sats daemon unlock` in a terminal; dialogs require macOS |
+| `prompt_unavailable` | Use a terminal; the local desktop dialog could not run |
+| `unlock_in_progress` | Another dialog is already open for this daemon |
+| `unlock_rate_limited` | Wait for the 30-second cooldown after the previous dialog finishes |
+| `unlock_throttled` | Wait after too many incorrect passwords |
+| `unlock_failed` | The human can check their password in a new local dialog or terminal |
+| `unlock_timeout` | The dialog's two-minute deadline expired |
+
+Only one dialog runs per daemon. Cancel, MCP request cancellation, caller
+disconnect, timeout, or a subsequent human lock/unlock invalidates the pending
+request. Grant validity is checked both before prompting and before committing
+an unlock. A cancellation or timeout must not trigger automatic re-prompting;
+wait for the human to ask. An interrupted call might have completed just before
+disconnect: use `get_status` to learn the current state.
+
+A logged-in local macOS desktop is required. This is not an OS privilege
+prompt, Touch ID, Keychain storage, or remote password collection. If the
+daemon predates this tool, stop/start it with the updated binary and reconnect
+the MCP client. The existing terminal unlock command remains available.
 
 ### `get_balance`
 
@@ -174,6 +244,25 @@ optionally its idempotency key.
 
 ## Idempotent retries
 
+When `tools/call` includes `_meta.progressToken`, `send` emits standard MCP
+progress notifications for actual stages: checking the request, syncing,
+protecting UTXOs, estimating fees, building, authorizing/signing, and
+broadcasting. The progress number counts stage notifications; it is not a
+percentage or time estimate. Denied/replayed calls skip work they do not do.
+Clients without a progress token receive the same final result as before.
+Notification delivery failures never change signing or budget accounting.
+
+Provider HTTP requests time out after 30 seconds each; a multi-request scan
+can take longer. If a provider hostname resolves to several IPs, an
+unreachable TCP address gets at most two seconds before the next candidate
+is tried, within the same request deadline; the last candidate retains the
+remaining time. This never switches providers or retries an HTTP broadcast.
+These limits do not make a send a durable background job.
+Closing the MCP client can interrupt preparation or broadcast. A signature
+may already exist even if the client did not receive a result; preserve the
+request ID and payment details when recovering. Do not create a new send to
+resolve an uncertain outcome.
+
 Retrying `send` with the same `request_id` and the identical address and
 amount is always safe:
 
@@ -198,7 +287,7 @@ condition to fix.
 | `request_id_conflict` | The key was already used for a different send |
 | `request_in_flight` | The same request is executing right now |
 | `request_incomplete` | An earlier execution recorded neither outcome nor transaction; a human should review |
-| `wallet_locked` | satsd holds no seed; a human must run `sats daemon unlock` |
+| `wallet_locked` | satsd holds no seed; ask the human to use `request_unlock` on macOS or `sats daemon unlock` |
 | `daemon_unavailable` | satsd could not be reached, or could not be told a send's outcome |
 | `unauthorized` | The presented token does not authorize this agent's grant |
 | `clock_unavailable` | The system clock cannot be read; expiry cannot be evaluated, so the send refuses |
@@ -314,4 +403,3 @@ satsd could not be reached at all.
 MCP protocol frames use stdout. Human-readable startup information and
 diagnostics use stderr. Code running inside the MCP server must not print
 arbitrary messages to stdout.
-

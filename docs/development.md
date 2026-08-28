@@ -59,6 +59,13 @@ run the full gate before reporting the work ready.
 
 ## Test layers
 
+The root Cargo patch selects `vendor/minreq`, based on upstream 2.14.1, for
+bounded TCP address fallback. See its [patch note](../vendor/minreq/SATS-PATCH.md)
+for provenance and the exact changed files. The native Esplora test module
+includes the patched connector directly, so its deterministic deadline and
+fallback tests run in the normal workspace gate. Keep these tests and the
+broadcast-timeout/accounting tests when updating the dependency.
+
 | Layer | Location | Covers |
 |---|---|---|
 | Core unit tests | `crates/sats-core/src/` | Preparation, finalized records, authorization, sealing, seed derivation, signing, serialization, amount shorthand |
@@ -83,6 +90,32 @@ and exercise the affected tool contract.
 Report exactly which commands ran. If the environment cannot exercise a
 required path, state that limitation rather than declaring unverified behavior
 complete.
+
+The macOS service lifecycle test is opt-in because it registers an isolated
+user LaunchAgent and deliberately crashes only that test daemon. It requires
+a logged-in GUI session and permission to write `~/Library/LaunchAgents`:
+
+```sh
+cargo test -p sats --test daemon managed_service_lifecycle -- --ignored
+```
+
+Set `SATS_TEST_BINARY` to an absolute release-binary path to exercise that
+build. The test uses a disposable wallet, verifies MCP reconnection, locked
+crash recovery, explicit stop, idempotent install, and uninstall preservation,
+and removes its own service afterward. It never sends a payment or changes a
+real wallet service.
+
+### Native unlock dialog
+
+The macOS unlock-dialog smoke test is opt-in because it opens a real native
+dialog for a disposable, unfunded signet wallet. Enter `integration-test-pw`
+only in that test dialog. It checks MCP unlock, unchanged grants, and absence
+of transactions; the normal suite tests auth failures, cancellation, cooldown,
+revocation races, and helper deadlines without UI or runtime test hooks.
+
+```sh
+SATS_TEST_BINARY="$PWD/target/release/sats" cargo test -p sats --test mcp native_unlock_dialog --locked -- --ignored --nocapture
+```
 
 ## Documentation
 

@@ -8,6 +8,26 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 #[test]
+fn daemon_service_commands_have_help_and_validate_duration() {
+    let dir = TempDir::new().unwrap();
+    sats(&dir)
+        .args(["daemon", "install", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--auto-lock"));
+    sats(&dir)
+        .args(["daemon", "uninstall", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("preserving wallet data"));
+    sats(&dir)
+        .args(["daemon", "install", "--auto-lock", "0s"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("positive duration"));
+}
+
+#[test]
 fn init_receive_balance_flow() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);

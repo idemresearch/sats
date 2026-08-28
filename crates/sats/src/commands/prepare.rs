@@ -11,6 +11,36 @@ use crate::store::unix_now;
 use crate::ui;
 use crate::walletd::WalletCtx;
 
+/// Observational only: stages never affect planning or authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    #[cfg(feature = "mcp")]
+    CheckingRequest,
+    Syncing,
+    ProtectingUtxos,
+    EstimatingFees,
+    Building,
+    #[cfg(feature = "mcp")]
+    Authorizing,
+    #[cfg(feature = "mcp")]
+    Broadcasting,
+}
+
+#[cfg(feature = "mcp")]
+impl Stage {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::CheckingRequest => "Checking request",
+            Self::Syncing => "Syncing wallet",
+            Self::ProtectingUtxos => "Protecting UTXOs",
+            Self::EstimatingFees => "Estimating fees",
+            Self::Building => "Building transaction",
+            Self::Authorizing => "Authorizing and signing",
+            Self::Broadcasting => "Broadcasting transaction",
+        }
+    }
+}
+
 /// One preparation request. MCP sends always use the defaults for the
 /// safety escapes: agents get no bypass.
 pub struct PrepareRequest<'a> {
@@ -43,16 +73,27 @@ pub fn build(
     services: &Services,
     req: &PrepareRequest,
 ) -> Result<PreparedSpend> {
+    build_with_observer(ctx, services, req, &mut |_| {})
+}
+
+pub fn build_with_observer(
+    ctx: &mut WalletCtx,
+    services: &Services,
+    req: &PrepareRequest,
+    observe: &mut dyn FnMut(Stage),
+) -> Result<PreparedSpend> {
     let addr = Address::from_str(req.address)
         .map_err(|e| anyhow!("invalid address: {e}"))?
         .require_network(ctx.network)
         .map_err(|_| anyhow!("address is not valid for {}", ctx.net_name))?;
+    observe(Stage::Syncing);
     services
         .sync_wallet(ctx)
         .map_err(|e| anyhow!("{e} — refusing to plan on stale state"))?;
 
     // Exclusions: the dust heuristic unions with every configured guard;
     // conservatism stacks. Escapes are per-invocation flags only.
+    observe(Stage::ProtectingUtxos);
     let utxos: Vec<(OutPoint, Amount)> = ctx
         .wallet
         .list_unspent()
@@ -95,10 +136,14 @@ pub fn build(
             let sat_vb = u32::try_from(sat_vb).unwrap_or(u32::MAX).max(1);
             FeeRate::from_sat_per_vb_u32(sat_vb)
         }
-        None => services
-            .estimate_fee_rate(2)
-            .context("cannot estimate fee — pass --fee-rate")?,
+        None => {
+            observe(Stage::EstimatingFees);
+            services
+                .estimate_fee_rate(2)
+                .context("cannot estimate fee — pass --fee-rate")?
+        }
     };
+    observe(Stage::Building);
     Ok(engine::build_plan(
         &mut ctx.wallet,
         &addr,
