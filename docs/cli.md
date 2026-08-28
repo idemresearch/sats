@@ -406,6 +406,14 @@ revocation or expiry. `deny` dismisses the request and revokes an
 unconsumed approval without a password: reducing authority stays cheap.
 Both accept a request id or unique prefix and support `--json`.
 
+Approval requires an existing grant whose current hard restrictions
+permit the exception. `approve` checks both the recorded denial and the
+current policy before asking for the password, then rechecks under the
+grant lock before writing. An older ASK cannot be approved after a
+switch to observe, suspension, revocation, expiry, or a hard amount
+ceiling lowered below the request's amount. No approval is queued for a
+missing grant.
+
 ## Alkanes contract tools
 
 The `sats alkanes` namespace is an experimental, signet-first Alkanes

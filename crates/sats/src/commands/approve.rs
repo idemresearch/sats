@@ -6,13 +6,13 @@
 //! with `sats agent deny`.
 
 use anyhow::{Context, Result, bail};
-use sats_core::authz::{DenyReason, IntentApproval};
+use sats_core::authz::{Decision, DenyReason, IntentApproval, SpendRequest, evaluate_send};
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
-use sats_core::request::RequestOutcome;
+use sats_core::request::{AgentRequest, RequestOutcome};
 
 use crate::config::network_name;
-use crate::store::{Store, unix_now};
+use crate::store::{Store, now_checked};
 use crate::{keys, ui};
 
 pub fn run(
@@ -25,26 +25,7 @@ pub fn run(
 ) -> Result<()> {
     let net_name = network_name(network);
     let request = store.find_agent_request(net_name, id_or_prefix)?;
-    if matches!(request.outcome, Some(RequestOutcome::Sent { .. })) {
-        bail!(
-            "request {} was already sent — nothing to approve",
-            request.id
-        );
-    }
-    // The hard envelope is refused before any password prompt: an
-    // approval could never lift it, so creating one would only arm a
-    // decoy. The escalation for a hard refusal is changing the grant.
-    if let Some(RequestOutcome::Denied { deny, .. }) = &request.outcome
-        && !deny.approvable()
-    {
-        bail!(
-            "request {} was denied {}, which no approval can lift — the only escalation \
-             is changing the grant itself: sats agent grant {} --budget <sats> ...",
-            request.id,
-            deny.code(),
-            request.agent,
-        );
-    }
+    ensure_approvable(store, net_name, &request, now_checked()?)?;
     match store.claim_agent_request(net_name, &request.agent, &request.id)? {
         Some(claim) => drop(claim),
         None => bail!(
@@ -94,26 +75,27 @@ pub fn run(
     // for grant creation; the unlocked mnemonic itself is not needed.
     let _ = keys::unlock(store)?;
 
-    let now = unix_now();
     let replaced;
-    let approval = IntentApproval {
-        intent_digest: request.intent_digest.clone(),
-        approved_at: now,
-        expires_at: now.saturating_add(lifetime),
-        max_fee_sat,
-        consumed_at: None,
-        consumed_by_request: None,
-    };
+    let approval;
     {
         // Under the grant lock: approval writes serialize with budget
-        // decisions and with a concurrent deny.
+        // decisions, policy changes, and a concurrent deny. Recheck after
+        // the password prompt so a newly hard restriction cannot arm an
+        // approval that the daemon would refuse.
         let _lock = store.lock_grants(net_name)?;
+        let now = now_checked()?;
         let mut fresh = store
             .load_agent_request(net_name, &request.agent, &request.id)?
             .with_context(|| format!("request {} disappeared", request.id))?;
-        if matches!(fresh.outcome, Some(RequestOutcome::Sent { .. })) {
-            bail!("request {} was already sent — nothing to approve", fresh.id);
-        }
+        ensure_approvable(store, net_name, &fresh, now)?;
+        approval = IntentApproval {
+            intent_digest: request.intent_digest.clone(),
+            approved_at: now,
+            expires_at: now.saturating_add(lifetime),
+            max_fee_sat,
+            consumed_at: None,
+            consumed_by_request: None,
+        };
         replaced = fresh
             .approval
             .as_ref()
@@ -128,7 +110,7 @@ pub fn run(
         net_name,
         &sats_core::event::AgentEvent {
             format_version: sats_core::event::EVENT_FORMAT_VERSION,
-            at: now,
+            at: approval.approved_at,
             network: net_name.to_string(),
             agent: request.agent.clone(),
             request_id: request.id.clone(),
@@ -141,10 +123,6 @@ pub fn run(
     ) {
         eprintln!("⚠ event log append failed: {err:#}");
     }
-
-    let grant_active = store
-        .load_grant(net_name, &request.agent)?
-        .is_some_and(|g| !g.is_expired(now));
 
     if json {
         println!(
@@ -168,17 +146,55 @@ pub fn run(
         ));
         ui::dim("the agent's next matching send consumes this approval");
     }
-    if !grant_active {
-        // In JSON mode stdout carries only the result object.
-        let warning = format!(
-            "{} holds no active grant — the approval waits until one exists",
-            request.agent
+    Ok(())
+}
+
+/// Refuse hard restrictions before prompting, then again under the grant
+/// lock before writing. The recorded denial alone can be stale. As in the
+/// daemon's precheck, fee zero checks the current amount and hard envelope;
+/// the daemon still checks the prepared transaction's actual fee later.
+fn ensure_approvable(store: &Store, network: &str, request: &AgentRequest, now: u64) -> Result<()> {
+    if matches!(request.outcome, Some(RequestOutcome::Sent { .. })) {
+        bail!(
+            "request {} was already sent — nothing to approve",
+            request.id
         );
-        if json {
-            eprintln!("⚠ {warning}");
-        } else {
-            ui::warn(&warning);
-        }
+    }
+    if let Some(RequestOutcome::Denied { deny, .. }) = &request.outcome
+        && !deny.approvable()
+    {
+        bail!(
+            "request {} was denied {}, which no approval can lift — the only escalation \
+             is changing the grant itself: sats agent grant {} --budget <sats> ...",
+            request.id,
+            deny.code(),
+            request.agent,
+        );
+    }
+    let grant = store
+        .load_grant(network, &request.agent)?
+        .with_context(|| {
+            format!(
+                "no active grant for {:?} — issue a grant before approving",
+                request.agent
+            )
+        })?;
+    if let Decision::Deny(deny) = evaluate_send(
+        &grant,
+        &request.recipient,
+        &SpendRequest {
+            amount_sat: request.amount_sat,
+            fee_sat: 0,
+        },
+        now,
+    ) && !deny.approvable()
+    {
+        bail!(
+            "the current grant denies request {} with {}, which no approval can lift — \
+             the human must change the grant itself",
+            request.id,
+            deny.code(),
+        );
     }
     Ok(())
 }

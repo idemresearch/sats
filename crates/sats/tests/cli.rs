@@ -897,6 +897,12 @@ fn agent_requests_watch_streams_newly_pending_asks() {
 
     let dir = TempDir::new().unwrap();
     init_wallet(&dir); // approving later needs the sealed seed
+    sats(&dir)
+        .args([
+            "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
+        ])
+        .assert()
+        .success();
 
     let fabricate_hard = |id: &str| {
         let requests_dir = dir.path().join("signet/agent-requests/claude");
@@ -1282,6 +1288,21 @@ fn approve_requires_the_password_and_arms_a_single_use_exception() {
     init_wallet(&dir);
     fabricate_denied_request(&dir, "claude", "k-big-1");
 
+    // Without a live grant there is no approval to arm, even for a
+    // historically approvable request. Refuse before the password.
+    sats(&dir)
+        .env("SATS_PASSWORD", "wrong")
+        .args(["agent", "approve", "k-big-1", "--max-fee", "500"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no active grant"));
+    sats(&dir)
+        .args([
+            "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
+        ])
+        .assert()
+        .success();
+
     // The wrong password is a hard failure that writes no approval.
     sats(&dir)
         .env("SATS_PASSWORD", "wrong")
@@ -1327,9 +1348,89 @@ fn approve_requires_the_password_and_arms_a_single_use_exception() {
 }
 
 #[test]
+fn approve_rechecks_policy_before_writing() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args([
+            "agent", "grant", "claude", "--budget", "50000", "--mode", "ask",
+        ])
+        .assert()
+        .success();
+    fabricate_denied_request(&dir, "claude", "k-race-1");
+    let request_path = dir
+        .path()
+        .join("signet/agent-requests/claude/k-race-1.json");
+    let request_before = std::fs::read(&request_path).unwrap();
+    let events_path = dir.path().join("signet/events/log.jsonl");
+    assert!(
+        !events_path.exists(),
+        "the fabricated request has no events"
+    );
+
+    // Hold the real grant lock so the approving process cannot commit
+    // until this concurrent policy change has finished.
+    let lock = std::fs::File::create(dir.path().join("signet/grants/.lock")).unwrap();
+    lock.lock().unwrap();
+    let stdout_path = dir.path().join("approve-output.txt");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sats"))
+        .args(["agent", "approve", "k-race-1", "--max-fee", "500"])
+        .env("SATS_DIR", dir.path())
+        .env("SATS_PASSWORD", common::PASSWORD)
+        .env("NO_COLOR", "1")
+        .stdout(std::fs::File::create(&stdout_path).unwrap())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Printing the review means the initial policy check passed. No
+    // timing guess about password derivation is needed.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let reviewing = loop {
+        if std::fs::read_to_string(&stdout_path)
+            .unwrap()
+            .contains("Approve")
+        {
+            break true;
+        }
+        if Instant::now() >= deadline || child.try_wait().unwrap().is_some() {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let grant_path = dir.path().join("signet/grants/claude.json");
+    let mut grant: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&grant_path).unwrap()).unwrap();
+    grant["mode"] = serde_json::json!("observe");
+    std::fs::write(&grant_path, grant.to_string()).unwrap();
+    drop(lock);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
+    assert!(reviewing, "approval never reached its initial review");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("observe_only"));
+    assert_eq!(std::fs::read(&request_path).unwrap(), request_before);
+    assert!(!events_path.exists(), "a refused approval must not journal");
+}
+
+#[test]
 fn deny_dismisses_and_revokes_the_unconsumed_approval() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
+    sats(&dir)
+        .args([
+            "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
+        ])
+        .assert()
+        .success();
     fabricate_denied_request(&dir, "claude", "k-big-1");
     sats(&dir)
         .args(["agent", "approve", "k-big-1", "--max-fee", "500"])

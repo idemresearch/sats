@@ -839,6 +839,19 @@ fn approval_does_not_override_revocation() {
     run_sats(&dir, &["agent", "approve", "k-rev-1", "--max-fee", "5000"]);
     run_sats(&dir, &["agent", "revoke", "claude"]);
 
+    let poll = mcp.call_tool(
+        4,
+        "check_request",
+        serde_json::json!({ "request_id": "rev-1" }),
+    );
+    assert_eq!(poll["approval_ready"], false, "got: {poll}");
+    assert!(
+        poll["message"]
+            .as_str()
+            .unwrap()
+            .contains("no active grant")
+    );
+
     let after = mcp.call_tool(3, "send", params);
     assert_eq!(after["status"], "denied", "got: {after}");
     assert_eq!(after["reason"], "revoked");
@@ -860,12 +873,55 @@ fn approval_does_not_override_grant_expiry() {
     assert_eq!(denied["status"], "denied");
     run_sats(&dir, &["agent", "approve", "k-exp-1", "--max-fee", "5000"]);
 
-    // Force the grant past its expiry; the armed approval must not save it.
+    // Tighten the existing hard envelope without rewriting the historical
+    // denial. Polling and approval creation must both re-read the policy.
     let grant_path = dir.path().join("signet/grants/claude.json");
-    let mut grant = read_json(&grant_path);
-    grant["expires_at"] = serde_json::json!(1);
-    std::fs::write(&grant_path, grant.to_string()).unwrap();
+    let original_grant = read_json(&grant_path);
+    let request_path = dir.path().join("signet/agent-requests/claude/k-exp-1.json");
+    let request_before = std::fs::read(&request_path).unwrap();
+    let events_path = dir.path().join("signet/events/log.jsonl");
+    let events_before = std::fs::read(&events_path).unwrap();
+    for (field, value, reason) in [
+        ("ask_max_tx_sat", serde_json::json!(15_000), "over_ask_max"),
+        (
+            "suspended",
+            serde_json::json!({ "at": 1, "trigger": "manual" }),
+            "suspended",
+        ),
+        ("expires_at", serde_json::json!(1), "expired"),
+    ] {
+        let mut grant = original_grant.clone();
+        grant[field] = value;
+        std::fs::write(&grant_path, grant.to_string()).unwrap();
+        let poll = mcp.call_tool(
+            4,
+            "check_request",
+            serde_json::json!({ "request_id": "exp-1" }),
+        );
+        assert_eq!(
+            poll["reason"], "over_max_tx",
+            "recorded history stays intact"
+        );
+        assert_eq!(poll["approval_ready"], false, "got: {poll}");
+        assert!(
+            poll["message"].as_str().unwrap().contains(reason),
+            "got: {poll}"
+        );
+        assert!(!poll["message"].as_str().unwrap().contains("agent approve"));
+        let refused = Command::new(sats_bin())
+            .args(["agent", "approve", "k-exp-1", "--max-fee", "5000"])
+            .env("SATS_DIR", dir.path())
+            .env("SATS_PASSWORD", "wrong")
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        assert!(!refused.status.success());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains(reason));
+        assert_eq!(std::fs::read(&request_path).unwrap(), request_before);
+        assert_eq!(std::fs::read(&events_path).unwrap(), events_before);
+    }
 
+    // The final policy above is expired; the armed approval cannot save it.
     let after = mcp.call_tool(3, "send", params);
     assert_eq!(after["status"], "denied", "got: {after}");
     assert_eq!(after["reason"], "expired");
@@ -1466,6 +1522,82 @@ fn check_request_polls_without_side_effects() {
     assert_eq!(cross["found"], false, "got: {cross}");
 }
 
+#[test]
+fn check_request_resolves_prefixed_keys_and_preserves_canonical_ids() {
+    let dir = TempDir::new().unwrap();
+    run_sats(&dir, &["init"]);
+    let token = grant_token(&dir, "claude", &["--budget", "50000", "--mode", "ask"]);
+    let _daemon = Daemon::start(&dir);
+    let mut mcp = McpSession::start(&dir, "claude", &token);
+    handshake(&mut mcp);
+
+    for key in [
+        "k-job".to_string(),
+        "r-job".to_string(),
+        "k-".to_string(),
+        "r-".to_string(),
+        format!("k-{}", "x".repeat(62)),
+        format!("r-{}", "x".repeat(62)),
+    ] {
+        let denied = mcp.call_tool(
+            2,
+            "send",
+            serde_json::json!({ "address": ADDRESS, "amount_sat": 1000, "request_id": key }),
+        );
+        assert_eq!(denied["status"], "denied", "got: {denied}");
+        let canonical = format!("k-{key}");
+        assert_eq!(denied["request_id"], canonical);
+        for query in [&key, &canonical] {
+            let poll = mcp.call_tool(
+                3,
+                "check_request",
+                serde_json::json!({ "request_id": query }),
+            );
+            assert_eq!(poll["found"], true, "query {query}: {poll}");
+            assert_eq!(poll["request_id"], canonical);
+        }
+    }
+
+    // A stored canonical id wins over a bare-key alias. The original
+    // prefixed key remains reachable by the id its send returned.
+    let denied = mcp.call_tool(
+        4,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 2000, "request_id": "job" }),
+    );
+    assert_eq!(denied["request_id"], "k-job");
+    for canonical in ["k-job", "k-k-job"] {
+        let poll = mcp.call_tool(
+            5,
+            "check_request",
+            serde_json::json!({ "request_id": canonical }),
+        );
+        assert_eq!(poll["request_id"], canonical, "got: {poll}");
+    }
+
+    // The same precedence applies to server-generated keyless ids.
+    let keyless = mcp.call_tool(
+        6,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 3000 }),
+    );
+    let random_id = keyless["request_id"].as_str().unwrap();
+    assert!(random_id.starts_with("r-"));
+    let keyed = mcp.call_tool(
+        7,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 4000, "request_id": random_id }),
+    );
+    for canonical in [random_id, keyed["request_id"].as_str().unwrap()] {
+        let poll = mcp.call_tool(
+            8,
+            "check_request",
+            serde_json::json!({ "request_id": canonical }),
+        );
+        assert_eq!(poll["request_id"], canonical, "got: {poll}");
+    }
+}
+
 /// Ask mode proposes everything and executes only through approvals;
 /// observe mode reads but can never send; auto restores autonomy. All
 /// three flow through get_grant and take effect mid-session.
@@ -1499,9 +1631,14 @@ fn modes_gate_the_send_path_end_to_end() {
         serde_json::json!({ "address": ADDRESS, "amount_sat": 1_000, "request_id": "m-2" }),
     );
     assert_eq!(again["reason"], "ask_required", "got: {again}");
+    run_sats(&dir, &["agent", "approve", "k-m-2", "--max-fee", "500"]);
 
     // Observe: reads keep working, sends hard-deny, approvals refuse.
     run_sats(&dir, &["agent", "mode", "claude", "observe"]);
+    let record_path = dir.path().join("signet/agent-requests/claude/k-m-2.json");
+    let record_before = std::fs::read(&record_path).unwrap();
+    let events_path = dir.path().join("signet/events/log.jsonl");
+    let events_before = std::fs::read(&events_path).unwrap();
     let grant = mcp.call_tool(6, "get_grant", serde_json::json!({}));
     assert_eq!(grant["mode"], "observe");
     let balance = mcp.call_tool(7, "get_balance", serde_json::json!({}));
@@ -1512,6 +1649,28 @@ fn modes_gate_the_send_path_end_to_end() {
         serde_json::json!({ "request_id": "m-2" }),
     );
     assert_eq!(poll["found"], true);
+    assert_eq!(
+        poll["reason"], "ask_required",
+        "recorded history stays intact"
+    );
+    assert_eq!(poll["approval_ready"], false, "got: {poll}");
+    assert!(poll.get("approval_expires_at").is_none());
+    assert!(poll["message"].as_str().unwrap().contains("observe_only"));
+    assert!(!poll["message"].as_str().unwrap().contains("agent approve"));
+    let refused = Command::new(sats_bin())
+        .args(["agent", "approve", "k-m-2", "--max-fee", "500"])
+        .env("SATS_DIR", dir.path())
+        .env("SATS_PASSWORD", "wrong")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert!(
+        !refused.status.success(),
+        "an old ASK cannot override observe"
+    );
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("observe_only"));
+    assert_eq!(std::fs::read(&record_path).unwrap(), record_before);
+    assert_eq!(std::fs::read(&events_path).unwrap(), events_before);
     let denied = mcp.call_tool(
         9,
         "send",
@@ -1534,6 +1693,23 @@ fn modes_gate_the_send_path_end_to_end() {
         .output()
         .unwrap();
     assert!(!refused.status.success(), "observe denials cannot be armed");
+
+    // Restoring ask makes the unconsumed approval available again.
+    run_sats(&dir, &["agent", "mode", "claude", "ask"]);
+    let ready = mcp.call_tool(
+        10,
+        "check_request",
+        serde_json::json!({ "request_id": "m-2" }),
+    );
+    assert_eq!(ready["approval_ready"], true, "got: {ready}");
+    // A sibling approval never makes an already-sent request executable.
+    let settled = mcp.call_tool(
+        11,
+        "check_request",
+        serde_json::json!({ "request_id": "m-1" }),
+    );
+    assert_eq!(settled["status"], "sent");
+    assert_eq!(settled["approval_ready"], false, "got: {settled}");
 
     // Auto again (password-gated): the same send now just executes.
     run_sats(&dir, &["agent", "mode", "claude", "auto"]);

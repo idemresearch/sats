@@ -178,11 +178,11 @@ fn record_outcome_locked(
     }
 }
 
-/// The one approval that can authorize this intent right now, and a fresh
+/// The candidate approval for this intent, and a fresh
 /// read of the record holding it. The executing request's own approval
 /// wins; otherwise the lexicographically smallest holder, so concurrent
-/// lookups pick the same one.
-fn current_approval(
+/// lookups pick the same one. Callers must still check the current policy.
+pub(crate) fn current_approval(
     store: &Store,
     net_name: &str,
     agent: &str,

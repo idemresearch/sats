@@ -333,6 +333,12 @@ exception. Its trust model:
   cannot, because the signing key lives behind the grant file), not
   suspension, not observe mode, and not the hard amount ceiling, which is
   the human's pre-commitment that no amount of asking can move;
+- approval creation rechecks the current grant before prompting and
+  under the grant lock before writing; a missing grant or a current hard
+  refusal cannot arm an exception from an older approvable denial.
+  Read-only polling checks the same hard envelope before reporting an
+  approval ready, without changing the recorded outcome or authorizing
+  a signature;
 - consumption is single-use and persisted before the budget draw, under
   the same per-network lock as every grant write. A crash between the two
   writes burns the approval without signing — the failing direction is

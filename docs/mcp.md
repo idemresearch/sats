@@ -188,6 +188,11 @@ no mutation of any kind — polling it is free, however often it runs.
 Lookup is scoped to the serving agent's own records; another agent's
 request answers `found: false`, exactly like one that never existed.
 
+Prefer the stored ID returned by `send`. Bare client keys also work,
+including keys beginning with `k-` or `r-`. If a bare key is also an
+existing stored ID, the stored ID takes precedence: after sending with
+both `job` and `k-job`, poll `k-k-job` for the latter request.
+
 ```json
 {
   "found": true,
@@ -202,12 +207,20 @@ request answers `found: false`, exactly like one that never existed.
 
 `status` reuses send's vocabulary — `sent` (with `txid`), `denied` (with
 `reason` and `approvable`), `error`, or `pending` when no outcome is
-recorded yet. `approval_ready: true` means an unconsumed, unexpired
-one-time approval currently authorizes exactly this request's intent
-(`approval_expires_at` says until when): the agent should retry the
-identical send once, with the same `request_id`, to consume it. A
-malformed or unknown id is a typed `found: false` result, never a
-transport error.
+recorded yet. `reason` and `approvable` describe the recorded denial;
+they are history, not a new policy decision. `approval_ready: true` means
+an unconsumed, unexpired one-time approval is available for this unsettled
+intent under the current grant's hard restrictions (`approval_expires_at`
+says when that approval expires). Revocation, grant expiry, observe mode,
+suspension, or an amount above the current hard ceiling make readiness
+false; the message explains the current restriction. Polling never
+changes history.
+
+When ready, retry the identical send once with its **original client
+idempotency key**, not the stored ID returned by `send`. The daemon still
+rechecks policy and the actual prepared fee; readiness does not guarantee
+signing or broadcast success. A malformed or unknown id is a typed
+`found: false` result, never a transport error.
 
 ### Tool annotations
 
@@ -388,6 +401,10 @@ amount, ideally the same `request_id` — and the result carries
 A hard denial (`approvable: false`) has no approval path at all:
 `sats agent approve` refuses to arm one before any password prompt, and
 the refusal names the real escalation — changing the grant.
+Approval creation checks the current grant before prompting and again
+under the grant lock before writing, so an older ASK cannot bypass a
+later hard restriction. A missing or unreadable grant cannot arm an
+approval.
 
 Approvals never override revocation or grant expiry: those are the human's
 kill switches, and an exception issued earlier does not survive them. A

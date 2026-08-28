@@ -12,13 +12,14 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use rmcp::RoleServer;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{ErrorData, ProgressNotificationParam, ServerCapabilities, ServerInfo};
 use rmcp::service::RequestContext;
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use sats_core::authz::{Decision, SpendRequest, evaluate_send};
 use sats_core::bitcoin::{Address, Network};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -64,7 +65,8 @@ pub struct UnlockParams {}
 #[derive(Deserialize, JsonSchema)]
 pub struct CheckRequestParams {
     /// The request id a send result returned (k-<key> or r-<hex>), or the
-    /// bare idempotency key that was passed to send.
+    /// bare idempotency key that was passed to send. An existing stored
+    /// id takes precedence when it also names another request's bare key.
     pub request_id: String,
 }
 
@@ -86,8 +88,9 @@ pub struct CheckRequestResult {
     /// Whether a one-time human approval can lift the recorded denial.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approvable: Option<bool>,
-    /// True when an unconsumed, unexpired approval currently authorizes
-    /// exactly this request's intent: retry the identical send once.
+    /// True when an unconsumed, unexpired approval is available for this
+    /// unsettled intent under the current grant's hard restrictions.
+    /// The daemon still checks the actual fee and policy on retry.
     pub approval_ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_expires_at: Option<u64>,
@@ -511,8 +514,10 @@ impl SatsMcp {
         sanctioned way to wait for a human decision: it reads the durable record only — \
         no chain access, no retry, no side effects, and polling it never counts against \
         you. When a denial is awaiting approval, approval_ready=false; once the human \
-        approves, approval_ready=true — then retry the identical send once with the same \
-        request_id to consume the approval. A sent request reports its txid.",
+        approves and the current grant permits an exception, approval_ready=true — \
+        retry the identical send with its original client key. The daemon rechecks \
+        policy and the actual fee. A sent request reports its txid. Stored ids take \
+        precedence over bare-key aliases; prefer the id a send result returned.",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn check_request(
@@ -739,40 +744,82 @@ fn check_request_record(
     agent: &str,
     raw_id: &str,
 ) -> CheckRequestResult {
-    // Accept the server-assigned id or the bare client key.
-    let id = if raw_id.starts_with("k-") || raw_id.starts_with("r-") {
-        raw_id.to_string()
-    } else {
-        format!("k-{raw_id}")
-    };
-    if !crate::daemon::send::valid_request_key(&id[2..]) {
+    // Canonical ids remain unambiguous. If none exists, try the bare key,
+    // even when that key itself begins with k- or r-. Validate each form
+    // separately: keys can be 64 bytes, so their stored ids can be 66.
+    let canonical = raw_id
+        .strip_prefix("k-")
+        .or_else(|| raw_id.strip_prefix("r-"))
+        .filter(|key| crate::daemon::send::valid_request_key(key))
+        .map(|_| raw_id);
+    let keyed = crate::daemon::send::valid_request_key(raw_id).then(|| format!("k-{raw_id}"));
+    if canonical.is_none() && keyed.is_none() {
         return CheckRequestResult::not_found(format!(
             "malformed request id {raw_id:?} — pass the request_id a send result returned"
         ));
     }
-    let record = match store.load_agent_request(net_name, agent, &id) {
-        Ok(Some(record)) => record,
-        Ok(None) => {
-            return CheckRequestResult::not_found(format!(
-                "no request {id} recorded for agent {agent:?}"
-            ));
+    let mut found = None;
+    for id in canonical.into_iter().chain(keyed.as_deref()) {
+        match store.load_agent_request(net_name, agent, id) {
+            Ok(Some(record)) => {
+                found = Some(record);
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => return CheckRequestResult::not_found(format!("cannot read request: {e:#}")),
         }
-        Err(e) => return CheckRequestResult::not_found(format!("cannot read request: {e:#}")),
+    }
+    let Some(record) = found else {
+        return CheckRequestResult::not_found(format!(
+            "no request {raw_id:?} recorded for agent {agent:?}"
+        ));
     };
 
-    // An unconsumed, unexpired approval bound to this exact intent —
-    // held by this record or by a sibling with the same digest.
-    let now = unix_now();
-    let approval = record
-        .approval
-        .clone()
-        .filter(|approval| approval.is_valid_for(&record.intent_digest, now))
-        .or_else(|| {
-            let all = store.list_agent_requests(net_name).unwrap_or_default();
-            all.into_iter()
-                .filter(|holder| holder.agent == agent)
-                .filter_map(|holder| holder.approval)
-                .find(|approval| approval.is_valid_for(&record.intent_digest, now))
+    // Readiness is a current-policy snapshot, not the historical denial.
+    // Match the daemon's amount-only precheck without touching the chain.
+    let readiness = (|| -> Result<u64> {
+        let now = crate::store::now_checked()?;
+        let grant = store
+            .load_grant(net_name, agent)?
+            .context("no active grant — the human must issue a grant before sending")?;
+        if let Decision::Deny(deny) = evaluate_send(
+            &grant,
+            &record.recipient,
+            &SpendRequest {
+                amount_sat: record.amount_sat,
+                fee_sat: 0,
+            },
+            now,
+        ) && !deny.approvable()
+        {
+            bail!(
+                "the current grant denies {} — not approvable; only the human changing the grant lifts it",
+                deny.code()
+            );
+        }
+        Ok(now)
+    })();
+    let settled = matches!(
+        &record.outcome,
+        Some(
+            sats_core::request::RequestOutcome::Sent { .. }
+                | sats_core::request::RequestOutcome::Failed { txid: Some(_), .. }
+        )
+    );
+    let approval = readiness
+        .as_ref()
+        .ok()
+        .filter(|_| !settled)
+        .and_then(|&now| {
+            crate::daemon::send::current_approval(
+                store,
+                net_name,
+                agent,
+                &record.intent_digest,
+                &record.id,
+                now,
+            )
+            .map(|(approval, _)| approval)
         });
     let approval_ready = approval.is_some();
 
@@ -783,7 +830,7 @@ fn check_request_record(
             None,
             None,
             "no outcome recorded: still executing, or its execution stopped early — if it \
-             stays pending, retry the identical send with this request_id to settle it"
+             stays pending, retry the identical send with its original client key to settle it"
                 .to_string(),
         ),
         Some(sats_core::request::RequestOutcome::Sent { txid, .. }) => (
@@ -801,9 +848,11 @@ fn check_request_record(
                 "the human dismissed this request — do not retry it; ask your human before \
                  proposing it again"
                     .to_string()
+            } else if let Err(error) = &readiness {
+                format!("approval not ready: {error:#}; do not retry this send")
             } else if approval_ready {
-                "approved — retry the identical send once with this request_id to consume \
-                 the approval"
+                "approved — retry the identical send with its original client key; \
+                 the daemon rechecks policy and the actual fee"
                     .to_string()
             } else if deny.approvable() {
                 format!(
@@ -857,7 +906,8 @@ impl ServerHandler for SatsMcp {
              human changing the grant lifts it, so report it once and stop. \
              Pass request_id on every send so retries can never pay twice. While a request \
              waits on a human, poll check_request(request_id) — it is free, has no side \
-             effects, and reports approval_ready when the retry will succeed; do not poll \
+             effects, and reports approval_ready under the current grant's hard restrictions; \
+             the daemon still checks policy and the actual fee on retry. Do not poll \
              by retrying send. Use get_grant() \
              to see the remaining budget before sending. Use get_status() for daemon \
              availability; unavailable or locked is an operational condition, not a policy \
