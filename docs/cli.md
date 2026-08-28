@@ -383,8 +383,9 @@ asks from sats itself instead of relying on the agent to relay (or
 downplay) its own denials. Hard, non-approvable denials never appear
 there — nothing is awaited — and stay reviewable with `--all`. A request
 whose approval expires unconsumed re-enters the queue and announces
-again. With `--json` the stream is JSONL, one full record per line.
-Watching is read-only; Ctrl-C stops it.
+again. Request IDs are scoped to their agent: two agents using the same
+ID are announced independently. With `--json` the stream is JSONL, one
+full record per line. Watching is read-only; Ctrl-C stops it.
 
 ## Approving one request
 

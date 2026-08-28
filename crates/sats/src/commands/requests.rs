@@ -1,5 +1,7 @@
 //! The human review queue: agent send requests and their outcomes.
 
+use std::collections::BTreeSet;
+
 use anyhow::Result;
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
@@ -98,20 +100,23 @@ fn watch_loop(store: &Store, network: Network, json: bool) -> Result<()> {
     if !json {
         eprintln!("watching {net_name} agent requests — Ctrl-C to stop");
     }
-    let mut announced: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut announced: BTreeSet<(String, String)> = BTreeSet::new();
     loop {
         let now = unix_now();
         // A torn or unreadable record is warn-and-skipped inside the
         // listing, exactly like the one-shot view; the stream continues.
-        let mut awaiting: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut awaiting = BTreeSet::new();
         let mut requests = store.list_agent_requests(net_name)?;
         requests.sort_by_key(|request| request.created_at);
         for request in requests {
             if !awaits_approval(&request, now) {
                 continue;
             }
-            awaiting.insert(request.id.clone());
-            if announced.contains(&request.id) {
+            // Request ids are unique within an agent, not across agents.
+            let key = (request.agent.clone(), request.id.clone());
+            let already_announced = announced.contains(&key);
+            awaiting.insert(key);
+            if already_announced {
                 continue;
             }
             if json {
@@ -121,7 +126,7 @@ fn watch_loop(store: &Store, network: Network, json: bool) -> Result<()> {
                 println!("{}", watch_line(&request, now));
             }
         }
-        // Forgetting settled ids means a request that *re-enters* the
+        // Forgetting settled keys means a request that *re-enters* the
         // queue — say its approval expired unconsumed — announces again.
         announced = awaiting;
         std::thread::sleep(WATCH_POLL);

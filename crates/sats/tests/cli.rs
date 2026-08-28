@@ -915,7 +915,7 @@ fn agent_requests_watch_streams_newly_pending_asks() {
     };
 
     // One request is already waiting before the watcher starts.
-    fabricate_denied_request(&dir, "k-w-0");
+    fabricate_denied_request(&dir, "claude", "k-w-0");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_sats"))
         .args(["--json", "agent", "requests", "--watch"])
@@ -950,12 +950,17 @@ fn agent_requests_watch_streams_newly_pending_asks() {
     };
 
     // Startup renders what is already pending, once.
-    expect_id(&lines, "k-w-0");
+    assert_eq!(expect_id(&lines, "k-w-0")["agent"], "claude");
+
+    // Request ids are scoped to an agent. A later ask from another
+    // agent must announce even while the first agent's same id is pending.
+    fabricate_denied_request(&dir, "bob", "k-w-0");
+    assert_eq!(expect_id(&lines, "k-w-0")["agent"], "bob");
 
     // A new ask announces once; repeats and rewrites stay silent.
-    fabricate_denied_request(&dir, "k-w-1");
+    fabricate_denied_request(&dir, "claude", "k-w-1");
     expect_id(&lines, "k-w-1");
-    fabricate_denied_request(&dir, "k-w-1"); // rewritten, still pending
+    fabricate_denied_request(&dir, "claude", "k-w-1"); // rewritten, still pending
     expect_quiet(&lines);
 
     // Approving removes it from the queue silently; only the next new
@@ -964,7 +969,7 @@ fn agent_requests_watch_streams_newly_pending_asks() {
         .args(["agent", "approve", "k-w-1", "--max-fee", "100"])
         .assert()
         .success();
-    fabricate_denied_request(&dir, "k-w-2");
+    fabricate_denied_request(&dir, "claude", "k-w-2");
     expect_id(&lines, "k-w-2");
 
     // A hard denial is not "awaiting approval" and never announces.
@@ -977,7 +982,7 @@ fn agent_requests_watch_streams_newly_pending_asks() {
         "{ not json",
     )
     .unwrap();
-    fabricate_denied_request(&dir, "k-w-4");
+    fabricate_denied_request(&dir, "claude", "k-w-4");
     expect_id(&lines, "k-w-4");
 
     child.kill().unwrap();
@@ -1249,14 +1254,14 @@ fn agent_allowlist_edits_gate_on_widening() {
     );
 }
 
-fn fabricate_denied_request(dir: &TempDir, id: &str) {
-    let requests_dir = dir.path().join("signet/agent-requests/claude");
+fn fabricate_denied_request(dir: &TempDir, agent: &str, id: &str) {
+    let requests_dir = dir.path().join("signet/agent-requests").join(agent);
     std::fs::create_dir_all(&requests_dir).unwrap();
     let request = serde_json::json!({
         "format_version": 1,
         "id": id,
         "network": "signet",
-        "agent": "claude",
+        "agent": agent,
         "recipient": common::ADDRESS,
         "amount_sat": 20_000,
         "intent_digest": "d".repeat(64),
@@ -1275,7 +1280,7 @@ fn fabricate_denied_request(dir: &TempDir, id: &str) {
 fn approve_requires_the_password_and_arms_a_single_use_exception() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
-    fabricate_denied_request(&dir, "k-big-1");
+    fabricate_denied_request(&dir, "claude", "k-big-1");
 
     // The wrong password is a hard failure that writes no approval.
     sats(&dir)
@@ -1313,7 +1318,7 @@ fn approve_requires_the_password_and_arms_a_single_use_exception() {
     assert_eq!(request["approval"]["intent_digest"], "d".repeat(64));
 
     // An ambiguous prefix refuses rather than guessing.
-    fabricate_denied_request(&dir, "k-big-2");
+    fabricate_denied_request(&dir, "claude", "k-big-2");
     sats(&dir)
         .args(["agent", "approve", "k-big", "--max-fee", "500"])
         .assert()
@@ -1325,7 +1330,7 @@ fn approve_requires_the_password_and_arms_a_single_use_exception() {
 fn deny_dismisses_and_revokes_the_unconsumed_approval() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
-    fabricate_denied_request(&dir, "k-big-1");
+    fabricate_denied_request(&dir, "claude", "k-big-1");
     sats(&dir)
         .args(["agent", "approve", "k-big-1", "--max-fee", "500"])
         .assert()
