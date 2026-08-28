@@ -1549,6 +1549,77 @@ fn modes_gate_the_send_path_end_to_end() {
     );
 }
 
+/// The standing allowlist: listed recipients are automatic, strangers
+/// ask, an approval executes exactly one send to exactly one stranger,
+/// and nothing — not even that successful send — widens the list.
+#[test]
+fn recipient_allowlist_gates_standing_authority() {
+    use bdk_wallet::bitcoin::Network;
+
+    let dir = TempDir::new().unwrap();
+    let fx = funded_setup(&dir, &["--budget", "100000", "--to", ADDRESS], &[200_000]);
+    let stranger = common::foreign_address(Network::Signet);
+    let mut mcp = McpSession::start(&dir, "claude", &fx.token);
+    handshake(&mut mcp);
+
+    // Listed: automatic within the caps.
+    let sent = mcp.call_tool(
+        2,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 1_000, "request_id": "r-listed" }),
+    );
+    assert_eq!(sent["status"], "sent", "got: {sent}");
+
+    // A stranger asks, with the exact approval command.
+    let params = serde_json::json!({
+        "address": stranger, "amount_sat": 1_000, "request_id": "r-1",
+    });
+    let asked = mcp.call_tool(3, "send", params.clone());
+    assert_eq!(asked["status"], "denied", "got: {asked}");
+    assert_eq!(asked["reason"], "recipient_not_allowed");
+    assert_eq!(asked["approvable"], true);
+    assert!(
+        asked["message"]
+            .as_str()
+            .unwrap()
+            .contains("sats agent approve k-r-1")
+    );
+
+    // The approval executes it once — and does NOT teach the grant the
+    // recipient: the next request to the same stranger asks again.
+    run_sats(&dir, &["agent", "approve", "k-r-1", "--max-fee", "500"]);
+    let sent = mcp.call_tool(4, "send", params);
+    assert_eq!(sent["status"], "sent", "got: {sent}");
+    assert_eq!(sent["via_approval"], true);
+    let again = mcp.call_tool(
+        5,
+        "send",
+        serde_json::json!({ "address": stranger, "amount_sat": 1_000, "request_id": "r-2" }),
+    );
+    assert_eq!(again["reason"], "recipient_not_allowed", "got: {again}");
+
+    // Allowing it (password-gated) makes it automatic; disallowing (no
+    // password) makes it ask again.
+    run_sats(&dir, &["agent", "allow", "claude", &stranger]);
+    let grant = mcp.call_tool(6, "get_grant", serde_json::json!({}));
+    let listed = grant["allowed_recipients"].as_array().unwrap();
+    assert_eq!(listed.len(), 2, "got: {grant}");
+    let auto = mcp.call_tool(
+        7,
+        "send",
+        serde_json::json!({ "address": stranger, "amount_sat": 1_000, "request_id": "r-3" }),
+    );
+    assert_eq!(auto["status"], "sent", "got: {auto}");
+    assert!(auto.get("via_approval").is_none(), "standing authority");
+    run_sats(&dir, &["agent", "disallow", "claude", &stranger]);
+    let asks = mcp.call_tool(
+        8,
+        "send",
+        serde_json::json!({ "address": stranger, "amount_sat": 1_000, "request_id": "r-4" }),
+    );
+    assert_eq!(asks["reason"], "recipient_not_allowed", "got: {asks}");
+}
+
 /// Recorded truth outranks revocation, read-only: after the grant is
 /// gone, a keyed retry of a send that signed still answers with the
 /// recorded txid, and nothing new is written.

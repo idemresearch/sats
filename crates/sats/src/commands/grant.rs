@@ -40,6 +40,31 @@ pub fn run(
             format_sats(max_tx),
         );
     }
+    // Recipients are parsed and network-checked here, at the boundary,
+    // and stored in the canonical spelling the intent digest hashes.
+    // No --to means no allowlist: every recipient, as before.
+    let allowed_recipients = if args.to.is_empty() {
+        None
+    } else {
+        let mut list: Vec<String> = Vec::new();
+        for address in &args.to {
+            let normalized = std::str::FromStr::from_str(address)
+                .map_err(|e| anyhow::anyhow!("invalid --to address: {e}"))
+                .and_then(|a: sats_core::bitcoin::Address<_>| {
+                    a.require_network(network).map_err(|_| {
+                        anyhow::anyhow!(
+                            "--to address {address} is not valid for {}",
+                            network_name(network)
+                        )
+                    })
+                })?
+                .to_string();
+            if !list.contains(&normalized) {
+                list.push(normalized);
+            }
+        }
+        Some(list)
+    };
     // A grant with no fee cap lets one bad fee estimate burn the whole
     // budget as miner fees, so the cap defaults on. Lifting it entirely
     // is `--no-max-fee`, an explicit choice.
@@ -59,6 +84,11 @@ pub fn run(
         ];
         if mode != sats_core::authz::GrantMode::Auto {
             rows.push(("Mode", mode.as_str().to_string()));
+        }
+        if let Some(list) = &allowed_recipients {
+            for recipient in list {
+                rows.push(("To", recipient.clone()));
+            }
         }
         if let Some(max_tx) = args.max_tx {
             rows.push(("Max tx", format!("{} sat", format_sats(max_tx))));
@@ -112,7 +142,7 @@ pub fn run(
         token_hash: issued.token_hash.clone(),
         mode,
         ask_max_tx_sat: args.ask_max_tx,
-        allowed_recipients: None,
+        allowed_recipients,
         suspended: None,
         strikes: Vec::new(),
     };
@@ -131,6 +161,7 @@ pub fn run(
             serde_json::json!({
                 "agent": grant.agent,
                 "mode": grant.mode.as_str(),
+                "allowed_recipients": grant.allowed_recipients,
                 "budget_sat": grant.budget_sat,
                 "max_tx_sat": grant.max_tx_sat,
                 "ask_max_tx_sat": grant.ask_max_tx_sat,

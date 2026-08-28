@@ -266,6 +266,11 @@ pub struct GrantArgs {
     /// send needs a one-time approval), or observe (read-only)
     #[arg(long, default_value = "auto", value_name = "auto|ask|observe")]
     pub mode: String,
+    /// Restrict standing authority to these recipients (repeatable).
+    /// At least one --to makes the allowlist finite: any other recipient
+    /// asks. Without --to, every recipient is allowed, as before
+    #[arg(long = "to", value_name = "ADDRESS")]
+    pub to: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -284,6 +289,20 @@ pub enum AgentCommand {
         /// auto, ask, or observe
         #[arg(value_name = "auto|ask|observe")]
         mode: String,
+    },
+    /// Add a recipient to a grant's allowlist (password required)
+    Allow {
+        /// Agent name
+        name: String,
+        /// Recipient address
+        address: String,
+    },
+    /// Remove a recipient from a grant's allowlist (no password)
+    Disallow {
+        /// Agent name
+        name: String,
+        /// Recipient address
+        address: String,
     },
     /// List active grants
     List,

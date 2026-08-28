@@ -125,6 +125,12 @@ users keep using the terminal unlock command.
 - total budget, including transaction fees;
 - optional per-transaction amount cap, and an optional hard ceiling
   above which a send is never approvable;
+- an optional standing recipient allowlist (`--to`, edited with
+  `sats agent allow`/`disallow`): other recipients become one-time
+  approvable asks. Entries change only through the control plane — never
+  through payment history, successful sends, or approvals, so an agent
+  cannot launder an address into "known" by paying it once inside the
+  automatic band;
 - per-transaction fee cap — defaulted when not given to 2% of the budget,
   at least 1000 sats and never above the budget, so one bad fee estimate
   cannot burn the whole budget as miner fees; only the explicit

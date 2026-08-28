@@ -84,6 +84,15 @@ pub enum EventKind {
         /// Whether the transition widened authority (password-gated).
         widened: bool,
     },
+    /// A human added a recipient to the grant's standing allowlist
+    /// (password-gated: it widens authority).
+    RecipientAllowed {
+        recipient: String,
+    },
+    /// A human removed a recipient from the standing allowlist.
+    RecipientDisallowed {
+        recipient: String,
+    },
 }
 
 impl AgentEvent {
@@ -108,6 +117,8 @@ impl AgentEvent {
             EventKind::Replayed => "replayed",
             EventKind::Conflicted => "conflicted",
             EventKind::ModeChanged { .. } => "mode_changed",
+            EventKind::RecipientAllowed { .. } => "recipient_allowed",
+            EventKind::RecipientDisallowed { .. } => "recipient_disallowed",
         }
     }
 }
@@ -201,6 +212,12 @@ mod tests {
                 from: "auto".into(),
                 to: "observe".into(),
                 widened: false,
+            }),
+            event(EventKind::RecipientAllowed {
+                recipient: "tb1p".into(),
+            }),
+            event(EventKind::RecipientDisallowed {
+                recipient: "tb1p".into(),
             }),
         ];
         for e in kinds {

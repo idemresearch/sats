@@ -32,6 +32,17 @@ pub fn init_wallet(dir: &TempDir) {
         .stdout(predicate::str::contains("wallet created"));
 }
 
+/// A deterministic taproot address that belongs to no test wallet, for
+/// send targets beyond [`ADDRESS`]. Built from a fixed key, so it is
+/// valid on any requested network.
+pub fn foreign_address(network: Network) -> String {
+    use bdk_wallet::bitcoin::secp256k1::{Secp256k1, SecretKey};
+    let secp = Secp256k1::new();
+    let key = SecretKey::from_slice(&[7u8; 32]).unwrap();
+    let (internal, _) = key.public_key(&secp).x_only_public_key();
+    bdk_wallet::bitcoin::Address::p2tr(&secp, internal, None, network).to_string()
+}
+
 /// Point the config at the hermetic mock chain provider (no network).
 /// Returns the mock data directory controlling its behavior.
 pub fn write_mock_provider(dir: &TempDir) -> std::path::PathBuf {

@@ -104,6 +104,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cli::AgentCommand::Mode { name, mode } => {
                 commands::mode::run(&store, network, &name, &mode, json)
             }
+            cli::AgentCommand::Allow { name, address } => {
+                commands::recipients::allow(&store, network, &name, &address, json)
+            }
+            cli::AgentCommand::Disallow { name, address } => {
+                commands::recipients::disallow(&store, network, &name, &address, json)
+            }
             cli::AgentCommand::List => commands::grants::run(&store, network, json),
             cli::AgentCommand::Approve {
                 id,

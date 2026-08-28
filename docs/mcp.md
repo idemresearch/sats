@@ -174,7 +174,10 @@ Returns this server identity's current authority:
 
 When the grant has been revoked or expired, `active` is false, limit and
 accounting fields are omitted, and `message` tells the agent to ask its human
-for a new grant.
+for a new grant. Grants with restrictions carry them here too:
+`ask_max_tx_sat` (the hard ceiling) and `allowed_recipients` (the standing
+allowlist — absent means unrestricted, an empty list means every recipient
+asks).
 
 ### `check_request`
 

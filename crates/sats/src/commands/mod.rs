@@ -12,6 +12,7 @@ pub mod mode;
 pub mod prepare;
 pub mod psbt;
 pub mod receive;
+pub mod recipients;
 pub mod requests;
 pub mod revoke;
 pub mod send;

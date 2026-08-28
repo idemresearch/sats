@@ -1111,6 +1111,144 @@ fn agent_mode_transitions_gate_on_widening() {
     assert_eq!(list.as_array().unwrap()[0]["mode"], "auto");
 }
 
+/// Allowlist edits carry the attenuation rule (allow = password,
+/// disallow = none), normalize at the boundary, and never let history
+/// or approvals change the list.
+#[test]
+fn agent_allowlist_edits_gate_on_widening() {
+    use bdk_wallet::bitcoin::Network;
+
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let stranger = common::foreign_address(Network::Signet);
+
+    // Wrong-network entries are refused at creation, before anything is
+    // written; textual variants normalize and deduplicate.
+    sats(&dir)
+        .args([
+            "agent",
+            "grant",
+            "claude",
+            "--budget",
+            "50000",
+            "--to",
+            "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not valid for signet"));
+    let upper = common::ADDRESS.to_uppercase();
+    let issued = json_stdout(
+        sats(&dir)
+            .args([
+                "--json",
+                "agent",
+                "grant",
+                "claude",
+                "--budget",
+                "50000",
+                "--to",
+                &upper,
+                "--to",
+                common::ADDRESS,
+            ])
+            .assert()
+            .success(),
+    );
+    let listed = issued["allowed_recipients"].as_array().unwrap();
+    assert_eq!(listed.len(), 1, "variants normalize to one entry");
+    assert_eq!(listed[0], common::ADDRESS);
+
+    let allowed_in_file = |dir: &TempDir| {
+        serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(dir.path().join("signet/grants/claude.json")).unwrap(),
+        )
+        .unwrap()["allowed_recipients"]
+            .as_array()
+            .map(|l| l.len())
+    };
+
+    // Widening with the wrong password fails and writes nothing.
+    sats(&dir)
+        .args(["agent", "allow", "claude", &stranger])
+        .env("SATS_PASSWORD", "wrong-password")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("wrong password"));
+    assert_eq!(allowed_in_file(&dir), Some(1));
+
+    // With the right password it lands; re-allowing is a passwordless
+    // no-op.
+    sats(&dir)
+        .args(["agent", "allow", "claude", &stranger])
+        .assert()
+        .success();
+    assert_eq!(allowed_in_file(&dir), Some(2));
+    sats(&dir)
+        .args(["agent", "allow", "claude", &stranger])
+        .env("SATS_PASSWORD", "wrong-password")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already"));
+
+    // Tightening never prompts — wrong password on hand, still fine —
+    // and emptying the list means every recipient asks.
+    sats(&dir)
+        .args(["agent", "disallow", "claude", &stranger])
+        .env("SATS_PASSWORD", "wrong-password")
+        .assert()
+        .success();
+    assert_eq!(allowed_in_file(&dir), Some(1));
+    sats(&dir)
+        .args(["agent", "disallow", "claude", common::ADDRESS])
+        .env("SATS_PASSWORD", "wrong-password")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("every recipient asks"));
+    assert_eq!(allowed_in_file(&dir), Some(0));
+
+    // A grant with no allowlist: allow is an informative no-op, disallow
+    // refuses — an allowlist cannot express "all except".
+    sats(&dir)
+        .args(["agent", "grant", "ghost", "--budget", "1000"])
+        .assert()
+        .success();
+    sats(&dir)
+        .args(["agent", "allow", "ghost", common::ADDRESS])
+        .env("SATS_PASSWORD", "wrong-password")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("already allowed"));
+    sats(&dir)
+        .args(["agent", "disallow", "ghost", common::ADDRESS])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("all except"));
+
+    // Both edits are attributable control-plane events.
+    let log = json_stdout(
+        sats(&dir)
+            .args(["agent", "log", "--json"])
+            .assert()
+            .success(),
+    );
+    let kinds: Vec<&str> = log
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["event"].as_str())
+        .filter(|k| k.starts_with("recipient_"))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "recipient_allowed",
+            "recipient_disallowed",
+            "recipient_disallowed"
+        ]
+    );
+}
+
 fn fabricate_denied_request(dir: &TempDir, id: &str) {
     let requests_dir = dir.path().join("signet/agent-requests/claude");
     std::fs::create_dir_all(&requests_dir).unwrap();

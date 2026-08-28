@@ -138,5 +138,7 @@ fn detail(event: &AgentEvent) -> String {
         EventKind::ModeChanged { from, to, widened } => {
             format!("{from} → {to}{}", if *widened { " (widened)" } else { "" })
         }
+        EventKind::RecipientAllowed { recipient } => format!("+ {recipient}"),
+        EventKind::RecipientDisallowed { recipient } => format!("- {recipient}"),
     }
 }

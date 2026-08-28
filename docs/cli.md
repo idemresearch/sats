@@ -81,6 +81,8 @@ hold the explicit advanced workflows.
 | `sats agent grant <name>` | Create bounded unattended signing authority |
 | `sats agent revoke <name>` | Delete an agent grant immediately |
 | `sats agent mode <name> <mode>` | Switch auto/ask/observe; widening needs the password |
+| `sats agent allow <name> <addr>` | Add an allowlist recipient (password required) |
+| `sats agent disallow <name> <addr>` | Remove an allowlist recipient (no password) |
 | `sats agent list` | List non-expired grants and remaining budgets |
 | `sats agent requests [--all\|--watch]` | Review agent send requests; `--watch` streams newly pending asks |
 | `sats agent approve <id>` | Authorize one denied request exactly once (password required) |
@@ -266,9 +268,11 @@ Human commands never use the daemon. `sats send`, `sats psbt sign`, and
 
 ```sh
 sats agent grant <name> --budget <SATS> [--for <DURATION>] \
-  [--mode auto|ask|observe] \
+  [--mode auto|ask|observe] [--to <ADDRESS>]... \
   [--max-tx <SATS>] [--ask-max-tx <SATS>] [--max-fee <SATS> | --no-max-fee]
 sats agent mode <name> <auto|ask|observe>
+sats agent allow <name> <ADDRESS>
+sats agent disallow <name> <ADDRESS>
 ```
 
 `--for` defaults to `24h` and accepts human-readable durations such as `30m`,
@@ -297,6 +301,21 @@ carries the attenuation rule mechanically: tightening authority
 (`auto→ask→observe`) never asks for the password — reducing what an agent
 may do stays cheap — while widening requires it, exactly like issuing the
 grant did. Every transition lands in the event log with its direction.
+
+Repeatable `--to` gives the grant a standing recipient allowlist. Each
+address is parsed and network-checked at the boundary and stored in the
+same normalized spelling the intent digest hashes. With a finite list,
+sends to listed recipients are automatic within the caps; any other
+recipient is the approvable denial `recipient_not_allowed`, and the
+one-time approval it invites authorizes exactly that recipient and
+amount, once — it never widens the standing list, and neither does
+payment history: an agent cannot launder an address into "known" by
+paying it. Without `--to` every recipient is allowed, as before.
+`sats agent allow` adds an entry (widening — password required);
+`sats agent disallow` removes one (no password), and emptying the list
+means every recipient asks. A grant without an allowlist refuses
+`disallow` outright: a list cannot express "everything except one
+address" — re-issue the grant with `--to` to restrict it.
 
 The two amount caps split sends into three bands. Up to `--max-tx` a send
 is automatic. Above it, the send is denied but the denial is approvable:
