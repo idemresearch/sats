@@ -762,6 +762,11 @@ fn agent_log_renders_events_and_filters_by_request() {
                 "deny": { "reason": "over_max_tx", "requested_sat": 20_000, "max_tx_sat": 10_000 } }),
         ),
         line("r-aa00bb11", serde_json::json!({ "event": "replayed" })),
+        // A kind from a future sats: shown raw, never hidden or fatal.
+        line(
+            "k-future-1",
+            serde_json::json!({ "event": "quantum_settled", "detail": 42 }),
+        ),
         // A torn tail line, as a crash mid-append would leave.
         "{\"format_version\":1,\"at\":1".to_string(),
     ]
@@ -786,9 +791,12 @@ fn agent_log_renders_events_and_filters_by_request() {
             .args(["agent", "log", "--json"])
             .assert()
             .success()
-            .stderr(predicate::str::contains("skipping unreadable event")),
+            .stderr(predicate::str::contains("event log line that is not JSON")),
     );
-    assert_eq!(events.as_array().unwrap().len(), 3);
+    let events = events.as_array().unwrap();
+    assert_eq!(events.len(), 4, "the unknown kind is reported, raw");
+    assert_eq!(events[3]["event"], "quantum_settled");
+    assert_eq!(events[3]["detail"], 42);
 
     let filtered = json_stdout(
         sats(&dir)
@@ -800,14 +808,19 @@ fn agent_log_renders_events_and_filters_by_request() {
     assert_eq!(filtered.len(), 2);
     assert!(filtered.iter().all(|e| e["request_id"] == "k-big-1"));
 
-    // Human render: one line per event with the typed denial code.
+    // Human render: one line per event with the typed denial code, the
+    // future kind shown raw with a warning, and no abort.
     sats(&dir)
         .args(["agent", "log"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("over_max_tx at precheck"));
+        .stdout(predicate::str::contains("over_max_tx at precheck"))
+        .stdout(predicate::str::contains("quantum_settled"))
+        .stdout(predicate::str::contains("unknown to this sats"))
+        .stdout(predicate::str::contains("written by a newer sats"));
 
-    // --limit keeps the newest events.
+    // --limit keeps the newest events — unknown lines count like any
+    // other, because hiding them would misstate what happened last.
     let limited = json_stdout(
         sats(&dir)
             .args(["agent", "log", "--limit", "1", "--json"])
@@ -815,7 +828,7 @@ fn agent_log_renders_events_and_filters_by_request() {
             .success(),
     );
     assert_eq!(limited.as_array().unwrap().len(), 1);
-    assert_eq!(limited.as_array().unwrap()[0]["event"], "replayed");
+    assert_eq!(limited.as_array().unwrap()[0]["event"], "quantum_settled");
 }
 
 fn fabricate_denied_request(dir: &TempDir, id: &str) {

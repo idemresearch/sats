@@ -185,6 +185,11 @@ fn denied_fee(outcome: &Option<RequestOutcome>, amount_sat: u64) -> Option<u64> 
         DenyReason::OverMaxTx { .. }
         | DenyReason::Expired { .. }
         | DenyReason::IntentNotGranted { .. }
-        | DenyReason::AmountOverflow { .. } => None,
+        | DenyReason::AmountOverflow { .. }
+        | DenyReason::AskRequired
+        | DenyReason::OverAskMax { .. }
+        | DenyReason::ObserveOnly
+        | DenyReason::Suspended { .. }
+        | DenyReason::RecipientNotAllowed { .. } => None,
     }
 }

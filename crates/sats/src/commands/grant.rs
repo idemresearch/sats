@@ -88,6 +88,11 @@ pub fn run(
         tx_count: 0,
         token_id: issued.token_id.clone(),
         token_hash: issued.token_hash.clone(),
+        mode: Default::default(),
+        ask_max_tx_sat: None,
+        allowed_recipients: None,
+        suspended: None,
+        strikes: Vec::new(),
     };
     // Under the grant lock so an in-flight agent send cannot interleave
     // its budget write with this replacement.

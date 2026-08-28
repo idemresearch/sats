@@ -28,6 +28,16 @@ pub fn now_checked() -> Result<u64> {
         .context("system clock is before the unix epoch — refusing to authorize")
 }
 
+/// One line of the append-only event log, read tolerantly. `Unknown`
+/// carries a syntactically valid line whose event kind or format version
+/// this build cannot interpret — written by a newer sats — so audit
+/// views can show it raw instead of hiding it.
+#[derive(Debug, Clone)]
+pub enum EventLine {
+    Event(AgentEvent),
+    Unknown(serde_json::Value),
+}
+
 /// Record timestamps only (`created_at`, `resolved_at`, journal lines).
 /// Never use this for an authorization decision — expiry checked against
 /// its 0 fallback fails open. Decisions take [`now_checked`].
@@ -351,6 +361,18 @@ impl Store {
         }
         let grant: Grant = serde_json::from_value(value)
             .with_context(|| format!("corrupt grant {}", path.display()))?;
+        // Fail closed on records from the future: a newer sats may have
+        // written restrictive fields this build cannot see, and ignoring
+        // them would widen the agent's authority, never narrow it.
+        if grant.format_version > sats_core::authz::GRANT_FORMAT_VERSION {
+            bail!(
+                "grant for {agent:?} was written by a newer sats (format v{}, this build reads \
+                 up to v{}) — upgrade sats, or re-issue it with: sats agent grant {agent} \
+                 --budget <sats>",
+                grant.format_version,
+                sats_core::authz::GRANT_FORMAT_VERSION,
+            );
+        }
         if grant.network != network {
             bail!(
                 "grant network {} does not match {network} — a grant authorizes only the \
@@ -621,24 +643,32 @@ impl Store {
 
     /// The event log in append order. A torn or unreadable line — a crash
     /// can leave one at the tail — is skipped with a warning.
-    pub fn list_events(&self, network: &str) -> Result<Vec<AgentEvent>> {
+    /// Every line of the event log, read tolerantly: a newer sats may
+    /// have appended kinds or versions this build does not know, and the
+    /// audit view must show them raw rather than hide or abort on them.
+    /// Only a line that is not JSON at all is skipped, with a warning.
+    pub fn list_event_lines(&self, network: &str) -> Result<Vec<EventLine>> {
         let path = self.events_dir(network).join("log.jsonl");
         if !path.exists() {
             return Ok(Vec::new());
         }
         let contents =
             fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-        let mut events = Vec::new();
+        let mut lines = Vec::new();
         for line in contents.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<AgentEvent>(line) {
-                Ok(event) if event.version_supported() => events.push(event),
-                _ => eprintln!("⚠ skipping unreadable event log line"),
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                eprintln!("⚠ skipping an event log line that is not JSON");
+                continue;
+            };
+            match serde_json::from_value::<AgentEvent>(value.clone()) {
+                Ok(event) if event.version_supported() => lines.push(EventLine::Event(event)),
+                _ => lines.push(EventLine::Unknown(value)),
             }
         }
-        Ok(events)
+        Ok(lines)
     }
 
     /// Append one event to the network's causal log: single line of JSON,
@@ -906,6 +936,11 @@ mod tests {
             tx_count: 0,
             token_id: token.token_id,
             token_hash: token.token_hash,
+            mode: Default::default(),
+            ask_max_tx_sat: None,
+            allowed_recipients: None,
+            suspended: None,
+            strikes: Vec::new(),
         }
     }
 
@@ -935,6 +970,82 @@ mod tests {
         assert!(store.load_grant("signet", "claude").unwrap().is_some());
         // (only the mainnet copy remains under mainnet, still refused)
         assert!(store.load_grant("mainnet", "claude").is_err());
+    }
+
+    /// Version discipline both ways: a v2 record (no v3 fields) loads
+    /// with default semantics, and a record from the future is refused —
+    /// it may carry restrictions this build cannot see, and ignoring
+    /// them would widen authority.
+    #[test]
+    fn load_grant_reads_v2_and_refuses_newer_versions() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        store.save_grant("signet", &grant("signet")).unwrap();
+        let path = store.grants_dir("signet").join("claude.json");
+
+        // Strip the file down to its v2 shape.
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.insert("format_version".into(), serde_json::json!(2));
+        object.remove("mode");
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let loaded = store.load_grant("signet", "claude").unwrap().unwrap();
+        assert_eq!(loaded.format_version, 2);
+        assert_eq!(loaded.mode, sats_core::authz::GrantMode::Auto);
+        assert_eq!(loaded.ask_max_tx_sat, None);
+        assert!(loaded.suspended.is_none());
+
+        // The future is refused, not partially honored.
+        value.as_object_mut().unwrap().insert(
+            "format_version".into(),
+            serde_json::json!(sats_core::authz::GRANT_FORMAT_VERSION + 1),
+        );
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        let err = store.load_grant("signet", "claude").unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("newer sats"),
+            "future grant must be refused, got: {message}"
+        );
+    }
+
+    /// The audit view survives the future: a line whose kind this build
+    /// does not know is returned raw, never hidden and never fatal.
+    #[test]
+    fn event_lines_tolerate_unknown_kinds() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let event = sats_core::event::AgentEvent {
+            format_version: sats_core::event::EVENT_FORMAT_VERSION,
+            at: 1,
+            network: "signet".into(),
+            agent: "claude".into(),
+            request_id: "k-job-1".into(),
+            intent_digest: "d".repeat(64),
+            kind: sats_core::event::EventKind::Replayed,
+        };
+        store.append_event("signet", &event).unwrap();
+        let log = store.events_dir("signet").join("log.jsonl");
+        let mut contents = fs::read_to_string(&log).unwrap();
+        contents.push_str(
+            "{\"at\":2,\"network\":\"signet\",\"agent\":\"claude\",\
+             \"request_id\":\"k-job-2\",\"intent_digest\":\"d\",\
+             \"event\":\"quantum_settled\",\"detail\":42}\n",
+        );
+        contents.push_str("not json at all\n");
+        fs::write(&log, contents).unwrap();
+
+        let lines = store.list_event_lines("signet").unwrap();
+        assert_eq!(lines.len(), 2, "the non-JSON line is skipped");
+        assert!(matches!(&lines[0], EventLine::Event(e) if e.request_id == "k-job-1"));
+        match &lines[1] {
+            EventLine::Unknown(value) => {
+                assert_eq!(value["event"], "quantum_settled");
+                assert_eq!(value["request_id"], "k-job-2");
+            }
+            other => panic!("expected the unknown kind raw, got {other:?}"),
+        }
     }
 
     #[test]

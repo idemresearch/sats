@@ -377,6 +377,11 @@ impl Sim {
             tx_count: 0,
             token_id: issued.token_id.clone(),
             token_hash: issued.token_hash.clone(),
+            mode: Default::default(),
+            ask_max_tx_sat: None,
+            allowed_recipients: None,
+            suspended: None,
+            strikes: Vec::new(),
         };
         let out = json!({
             "agent": grant.agent,
@@ -443,7 +448,7 @@ impl Sim {
             fee_sat: plan.fee_sat,
         };
         let grant = self.grants.get_mut(agent).expect("checked above");
-        if let Err(reason) = grant.reserve(&req, now) {
+        if let Err(reason) = grant.reserve_send(recipient, &req, "", None, now) {
             // The CLI's detail lines are column-aligned; joined onto one
             // line the padding is noise, so collapse runs of spaces.
             let detail = reason
