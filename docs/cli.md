@@ -517,9 +517,6 @@ network = "mainnet"
 driver = "subfrost"
 network = "mainnet"
 url = "https://mainnet.subfrost.io/v4/jsonrpc"
-capabilities = ["chain", "guard"]
-
-[providers.subfrost.auth]
 api_key = "replace-with-key"
 ```
 

@@ -26,8 +26,9 @@ reference encoding) and displays view results without trusting them.
 
 Configuration accepts exact names and the aliases `chain` and `guard`.
 `alkanes.view` is deliberately outside the `guard` alias — a view reads
-contracts, a guard protects UTXOs. Without a `capabilities` filter, a
-driver advertises every capability it implements.
+contracts, a guard protects UTXOs. Without a `capabilities` filter, Esplora
+and Subfrost provide chain operations. Subfrost guards and Alkanes views
+require an explicit capability opt-in.
 
 ## Drivers
 
@@ -72,7 +73,8 @@ url = "https://mainnet.subfrost.io/v4/jsonrpc"
 ```
 
 Provider names are local labels. Each entry must declare the one Bitcoin
-network its endpoint serves.
+network its endpoint serves. Subfrost needs no capability list for ordinary
+chain synchronization, fee estimation, and broadcast.
 
 ### Fee policy
 
@@ -151,14 +153,13 @@ Subfrost API keys use the provider's dedicated header:
 driver = "subfrost"
 network = "signet"
 url = "https://signet.subfrost.io/v4/jsonrpc"
-
-[providers.subfrost.auth]
 api_key = "replace-with-key"
 ```
 
 Keep configuration permissions restrictive. Authentication values are never
 displayed. Subfrost URLs are redacted to their origin because older setups may
-carry a key in the path, but new configurations should use `auth.api_key`.
+carry a key in the path, but new configurations should use the provider's
+direct `api_key` field.
 Esplora endpoint URLs may appear in diagnostics, so put credentials in
 `auth.bearer`, never in the URL path or query.
 

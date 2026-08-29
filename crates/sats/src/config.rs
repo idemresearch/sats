@@ -24,7 +24,7 @@ pub struct Config {
     pub providers: BTreeMap<String, ProviderConfig>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
     /// Driver kind: "esplora" | "subfrost".
@@ -34,11 +34,27 @@ pub struct ProviderConfig {
     pub url: String,
     /// Restrict what this provider is used for. Tokens are capability names
     /// ("chain.sync", "guard.ord", ...) or the group aliases "chain" and
-    /// "guard". Absent = everything the driver offers.
+    /// "guard". Absent uses the driver's conservative default capabilities.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
+    /// Subfrost API key, sent only as `x-subfrost-api-key`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthConfig>,
+}
+
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderConfig")
+            .field("driver", &self.driver)
+            .field("network", &self.network)
+            .field("url", &self.url)
+            .field("capabilities", &self.capabilities)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("auth", &self.auth)
+            .finish()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -47,16 +63,12 @@ pub struct AuthConfig {
     /// Sent as `Authorization: Bearer <token>` on Esplora providers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer: Option<String>,
-    /// Sent as `x-subfrost-api-key` on Subfrost JSON-RPC requests.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
 }
 
 impl std::fmt::Debug for AuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthConfig")
             .field("bearer", &self.bearer.as_ref().map(|_| "[REDACTED]"))
-            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
 }
@@ -171,11 +183,52 @@ mod tests {
     fn authentication_debug_output_is_redacted() {
         let auth = AuthConfig {
             bearer: Some("bearer-secret".into()),
-            api_key: Some("subfrost-secret".into()),
         };
         let debug = format!("{auth:?}");
         assert!(!debug.contains("bearer-secret"));
+        assert_eq!(debug.matches("[REDACTED]").count(), 1);
+
+        let provider = ProviderConfig {
+            driver: "subfrost".into(),
+            network: "signet".into(),
+            url: "https://signet.subfrost.io/v4/jsonrpc".into(),
+            capabilities: None,
+            api_key: Some("subfrost-secret".into()),
+            auth: None,
+        };
+        let debug = format!("{provider:?}");
         assert!(!debug.contains("subfrost-secret"));
-        assert_eq!(debug.matches("[REDACTED]").count(), 2);
+        assert_eq!(debug.matches("[REDACTED]").count(), 1);
+    }
+
+    #[test]
+    fn subfrost_api_key_is_a_direct_provider_field() {
+        let direct = r#"
+network = "signet"
+
+[providers.subfrost]
+driver = "subfrost"
+network = "signet"
+url = "https://signet.subfrost.io/v4/jsonrpc"
+api_key = "secret"
+"#;
+        let config: Config = toml::from_str(direct).unwrap();
+        assert_eq!(
+            config.providers["subfrost"].api_key.as_deref(),
+            Some("secret")
+        );
+
+        let nested = r#"
+network = "signet"
+
+[providers.subfrost]
+driver = "subfrost"
+network = "signet"
+url = "https://signet.subfrost.io/v4/jsonrpc"
+
+[providers.subfrost.auth]
+api_key = "secret"
+"#;
+        assert!(toml::from_str::<Config>(nested).is_err());
     }
 }

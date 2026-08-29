@@ -115,7 +115,7 @@ impl DriverKind {
     }
 
     /// The audited capability table: what each driver can do at most.
-    fn default_caps(self) -> &'static [Capability] {
+    fn supported_caps(self) -> &'static [Capability] {
         match self {
             DriverKind::Esplora => &[
                 Capability::ChainSync,
@@ -137,6 +137,20 @@ impl DriverKind {
                 Capability::GuardNative,
                 Capability::AlkanesView,
             ],
+        }
+    }
+
+    /// Capabilities enabled when configuration omits an explicit filter.
+    /// Subfrost is a chain provider by default; indexed protocol behavior is
+    /// opt-in even though the driver implements it.
+    fn default_caps(self) -> &'static [Capability] {
+        match self {
+            DriverKind::Subfrost => &[
+                Capability::ChainSync,
+                Capability::ChainFees,
+                Capability::ChainBroadcast,
+            ],
+            _ => self.supported_caps(),
         }
     }
 }
@@ -242,7 +256,7 @@ pub fn resolve(
         cli.iter()
             .map(|p| {
                 let name = format!("cli:{}", driver_name(p.kind));
-                build_spec(&name, p.kind, &p.url, None, None)
+                build_spec(&name, p.kind, &p.url, None, None, None)
             })
             .collect::<Result<_, _>>()?
     } else {
@@ -267,6 +281,7 @@ pub fn resolve(
                     kind,
                     &p.url,
                     p.capabilities.as_deref(),
+                    p.api_key.as_deref(),
                     p.auth.as_ref(),
                 )
             })
@@ -369,13 +384,20 @@ fn build_spec(
     kind: DriverKind,
     url: &str,
     cap_filter: Option<&[String]>,
+    api_key: Option<&str>,
     auth: Option<&crate::config::AuthConfig>,
 ) -> Result<ProviderSpec, ProviderError> {
     let bad = |reason: String| ProviderError::BadConfig {
         name: name.to_string(),
         reason,
     };
-    let mut caps: BTreeSet<Capability> = kind.default_caps().iter().copied().collect();
+    let mut caps: BTreeSet<Capability> = match cap_filter {
+        Some(_) => kind.supported_caps(),
+        None => kind.default_caps(),
+    }
+    .iter()
+    .copied()
+    .collect();
     if let Some(filter) = cap_filter {
         let mut wanted = BTreeSet::new();
         for token in filter {
@@ -392,7 +414,7 @@ fn build_spec(
     }
     let driver = match kind {
         DriverKind::Esplora => {
-            if auth.and_then(|a| a.api_key.as_ref()).is_some() {
+            if api_key.is_some() {
                 return Err(bad(
                     "api_key authentication is only valid for subfrost".into()
                 ));
@@ -404,17 +426,21 @@ fn build_spec(
             ))
         }
         DriverKind::Subfrost => {
-            if auth.and_then(|a| a.bearer.as_ref()).is_some() {
-                return Err(bad("bearer authentication is only valid for esplora".into()));
+            if auth.is_some() {
+                return Err(bad(
+                    "auth configuration is only valid for esplora; put api_key directly under the subfrost provider".into(),
+                ));
             }
-            let api_key = auth.and_then(|a| a.api_key.clone());
-            if api_key.as_ref().is_some_and(|key| key.trim().is_empty()) {
+            if api_key.is_some_and(|key| key.trim().is_empty()) {
                 return Err(bad("subfrost api_key must not be empty".into()));
             }
-            Driver::Subfrost(SubfrostClient::new(url.to_string(), api_key))
+            Driver::Subfrost(SubfrostClient::new(
+                url.to_string(),
+                api_key.map(str::to_owned),
+            ))
         }
         DriverKind::Mock => {
-            if auth.is_some() {
+            if api_key.is_some() || auth.is_some() {
                 return Err(bad("authentication is not valid for mock providers".into()));
             }
             Driver::Mock(MockProvider::new(url).map_err(bad)?)
@@ -454,6 +480,7 @@ fn legacy_or_default_esplora(
         name,
         DriverKind::Esplora,
         &url,
+        None,
         None,
         None,
     )?))
@@ -656,6 +683,7 @@ mod tests {
             network: network.into(),
             url: url.into(),
             capabilities: caps.map(|c| c.into_iter().map(String::from).collect()),
+            api_key: None,
             auth: None,
         }
     }
@@ -918,9 +946,9 @@ mod tests {
                 network: "signet".into(),
                 url: "http://a.example".into(),
                 capabilities: None,
+                api_key: None,
                 auth: Some(AuthConfig {
                     bearer: Some("token".into()),
-                    api_key: None,
                 }),
             },
         )]));
@@ -936,13 +964,13 @@ mod tests {
                 network: "signet".into(),
                 url: "http://a.example".into(),
                 capabilities: None,
-                auth: Some(AuthConfig {
-                    bearer: None,
-                    api_key: Some("secret".into()),
-                }),
+                api_key: Some("secret".into()),
+                auth: None,
             },
         )]));
         let services = resolve(&config, &[], Network::Signet).unwrap();
+        assert!(!services.has_guards());
+        assert!(services.alkanes.is_none());
         match services.sync.unwrap() {
             ChainSource::Subfrost(client) => {
                 assert!(!format!("{client:?}").contains("secret"));
@@ -961,13 +989,27 @@ mod tests {
             "subfrost".into(),
             provider("subfrost", "signet", "http://a.example", None),
         )]));
-        empty_key.providers.get_mut("subfrost").unwrap().auth = Some(AuthConfig {
-            bearer: None,
-            api_key: Some("  ".into()),
-        });
+        empty_key.providers.get_mut("subfrost").unwrap().api_key = Some("  ".into());
         assert!(matches!(
             resolve(&empty_key, &[], Network::Signet),
             Err(ProviderError::BadConfig { .. })
         ));
+    }
+
+    #[test]
+    fn subfrost_indexed_capabilities_require_explicit_opt_in() {
+        let config = config_with(BTreeMap::from([(
+            "subfrost".into(),
+            provider(
+                "subfrost",
+                "signet",
+                "http://a.example",
+                Some(vec!["guard", "alkanes.view"]),
+            ),
+        )]));
+        let services = resolve(&config, &[], Network::Signet).unwrap();
+        assert!(services.has_guards());
+        assert!(services.alkanes.is_some());
+        assert!(matches!(services.sync, Some(ChainSource::Esplora(_))));
     }
 }
