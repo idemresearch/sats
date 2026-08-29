@@ -97,18 +97,18 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cli::DaemonCommand::Stop => commands::daemon::stop(&store, network, json),
         },
         Command::Agent { command } => match command {
-            cli::AgentCommand::Grant {
-                name,
-                budget,
-                duration,
-                max_tx,
-                max_fee,
-                no_max_fee,
-            } => commands::grant::run(
-                &store, network, &name, budget, &duration, max_tx, max_fee, no_max_fee, json,
-            ),
+            cli::AgentCommand::Grant(args) => commands::grant::run(&store, network, &args, json),
             cli::AgentCommand::Revoke { name } => {
                 commands::revoke::run(&store, network, &name, json)
+            }
+            cli::AgentCommand::Mode { name, mode } => {
+                commands::mode::run(&store, network, &name, &mode, json)
+            }
+            cli::AgentCommand::Allow { name, address } => {
+                commands::recipients::allow(&store, network, &name, &address, json)
+            }
+            cli::AgentCommand::Disallow { name, address } => {
+                commands::recipients::disallow(&store, network, &name, &address, json)
             }
             cli::AgentCommand::List => commands::grants::run(&store, network, json),
             cli::AgentCommand::Approve {
@@ -117,8 +117,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 duration,
             } => commands::approve::run(&store, network, &id, max_fee, &duration, json),
             cli::AgentCommand::Deny { id } => commands::deny::run(&store, network, &id, json),
-            cli::AgentCommand::Requests { all } => {
-                commands::requests::run(&store, network, all, json)
+            cli::AgentCommand::Requests { all, watch } => {
+                commands::requests::run(&store, network, all, watch, json)
             }
             cli::AgentCommand::Log { limit, request } => {
                 commands::agent_log::run(&store, network, limit, request.as_deref(), json)

@@ -2,11 +2,13 @@
 //! esplora-style chain queries with ord and alkanes indexer queries
 //! (sandshrew-compatible namespacing).
 //!
-//! The URL may carry an API key in its path
-//! (`https://mainnet.subfrost.io/v4/<KEY>/jsonrpc`), so it is a secret:
-//! every error and log line uses the redacted origin-only form.
+//! API keys travel in `x-subfrost-api-key`. Legacy URLs may still carry a
+//! key in their path, so every error and log line uses the redacted
+//! origin-only form.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::thread;
+use std::time::Duration;
 
 use bdk_esplora::esplora_client::api::{BlockInfo, OutputStatus, Tx, TxStatus, Vin};
 use bdk_wallet::KeychainKind;
@@ -25,17 +27,22 @@ use super::error::{ProviderError, redact_url};
 /// Consecutive unused script pubkeys before a full scan stops — matches the
 /// esplora driver.
 const STOP_GAP: usize = 20;
+/// Safe JSON-RPC reads get one bounded retry when the provider tells us the
+/// rate-limit window will reopen. Broadcast is never retried here.
+const MAX_RATE_LIMIT_RETRIES: usize = 1;
+const MAX_RETRY_AFTER_SECS: u64 = 60;
 
 /// The wire dialect: sandshrew-compatible namespaced methods, where
 /// `esplora_*` mirrors the Esplora REST paths.
 ///
-/// TODO(subfrost-dialect): confirm every method name and result shape
-/// against a live endpoint (the docs sites are unreachable from this
-/// development environment). The dialect is deliberately confined to this
-/// table and the `parse_*` helpers below so corrections stay local.
+/// The dialect is deliberately confined to this table and the `parse_*`
+/// helpers so each method can be checked against its published contract and
+/// live endpoint without spreading provider shapes through the application.
 mod dialect {
     pub const FEE_ESTIMATES: &str = "esplora_fee-estimates";
-    pub const BROADCAST: &str = "esplora_broadcast";
+    /// Subfrost documents broadcast through its Bitcoin Core passthrough.
+    /// `esplora_broadcast` is not a supported route on the public gateway.
+    pub const BROADCAST: &str = "btc_sendrawtransaction";
     pub const ORD_OUTPUT: &str = "ord_output";
     pub const ALKANES_BY_OUTPOINT: &str = "alkanes_protorunesbyoutpoint";
     /// Contract bytecode by alkane id. Params: one `{block, tx}` object
@@ -64,6 +71,7 @@ mod dialect {
 pub struct SubfrostClient {
     url: String,
     display_url: String,
+    api_key: Option<String>,
 }
 
 /// Manual Debug: the path key must never reach a log line.
@@ -76,9 +84,13 @@ impl std::fmt::Debug for SubfrostClient {
 }
 
 impl SubfrostClient {
-    pub fn new(url: String) -> Self {
+    pub fn new(url: String, api_key: Option<String>) -> Self {
         let display_url = redact_url(&url);
-        SubfrostClient { url, display_url }
+        SubfrostClient {
+            url,
+            display_url,
+            api_key,
+        }
     }
 
     pub fn display_url(&self) -> &str {
@@ -88,13 +100,32 @@ impl SubfrostClient {
     /// Scrub the full URL (which may carry a path key) out of transport
     /// error text before it can reach a user-visible string.
     fn scrub(&self, text: &str) -> String {
-        text.replace(&self.url, &self.display_url)
+        let scrubbed = text.replace(&self.url, &self.display_url);
+        match &self.api_key {
+            Some(api_key) => scrubbed.replace(api_key, "[REDACTED]"),
+            None => scrubbed,
+        }
     }
 
-    fn call<T: DeserializeOwned>(
+    fn request(&self, body: &serde_json::Value) -> Result<minreq::Response, String> {
+        let mut request = minreq::post(&self.url)
+            .with_timeout(super::HTTP_TIMEOUT_SECS)
+            .with_header("Content-Type", "application/json");
+        if let Some(api_key) = &self.api_key {
+            request = request.with_header("x-subfrost-api-key", api_key);
+        }
+        request
+            .with_json(body)
+            .map_err(|e| self.scrub(&e.to_string()))?
+            .send()
+            .map_err(|e| self.scrub(&e.to_string()))
+    }
+
+    fn call_inner<T: DeserializeOwned>(
         &self,
         method: &str,
         params: serde_json::Value,
+        retry_rate_limit: bool,
     ) -> Result<T, String> {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -102,18 +133,35 @@ impl SubfrostClient {
             "method": method,
             "params": params,
         });
-        let response = minreq::post(&self.url)
-            .with_timeout(super::HTTP_TIMEOUT_SECS)
-            .with_header("Content-Type", "application/json")
-            .with_json(&body)
-            .map_err(|e| self.scrub(&e.to_string()))?
-            .send()
-            .map_err(|e| self.scrub(&e.to_string()))?;
-        if !(200..300).contains(&response.status_code) {
-            return Err(format!("http {}", response.status_code));
+        for attempt in 0..=MAX_RATE_LIMIT_RETRIES {
+            let response = self.request(&body)?;
+            if response.status_code == 429 && retry_rate_limit && attempt < MAX_RATE_LIMIT_RETRIES {
+                thread::sleep(Duration::from_secs(retry_after_secs(&response, attempt)));
+                continue;
+            }
+            if !(200..300).contains(&response.status_code) {
+                return Err(http_status_error(&response));
+            }
+            let text = response.as_str().map_err(|e| self.scrub(&e.to_string()))?;
+            return parse_jsonrpc(text);
         }
-        let text = response.as_str().map_err(|e| self.scrub(&e.to_string()))?;
-        parse_jsonrpc(text)
+        unreachable!("bounded JSON-RPC attempt loop always returns")
+    }
+
+    fn call<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String> {
+        self.call_inner(method, params, true)
+    }
+
+    fn call_once<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String> {
+        self.call_inner(method, params, false)
     }
 
     pub fn fee_estimates(&self) -> Result<HashMap<u16, f64>, ProviderError> {
@@ -128,7 +176,7 @@ impl SubfrostClient {
         let hex = hex::encode(consensus::encode::serialize(tx));
         let txid = tx.compute_txid();
         let echoed: String = self
-            .call(dialect::BROADCAST, serde_json::json!([hex]))
+            .call_once(dialect::BROADCAST, serde_json::json!([hex]))
             .map_err(|message| ProviderError::Broadcast {
                 url: self.display_url.clone(),
                 message,
@@ -614,6 +662,32 @@ fn insert_prevouts(
     }
 }
 
+fn retry_after_secs(response: &minreq::Response, attempt: usize) -> u64 {
+    response
+        .headers
+        .get("retry-after")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        // Subfrost's free bucket resets per minute. Without a header, a
+        // short exponential retry just spends the only retry inside the
+        // same closed window.
+        .unwrap_or_else(|| MAX_RETRY_AFTER_SECS >> attempt.min(5))
+        .min(MAX_RETRY_AFTER_SECS)
+}
+
+fn http_status_error(response: &minreq::Response) -> String {
+    if response.status_code == 429 {
+        let retry = response
+            .headers
+            .get("retry-after")
+            .and_then(|value| value.trim().parse::<u64>().ok());
+        return match retry {
+            Some(seconds) => format!("http 429 (rate limited; retry after {seconds}s)"),
+            None => "http 429 (rate limited)".into(),
+        };
+    }
+    format!("http {}", response.status_code)
+}
+
 /// Unwrap a JSON-RPC 2.0 envelope. A JSON-RPC error is an error string;
 /// a missing result is too.
 fn parse_jsonrpc<T: DeserializeOwned>(body: &str) -> Result<T, String> {
@@ -683,7 +757,58 @@ fn parse_bytecode_result(value: &serde_json::Value) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
     use super::*;
+
+    fn response(status: &str, headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn local_server(responses: Vec<String>) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, received) = mpsc::channel();
+        thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    let read = stream.read(&mut buf).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..read]);
+                    let Some(headers_end) = request.windows(4).position(|w| w == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..headers_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= headers_end + 4 + content_length {
+                        break;
+                    }
+                }
+                sent.send(String::from_utf8(request).unwrap()).unwrap();
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (format!("http://{address}"), received)
+    }
 
     #[test]
     fn jsonrpc_result_unwraps() {
@@ -707,6 +832,55 @@ mod tests {
         let ok: String =
             parse_jsonrpc(r#"{"jsonrpc":"2.0","id":0,"error":null,"result":"abc"}"#).unwrap();
         assert_eq!(ok, "abc");
+    }
+
+    #[test]
+    fn authenticated_reads_retry_one_rate_limit_without_exposing_the_key() {
+        let body = r#"{"jsonrpc":"2.0","id":0,"result":{"2":3.5}}"#;
+        let (url, requests) = local_server(vec![
+            response("429 Too Many Requests", "Retry-After: 0\r\n", ""),
+            response("200 OK", "", body),
+        ]);
+        let client = SubfrostClient::new(url, Some("header-secret".into()));
+
+        let estimates = client.fee_estimates().unwrap();
+        assert_eq!(estimates.get(&2), Some(&3.5));
+        for _ in 0..2 {
+            let request = requests.recv().unwrap();
+            assert!(request.contains("x-subfrost-api-key: header-secret"));
+        }
+        assert!(!format!("{client:?}").contains("header-secret"));
+    }
+
+    #[test]
+    fn broadcast_uses_bitcoin_core_passthrough_and_requires_the_txid() {
+        use sats_core::bitcoin::{absolute, transaction};
+
+        let tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+        let txid = tx.compute_txid();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": txid.to_string(),
+        })
+        .to_string();
+        let (url, requests) = local_server(vec![response("200 OK", "", &body)]);
+        let client = SubfrostClient::new(url, None);
+
+        assert_eq!(client.broadcast(&tx).unwrap(), txid);
+        let request = requests.recv().unwrap();
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        let request: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(request["method"], "btc_sendrawtransaction");
+        assert_eq!(
+            request["params"][0],
+            hex::encode(consensus::encode::serialize(&tx))
+        );
     }
 
     #[test]
@@ -743,12 +917,18 @@ mod tests {
 
     #[test]
     fn secrets_never_appear_in_errors() {
-        let client = SubfrostClient::new("https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc".into());
+        let client = SubfrostClient::new(
+            "https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc".into(),
+            Some("HEADERSECRET".into()),
+        );
         assert_eq!(client.display_url(), "https://mainnet.subfrost.io");
         assert!(!format!("{client:?}").contains("SECRETKEY"));
-        let scrubbed = client
-            .scrub("error connecting to https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc: refused");
+        assert!(!format!("{client:?}").contains("HEADERSECRET"));
+        let scrubbed = client.scrub(
+            "error connecting to https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc with HEADERSECRET: refused",
+        );
         assert!(!scrubbed.contains("SECRETKEY"));
+        assert!(!scrubbed.contains("HEADERSECRET"));
         let guard_err = client.guard_err(
             "ord",
             client.scrub("boom at https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc"),

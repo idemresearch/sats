@@ -155,7 +155,7 @@ pub enum AlkanesCommand {
         /// Calldata words (the first is conventionally the opcode)
         #[arg(value_name = "INPUTS")]
         inputs: Vec<u128>,
-        /// Fee rate in sat/vB (default: estimated for ~2 blocks)
+        /// Fee rate in sat/vB (default: estimated for configured target)
         #[arg(long, value_name = "SAT_VB")]
         fee_rate: Option<u64>,
         /// Sats carried by the pointer output the call's assets land on
@@ -207,7 +207,7 @@ pub struct SendArgs {
     /// Amount in sats (shorthand ok: 10k, 1.5m)
     #[arg(value_parser = crate::amount::parse)]
     pub amount: u64,
-    /// Fee rate in sat/vB (default: estimated for ~2 blocks)
+    /// Fee rate in sat/vB (default: estimated for configured target)
     #[arg(long, value_name = "SAT_VB")]
     pub fee_rate: Option<u64>,
     /// Spend UTXOs at inscription postage values (546/330 sats)
@@ -227,43 +227,82 @@ pub struct SendArgs {
     pub export_psbt: Option<PathBuf>,
 }
 
+#[derive(clap::Args)]
+pub struct GrantArgs {
+    /// Agent name (e.g. claude)
+    pub name: String,
+    /// Total budget in sats (amounts + fees draw it down; shorthand ok: 50k)
+    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+    pub budget: u64,
+    /// Grant lifetime (e.g. 24h, 7d)
+    #[arg(
+        long = "for",
+        alias = "expires",
+        default_value = "24h",
+        value_name = "DURATION"
+    )]
+    pub duration: String,
+    /// Per-transaction amount cap in sats: the automatic band. Amounts
+    /// above it are denied, and a human can approve each denial once
+    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+    pub max_tx: Option<u64>,
+    /// Hard per-transaction ceiling in sats: amounts above it are never
+    /// approvable — the only escalation is changing the grant
+    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+    pub ask_max_tx: Option<u64>,
+    /// Per-transaction fee cap in sats
+    /// (default: 2% of the budget, at least 1000, never above the budget)
+    #[arg(
+        long,
+        value_name = "SATS",
+        value_parser = crate::amount::parse,
+        conflicts_with = "no_max_fee"
+    )]
+    pub max_fee: Option<u64>,
+    /// Issue the grant with no per-transaction fee cap at all
+    #[arg(long)]
+    pub no_max_fee: bool,
+    /// Authority mode: auto (sends inside the caps execute), ask (every
+    /// send needs a one-time approval), or observe (read-only)
+    #[arg(long, default_value = "auto", value_name = "auto|ask|observe")]
+    pub mode: String,
+    /// Restrict standing authority to these recipients (repeatable).
+    /// At least one --to makes the allowlist finite: any other recipient
+    /// asks. Without --to, every recipient is allowed, as before
+    #[arg(long = "to", value_name = "ADDRESS")]
+    pub to: Vec<String>,
+}
+
 #[derive(Subcommand)]
 pub enum AgentCommand {
     /// Grant an agent a spending budget
-    Grant {
-        /// Agent name (e.g. claude)
-        name: String,
-        /// Total budget in sats (amounts + fees draw it down; shorthand ok: 50k)
-        #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
-        budget: u64,
-        /// Grant lifetime (e.g. 24h, 7d)
-        #[arg(
-            long = "for",
-            alias = "expires",
-            default_value = "24h",
-            value_name = "DURATION"
-        )]
-        duration: String,
-        /// Per-transaction amount cap in sats
-        #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
-        max_tx: Option<u64>,
-        /// Per-transaction fee cap in sats
-        /// (default: 2% of the budget, at least 1000, never above the budget)
-        #[arg(
-            long,
-            value_name = "SATS",
-            value_parser = crate::amount::parse,
-            conflicts_with = "no_max_fee"
-        )]
-        max_fee: Option<u64>,
-        /// Issue the grant with no per-transaction fee cap at all
-        #[arg(long)]
-        no_max_fee: bool,
-    },
+    Grant(GrantArgs),
     /// Revoke an agent's grant
     Revoke {
         /// Agent name
         name: String,
+    },
+    /// Set an agent's authority mode (widening requires the password)
+    Mode {
+        /// Agent name
+        name: String,
+        /// auto, ask, or observe
+        #[arg(value_name = "auto|ask|observe")]
+        mode: String,
+    },
+    /// Add a recipient to a grant's allowlist (password required)
+    Allow {
+        /// Agent name
+        name: String,
+        /// Recipient address
+        address: String,
+    },
+    /// Remove a recipient from a grant's allowlist (no password)
+    Disallow {
+        /// Agent name
+        name: String,
+        /// Recipient address
+        address: String,
     },
     /// List active grants
     List,
@@ -287,8 +326,13 @@ pub enum AgentCommand {
     /// Review agent send requests (denied ones await a human decision)
     Requests {
         /// Include resolved and dismissed requests, not only pending ones
-        #[arg(long)]
+        #[arg(long, conflicts_with = "watch")]
         all: bool,
+        /// Stay running and print each request as it newly awaits an
+        /// approval — a trusted channel that does not rely on the agent
+        /// relaying its own denials. With --json, a JSONL stream
+        #[arg(long)]
+        watch: bool,
     },
     /// Show the causal log of agent activity, oldest first
     Log {

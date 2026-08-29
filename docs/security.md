@@ -118,8 +118,19 @@ users keep using the terminal unlock command.
 
 `sats agent grant <name>` creates bounded unattended authority with:
 
+- an authority mode — `auto` (sends inside the caps execute), `ask`
+  (every send needs a one-time approval), or `observe` (read-only) —
+  switchable live with `sats agent mode`, where tightening never needs
+  the password and widening always does;
 - total budget, including transaction fees;
-- optional per-transaction amount cap;
+- optional per-transaction amount cap, and an optional hard ceiling
+  above which a send is never approvable;
+- an optional standing recipient allowlist (`--to`, edited with
+  `sats agent allow`/`disallow`): other recipients become one-time
+  approvable asks. Entries change only through the control plane — never
+  through payment history, successful sends, or approvals, so an agent
+  cannot launder an address into "known" by paying it once inside the
+  automatic band;
 - per-transaction fee cap — defaulted when not given to 2% of the budget,
   at least 1000 sats and never above the budget, so one bad fee estimate
   cannot burn the whole budget as miner fees; only the explicit
@@ -158,14 +169,38 @@ other network. Use small budgets and short expiries; revoke when not needed.
 Hardware- or passkey-backed `Signer` implementations can strengthen the
 daemon's own boundary further without changing transaction planning.
 
-### Grant format v1
+### Grant format versions
 
-Releases before the daemon stored the master seed re-sealed under a key in
-the same grant file, so any process that could read it could sign without
-asking. Those records are read well enough to name themselves and are then
-**refused**, with the commands that replace them; honoring one would preserve
-exactly the weakness the daemon removes. `sats agent list` reports them
-rather than showing an empty table.
+The current on-disk grant format is v3. The v3 fields are all restrictive
+and all default to their permissive v2 meaning, so a v2 record deserializes
+to exactly its prior behavior: mode `auto`, no hard amount ceiling, no
+recipient rule, not suspended, no strikes.
+
+- `mode`: `auto`, `ask`, or `observe` — how much standing autonomy the
+  grant carries;
+- `ask_max_tx_sat`: a hard per-transaction ceiling above which a send is
+  never approvable;
+- `allowed_recipients`: a standing recipient allowlist in the digest's
+  normalized spelling (`null` means unrestricted, an empty list means every
+  recipient asks);
+- `suspended`: the STOP state, with its trigger and timestamp;
+- `strikes`: the refusal-storm breaker's bounded, deduplicated bookkeeping.
+
+Loading a grant refuses `format_version` values above what the build
+understands, with an error naming the fix: a newer sats may have written
+restrictions this build cannot see, and ignoring them would widen the
+agent's authority. The honest caveat runs the other way in time: binaries
+older than v3 predate that check and ignore unknown fields, so a v3 grant
+carrying `mode: observe` would be enforced by such a binary as plain
+auto-within-caps. Do not run pre-v3 binaries against a data directory
+holding v3 grants; upgrade every binary that shares the `SATS_DIR`.
+
+Releases before the daemon (v1) stored the master seed re-sealed under a
+key in the same grant file, so any process that could read it could sign
+without asking. Those records are read well enough to name themselves and
+are then **refused**, with the commands that replace them; honoring one
+would preserve exactly the weakness the daemon removes. `sats agent list`
+reports them rather than showing an empty table.
 
 If an agent with shell access ever ran on a machine while a v1 grant existed,
 treat the seed as disclosed: move the funds to a fresh wallet rather than
@@ -173,21 +208,38 @@ only revoking.
 
 ## Authorization order
 
-The authorization engine is deterministic and pure. Checks occur in this
-order:
+The authorization engine is deterministic and pure, and every refusal is
+typed. The ladder has two halves. The **hard envelope** runs first, and
+none of its refusals can be lifted by a one-time approval:
 
 1. expiry;
-2. intent authority (only send is grantable today);
-3. per-transaction amount cap;
-4. per-transaction fee cap;
+2. suspension (STOP);
+3. observe mode;
+4. intent authority (only send is grantable today);
 5. arithmetic sanity — an amount + fee that overflows is the typed denial
-   `amount_overflow`, never a saturated number a budget could pass, and no
-   approval can lift it;
-6. remaining total budget.
+   `amount_overflow`, never a saturated number a budget could pass;
+6. the hard amount ceiling (`over_ask_max`), when the grant carries one.
+
+Only then the **ask band**, whose refusals a human may approve exactly
+once:
+
+7. the recipient rule (`recipient_not_allowed`), when the grant carries an
+   allowlist;
+8. ask mode (`ask_required`);
+9. per-transaction amount cap;
+10. per-transaction fee cap;
+11. remaining total budget.
+
+The order is deliberate and frozen by tests: an approvable reason must
+never mask a hard one, so a request that is both outside the allowlist and
+above the hard ceiling reports the ceiling. `DenyReason::approvable()` is
+the one predicate every surface keys off to decide whether a refusal may
+carry an approval path at all.
 
 Budget drawdown is amount plus fee. The MCP server performs a cheap
-amount-only precheck, prepares the transaction to learn the real fee, then
-makes the final decision.
+amount-only precheck through the same full ladder — recipient rule
+included — prepares the transaction to learn the real fee, then makes the
+final decision.
 
 The engine takes the current time as an input, and the daemon's clock
 fails closed: if the system clock cannot be read, sends refuse with the
@@ -239,6 +291,19 @@ log contain recipients and amounts; both are written owner-only (0600),
 like the transaction records beside them. The log is append-only and never
 pruned by sats.
 
+The log is also read tolerantly: a syntactically valid line whose event
+kind or format version this build does not understand — written by a newer
+sats — is shown raw by `sats agent log` with a warning, never hidden and
+never fatal to the listing. The audit must survive the future.
+
+Discovery of pending asks does not depend on the agent's own channel:
+`sats agent requests --watch` streams each newly pending approvable
+request from the local store, so an agent that misrepresents, downplays,
+or simply never relays a denial cannot keep the human from seeing it.
+The watch is read-only — no provider access, no grant writes, no events —
+and approval itself stays in `sats agent approve`, which re-reads and
+renders the exact durable request before the password prompt.
+
 The event log also makes the one irreducible crash window visible: a
 `reserved` event with no following `signed` or `refunded` means the process
 died between persisting the budget draw and signing — budget is held for a
@@ -261,11 +326,19 @@ exception. Its trust model:
   authorization, exactly as for grant creation. Dismissing a request and
   revoking its approval (`sats agent deny`) needs no password: reducing
   authority stays cheap;
-- an approval lifts only the grant's quantitative caps (per-transaction
-  amount, fee, budget). It never overrides grant expiry or revocation:
-  those are the kill switches that withdraw all authority at once, and an
-  exception issued earlier must not survive them — mechanically it cannot,
-  because the signing key lives inside the grant file;
+- an approval lifts only refusals whose `DenyReason::approvable()` is
+  true — the ask band: the quantitative caps, ask mode, and the recipient
+  rule. It never lifts the hard envelope: not grant expiry or revocation
+  (the kill switches that withdraw all authority at once — mechanically it
+  cannot, because the signing key lives behind the grant file), not
+  suspension, not observe mode, and not the hard amount ceiling, which is
+  the human's pre-commitment that no amount of asking can move;
+- approval creation rechecks the current grant before prompting and
+  under the grant lock before writing; a missing grant or a current hard
+  refusal cannot arm an exception from an older approvable denial.
+  Read-only polling checks the same hard envelope before reporting an
+  approval ready, without changing the recorded outcome or authorizing
+  a signature;
 - consumption is single-use and persisted before the budget draw, under
   the same per-network lock as every grant write. A crash between the two
   writes burns the approval without signing — the failing direction is
@@ -293,6 +366,8 @@ It exposes only:
 - balance lookup;
 - fresh receive address;
 - the caller's grant status;
+- read-only status of the caller's own send requests, so an agent can
+  wait for a human decision without retrying sends;
 - a bounded send operation.
 
 Agents never receive the password, mnemonic, raw signer, arbitrary PSBT

@@ -161,6 +161,7 @@ Returns this server identity's current authority:
   "active": true,
   "agent": "claude",
   "network": "signet",
+  "mode": "auto",
   "budget_sat": 50000,
   "spent_sat": 4781,
   "remaining_sat": 45219,
@@ -173,7 +174,61 @@ Returns this server identity's current authority:
 
 When the grant has been revoked or expired, `active` is false, limit and
 accounting fields are omitted, and `message` tells the agent to ask its human
-for a new grant.
+for a new grant. Grants with restrictions carry them here too:
+`ask_max_tx_sat` (the hard ceiling) and `allowed_recipients` (the standing
+allowlist — absent means unrestricted, an empty list means every recipient
+asks).
+
+### `check_request`
+
+The sanctioned way for an agent to wait on a human decision. Takes the
+`request_id` a send result returned (or the bare idempotency key) and
+reads the durable request record: no chain access, no events, no strikes,
+no mutation of any kind — polling it is free, however often it runs.
+Lookup is scoped to the serving agent's own records; another agent's
+request answers `found: false`, exactly like one that never existed.
+
+Prefer the stored ID returned by `send`. Bare client keys also work,
+including keys beginning with `k-` or `r-`. If a bare key is also an
+existing stored ID, the stored ID takes precedence: after sending with
+both `job` and `k-job`, poll `k-k-job` for the latter request.
+
+```json
+{
+  "found": true,
+  "request_id": "k-invoice-7012",
+  "status": "denied",
+  "reason": "over_max_tx",
+  "approvable": true,
+  "approval_ready": false,
+  "message": "denied over_max_tx — awaiting the human: sats agent approve k-invoice-7012"
+}
+```
+
+`status` reuses send's vocabulary — `sent` (with `txid`), `denied` (with
+`reason` and `approvable`), `error`, or `pending` when no outcome is
+recorded yet. `reason` and `approvable` describe the recorded denial;
+they are history, not a new policy decision. `approval_ready: true` means
+an unconsumed, unexpired one-time approval is available for this unsettled
+intent under the current grant's hard restrictions (`approval_expires_at`
+says when that approval expires). Revocation, grant expiry, observe mode,
+suspension, or an amount above the current hard ceiling make readiness
+false; the message explains the current restriction. Polling never
+changes history.
+
+When ready, retry the identical send once with its **original client
+idempotency key**, not the stored ID returned by `send`. The daemon still
+rechecks policy and the actual prepared fee; readiness does not guarantee
+signing or broadcast success. A malformed or unknown id is a typed
+`found: false` result, never a transport error.
+
+### Tool annotations
+
+Every tool declares standard MCP annotations — the read tools and
+`check_request` as read-only and idempotent, `send` as destructive and
+open-world, address derivation and unlock as neither. They are hints for
+clients; the daemon's policy ladder is the security boundary, and a
+client that ignores them changes nothing about what can be signed.
 
 ### `send`
 
@@ -212,10 +267,17 @@ Policy denial:
 {
   "status": "denied",
   "reason": "over_max_tx",
-  "message": "human authorization required: requested 20,000 sat; max tx 10,000 sat",
+  "approvable": true,
+  "message": "human authorization required: requested 20,000 sat; max tx 10,000 sat; a human can approve exactly this request once with: sats agent approve k-invoice-7012",
   "request_id": "k-invoice-7012"
 }
 ```
+
+Every denied result carries `approvable`: `true` means a human can
+authorize exactly this request once with `sats agent approve` and the
+message names the command; `false` means the refusal is part of the hard
+envelope — no approval exists for it, no hint is offered, and only the
+human changing the grant lifts it.
 
 Operational failure:
 
@@ -240,7 +302,8 @@ Locked wallet — an error, deliberately not a denial:
 
 `send` does not expose fee-rate, dust, guard, signer, PSBT, or provider-bypass
 parameters. The agent supplies only destination, integer satoshis, and
-optionally its idempotency key.
+optionally its idempotency key. Fee estimation uses the network's
+human-configured `[fee_targets]` policy; the agent cannot change it.
 
 ## Idempotent retries
 
@@ -297,19 +360,26 @@ condition to fix.
 Denial is an expected successful tool result, not an MCP transport error.
 Supported reason codes are:
 
-| Reason | Meaning |
-|---|---|
-| `expired` | The grant's expiry has been reached |
-| `over_max_tx` | Recipient amount exceeds the per-transaction cap |
-| `over_max_fee` | Planned fee exceeds the fee cap |
-| `over_budget` | Amount plus fee exceeds remaining budget |
-| `revoked` | The grant file no longer exists |
-| `approval_fee_exceeded` | The prepared fee exceeds a one-time approval's ceiling |
-| `amount_overflow` | Amount plus fee overflows; not approvable |
+| Reason | Approvable | Meaning |
+|---|---|---|
+| `expired` | no | The grant's expiry has been reached |
+| `over_max_tx` | yes | Recipient amount exceeds the automatic per-transaction cap |
+| `over_max_fee` | yes | Planned fee exceeds the fee cap |
+| `over_budget` | yes | Amount plus fee exceeds remaining budget |
+| `revoked` | no | The grant file no longer exists |
+| `approval_fee_exceeded` | yes | The prepared fee exceeds a one-time approval's ceiling |
+| `amount_overflow` | no | Amount plus fee overflows |
+| `ask_required` | yes | The grant is in ask mode: every send needs a one-time approval |
+| `over_ask_max` | no | Amount exceeds the hard ceiling; changing the grant is the only escalation |
+| `observe_only` | no | The grant is observe-only |
+| `suspended` | no | Autonomy is suspended (STOP) until a human resumes the grant |
+| `recipient_not_allowed` | yes | The recipient is outside the grant's standing allowlist |
 
 An agent should relay the denial — including its `request_id` — to its
 human and stop. Retrying the same request unchanged cannot expand
-authority; what can change the answer is a human decision.
+authority; what can change the answer is a human decision, and for
+`approvable: false` refusals that decision is editing the grant, not
+approving a request.
 
 A `revoked` denial for an agent with no grant on file carries a
 `request_id` only when an earlier authenticated execution already recorded
@@ -319,8 +389,8 @@ revocation still replays its recorded txid.
 
 ## One-time approvals
 
-A cap denial (`over_max_tx`, `over_max_fee`, `over_budget`) is not a dead
-end: the denied request persists, and its message names the exact command —
+An approvable denial (`approvable: true`) is not a dead end: the denied
+request persists, and its message names the exact command —
 `sats agent approve <request-id>` — that lets a human authorize precisely
 that send, once. The approval binds the request's canonical intent digest
 (network, agent, recipient, amount), carries its own fee ceiling and
@@ -328,6 +398,14 @@ expiry, and is consumed by the first matching send. After the human
 approves, the agent retries the identical send — same address, same
 amount, ideally the same `request_id` — and the result carries
 `via_approval: true`.
+
+A hard denial (`approvable: false`) has no approval path at all:
+`sats agent approve` refuses to arm one before any password prompt, and
+the refusal names the real escalation — changing the grant.
+Approval creation checks the current grant before prompting and again
+under the grant lock before writing, so an older ASK cannot bypass a
+later hard restriction. A missing or unreadable grant cannot arm an
+approval.
 
 Approvals never override revocation or grant expiry: those are the human's
 kill switches, and an exception issued earlier does not survive them. A

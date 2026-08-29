@@ -296,6 +296,11 @@ mod tests {
                     tx_count: 1,
                     token_hash: token.token_hash,
                     token_id: token.token_id,
+                    mode: Default::default(),
+                    ask_max_tx_sat: None,
+                    allowed_recipients: None,
+                    suspended: None,
+                    strikes: Vec::new(),
                 },
             )
             .unwrap();

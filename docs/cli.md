@@ -80,12 +80,15 @@ hold the explicit advanced workflows.
 | `sats daemon stop` | Stop the daemon |
 | `sats agent grant <name>` | Create bounded unattended signing authority |
 | `sats agent revoke <name>` | Delete an agent grant immediately |
+| `sats agent mode <name> <mode>` | Switch auto/ask/observe; widening needs the password |
+| `sats agent allow <name> <addr>` | Add an allowlist recipient (password required) |
+| `sats agent disallow <name> <addr>` | Remove an allowlist recipient (no password) |
 | `sats agent list` | List non-expired grants and remaining budgets |
-| `sats agent requests [--all]` | Review agent send requests; denied ones await a human decision |
+| `sats agent requests [--all\|--watch]` | Review agent send requests; `--watch` streams newly pending asks |
 | `sats agent approve <id>` | Authorize one denied request exactly once (password required) |
 | `sats agent deny <id>` | Dismiss a request and revoke its unconsumed approval |
 | `sats agent log [--limit N] [--request ID]` | Show the causal event log of agent activity |
-| `sats agent serve <name>` | Serve five wallet tools for one granted agent over MCP stdio |
+| `sats agent serve <name>` | Serve the bounded wallet tool surface for one granted agent over MCP stdio |
 | `sats alkanes inspect <BLOCK:TX>` | Fetch a contract's bytecode and show its sha256 code hash |
 | `sats alkanes simulate <BLOCK:TX> <INPUTS...>` | Simulate a contract call and show the interpreted result |
 | `sats alkanes execute <BLOCK:TX> <INPUTS...>` | Simulate, confirm, sign, and broadcast a contract call (refuses mainnet) |
@@ -265,7 +268,11 @@ Human commands never use the daemon. `sats send`, `sats psbt sign`, and
 
 ```sh
 sats agent grant <name> --budget <SATS> [--for <DURATION>] \
-  [--max-tx <SATS>] [--max-fee <SATS> | --no-max-fee]
+  [--mode auto|ask|observe] [--to <ADDRESS>]... \
+  [--max-tx <SATS>] [--ask-max-tx <SATS>] [--max-fee <SATS> | --no-max-fee]
+sats agent mode <name> <auto|ask|observe>
+sats agent allow <name> <ADDRESS>
+sats agent disallow <name> <ADDRESS>
 ```
 
 `--for` defaults to `24h` and accepts human-readable durations such as `30m`,
@@ -280,6 +287,46 @@ miner fees; `--no-max-fee` issues a grant without any fee cap. Grant
 creation requires the wallet password, which authorizes the grant and is not
 otherwise used: the grant file holds a budget and a token hash, never key
 material.
+
+`--mode` sets how much standing autonomy the grant carries. `auto` (the
+default) lets sends inside the caps execute without you. `ask` proposes
+everything: every send — however small — is the approvable denial
+`ask_required`, executed only through `sats agent approve`, one request
+at a time. `observe` is read-only: balance, addresses, grant status, and
+request polling keep working, but no send can be authorized and no
+approval can lift `observe_only`. Revocation remains the off switch.
+
+`sats agent mode` switches a live grant between them, mid-session, and
+carries the attenuation rule mechanically: tightening authority
+(`auto→ask→observe`) never asks for the password — reducing what an agent
+may do stays cheap — while widening requires it, exactly like issuing the
+grant did. Every transition lands in the event log with its direction.
+
+Repeatable `--to` gives the grant a standing recipient allowlist. Each
+address is parsed and network-checked at the boundary and stored in the
+same normalized spelling the intent digest hashes. With a finite list,
+sends to listed recipients are automatic within the caps; any other
+recipient is the approvable denial `recipient_not_allowed`, and the
+one-time approval it invites authorizes exactly that recipient and
+amount, once — it never widens the standing list, and neither does
+payment history: an agent cannot launder an address into "known" by
+paying it. Without `--to` every recipient is allowed, as before.
+`sats agent allow` adds an entry (widening — password required);
+`sats agent disallow` removes one (no password), and emptying the list
+means every recipient asks. A grant without an allowlist refuses
+`disallow` outright: a list cannot express "everything except one
+address" — re-issue the grant with `--to` to restrict it.
+
+The two amount caps split sends into three bands. Up to `--max-tx` a send
+is automatic. Above it, the send is denied but the denial is approvable:
+`sats agent approve` authorizes exactly that request, once. Above
+`--ask-max-tx` — the hard ceiling — the denial is `over_ask_max` and is
+never approvable: no hint is offered, `sats agent approve` refuses to arm
+one, and the only escalation is changing the grant itself. The ceiling is
+the pre-commitment you make while calm, so that later pressure — an agent
+asking nicely fifty times — has nothing to push on. When both caps are
+given, `--ask-max-tx` must be at least `--max-tx`; without `--ask-max-tx`,
+every cap denial stays approvable, as before.
 
 Creating a grant prints a bearer token **once**. It is not stored — only its
 SHA-256 is — so there is no way to recover it later; re-issue the grant to
@@ -316,6 +363,7 @@ transition appends to a per-network event log:
 ```sh
 sats agent requests            # pending: denied requests awaiting a decision
 sats agent requests --all      # every recorded request, newest first
+sats agent requests --watch    # stay running; print each new pending ask once
 sats agent log                 # the causal event chain, oldest first
 sats agent log --request k-big-1
 ```
@@ -326,6 +374,18 @@ one line per event — received, denied, reserved, signed, broadcast,
 refunded, replayed — and `--request` accepts an id or unique prefix.
 Unreadable records and torn log lines are skipped with a warning; both
 surfaces are purely local and never touch a provider.
+
+`--watch` is the trusted discovery channel: it polls the local store and
+prints each request exactly once, when it newly awaits an approval — an
+undismissed, approvable denial with no valid approval armed — ending each
+line with the exact `sats agent approve` command. You learn about pending
+asks from sats itself instead of relying on the agent to relay (or
+downplay) its own denials. Hard, non-approvable denials never appear
+there — nothing is awaited — and stay reviewable with `--all`. A request
+whose approval expires unconsumed re-enters the queue and announces
+again. Request IDs are scoped to their agent: two agents using the same
+ID are announced independently. With `--json` the stream is JSONL, one
+full record per line. Watching is read-only; Ctrl-C stops it.
 
 ## Approving one request
 
@@ -345,6 +405,14 @@ never authorizes a second signature, and approvals never survive grant
 revocation or expiry. `deny` dismisses the request and revokes an
 unconsumed approval without a password: reducing authority stays cheap.
 Both accept a request id or unique prefix and support `--json`.
+
+Approval requires an existing grant whose current hard restrictions
+permit the exception. `approve` checks both the recorded denial and the
+current policy before asking for the password, then rechecks under the
+grant lock before writing. An older ASK cannot be approved after a
+switch to observe, suspension, revocation, expiry, or a hard amount
+ceiling lowered below the request's amount. No approval is queued for a
+missing grant.
 
 ## Alkanes contract tools
 
@@ -432,6 +500,14 @@ for sats. A minimal configuration is:
 network = "signet"
 ```
 
+Fee-estimate confirmation targets are human policy, scoped per network, and
+default to 2 blocks. For a low-priority signet workflow:
+
+```toml
+[fee_targets]
+signet = 1008
+```
+
 Typed providers are configured under `[providers.<name>]`:
 
 ```toml
@@ -441,7 +517,7 @@ network = "mainnet"
 driver = "subfrost"
 network = "mainnet"
 url = "https://mainnet.subfrost.io/v4/jsonrpc"
-capabilities = ["chain", "guard"]
+api_key = "replace-with-key"
 ```
 
 See [Providers and guards](providers.md) for drivers, capability filters,

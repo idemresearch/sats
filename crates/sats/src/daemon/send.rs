@@ -13,8 +13,8 @@
 
 use anyhow::Result;
 use sats_core::authz::{
-    ApprovalDecision, DenyReason, Grant, IntentApproval, IntentRequest, ReserveVia, SpendRequest,
-    authorize_intent_with_approval,
+    ApprovalDecision, DenyReason, Grant, IntentApproval, ReserveVia, SpendRequest,
+    evaluate_send_with_approval,
 };
 use sats_core::bitcoin::Psbt;
 use sats_core::event::{AgentEvent, EVENT_FORMAT_VERSION, EventKind};
@@ -82,18 +82,15 @@ pub fn valid_request_key(key: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// A denial the human can act on: cap denials name the exact one-time
-/// exception command; expiry and revocation cannot be approved away.
+/// A denial the human can act on: approvable refusals name the exact
+/// one-time exception command; the hard envelope gets no hint, because
+/// asking cannot move it. `DenyReason::approvable()` is the single
+/// source of truth.
 fn denial_with_hint(reason: &DenyReason, request_id: &str) -> SendOutcome {
     let mut outcome = SendOutcome::from_deny(reason);
-    let approvable = matches!(
-        reason,
-        DenyReason::OverMaxTx { .. }
-            | DenyReason::OverMaxFee { .. }
-            | DenyReason::OverBudget { .. }
-            | DenyReason::ApprovalFeeExceeded { .. }
-    );
-    if approvable && let Some(message) = &mut outcome.message {
+    if reason.approvable()
+        && let Some(message) = &mut outcome.message
+    {
         message.push_str(&format!(
             "; a human can approve exactly this request once with: sats agent approve {request_id}"
         ));
@@ -181,11 +178,11 @@ fn record_outcome_locked(
     }
 }
 
-/// The one approval that can authorize this intent right now, and a fresh
+/// The candidate approval for this intent, and a fresh
 /// read of the record holding it. The executing request's own approval
 /// wins; otherwise the lexicographically smallest holder, so concurrent
-/// lookups pick the same one.
-fn current_approval(
+/// lookups pick the same one. Callers must still check the current policy.
+pub(crate) fn current_approval(
     store: &Store,
     net_name: &str,
     agent: &str,
@@ -527,15 +524,22 @@ pub fn begin(
 
     // Pre-check on the amount alone (fee 0): an obviously over-limit
     // request is denied deterministically, before any network access.
-    let precheck = IntentRequest::Send(SpendRequest {
+    // The full ladder runs — recipient rule included — so a refusal any
+    // later stage would repeat is surfaced before a chain sync.
+    let precheck = SpendRequest {
         amount_sat,
         fee_sat: 0,
-    });
+    };
     let precheck_approval =
         current_approval(store, net_name, agent, &digest, &request.id, now).map(|(a, _)| a);
-    if let ApprovalDecision::Deny(reason) =
-        authorize_intent_with_approval(&grant, &precheck, &digest, precheck_approval.as_ref(), now)
-    {
+    if let ApprovalDecision::Deny(reason) = evaluate_send_with_approval(
+        &grant,
+        recipient,
+        &precheck,
+        &digest,
+        precheck_approval.as_ref(),
+        now,
+    ) {
         record_outcome(
             store,
             net_name,
@@ -696,8 +700,15 @@ pub fn authorize(
     };
 
     // Reserve and persist the draw-down BEFORE signing: once a signature
-    // exists the money must be considered spent.
-    let via = match grant.reserve_with_approval(&spend, &flight.digest, approval.as_mut(), now) {
+    // exists the money must be considered spent. The reserve re-runs the
+    // full ladder, recipient included.
+    let via = match grant.reserve_send(
+        &flight.recipient,
+        &spend,
+        &flight.digest,
+        approval.as_mut(),
+        now,
+    ) {
         Ok(via) => via,
         Err(reason) => {
             record_outcome_locked(
@@ -1097,6 +1108,11 @@ mod tests {
             tx_count: 0,
             token_id: minted.token_id.clone(),
             token_hash: minted.token_hash.clone(),
+            mode: Default::default(),
+            ask_max_tx_sat: None,
+            allowed_recipients: None,
+            suspended: None,
+            strikes: Vec::new(),
         };
         store.save_grant("signet", &grant).unwrap();
         minted.secret.to_string()
@@ -1144,10 +1160,13 @@ mod tests {
 
     fn event_kinds(store: &Store) -> Vec<String> {
         store
-            .list_events("signet")
+            .list_event_lines("signet")
             .unwrap()
             .into_iter()
-            .map(|event| event.kind_str().to_string())
+            .map(|line| match line {
+                crate::store::EventLine::Event(event) => event.kind_str().to_string(),
+                crate::store::EventLine::Unknown(_) => "unknown".to_string(),
+            })
             .collect()
     }
 

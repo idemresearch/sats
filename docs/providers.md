@@ -26,8 +26,9 @@ reference encoding) and displays view results without trusting them.
 
 Configuration accepts exact names and the aliases `chain` and `guard`.
 `alkanes.view` is deliberately outside the `guard` alias — a view reads
-contracts, a guard protects UTXOs. Without a `capabilities` filter, a
-driver advertises every capability it implements.
+contracts, a guard protects UTXOs. Without a `capabilities` filter, Esplora
+and Subfrost provide chain operations. Subfrost guards and Alkanes views
+require an explicit capability opt-in.
 
 ## Drivers
 
@@ -37,8 +38,9 @@ driver advertises every capability it implements.
 | `subfrost` | sync, fees, broadcast | ord, alkanes | alkanes.view |
 
 The Subfrost driver maps the provider's namespaced JSON-RPC methods onto the
-fixed sats capability contract. Guard answers are presence-only; protocol
-values are not interpreted by sats. Like guards, `alkanes.view` never
+fixed sats capability contract, using `btc_sendrawtransaction` for broadcast.
+Guard answers are presence-only; protocol values are not interpreted by sats.
+Like guards, `alkanes.view` never
 resolves from the legacy or built-in fallback tiers: configuring one is an
 explicit trust decision, and the endpoint's network is validated before any
 view result is used.
@@ -72,7 +74,24 @@ url = "https://mainnet.subfrost.io/v4/jsonrpc"
 ```
 
 Provider names are local labels. Each entry must declare the one Bitcoin
-network its endpoint serves.
+network its endpoint serves. Subfrost needs no capability list for ordinary
+chain synchronization, fee estimation, and broadcast.
+
+### Fee policy
+
+Providers report fee estimates; the human-owned configuration chooses which
+confirmation target sats uses. Targets are scoped by network, accept 1–1008
+blocks, and default to 2 when omitted:
+
+```toml
+[fee_targets]
+signet = 1008
+```
+
+The target applies to shared transaction preparation, including MCP sends.
+A human CLI `--fee-rate` remains an explicit per-invocation override. Agents
+cannot choose a target or fee rate; their grant's absolute fee cap still
+authorizes or refuses the fee derived from the prepared transaction.
 
 ### Restrict capabilities
 
@@ -114,7 +133,7 @@ The resolver prefers the provider selected for sync when it also offers fees
 or broadcast. Otherwise each chain capability must resolve to one candidate;
 multiple equally eligible candidates are an explicit ambiguity error.
 
-### Bearer authentication
+### Authentication
 
 Esplora providers accept an optional bearer token:
 
@@ -128,10 +147,22 @@ url = "https://bitcoin.example/api"
 bearer = "replace-with-token"
 ```
 
-Keep configuration permissions restrictive. Bearer values are not displayed.
-Subfrost paths are redacted to the endpoint origin because they may contain an
-API key. Esplora endpoint URLs may appear in diagnostics, so put credentials
-in `auth.bearer`, never in the URL path or query.
+Subfrost API keys use the provider's dedicated header:
+
+```toml
+[providers.subfrost]
+driver = "subfrost"
+network = "signet"
+url = "https://signet.subfrost.io/v4/jsonrpc"
+api_key = "replace-with-key"
+```
+
+Keep configuration permissions restrictive. Authentication values are never
+displayed. Subfrost URLs are redacted to their origin because older setups may
+carry a key in the path, but new configurations should use the provider's
+direct `api_key` field.
+Esplora endpoint URLs may appear in diagnostics, so put credentials in
+`auth.bearer`, never in the URL path or query.
 
 ## Resolution precedence
 
@@ -177,7 +208,9 @@ authorize a signature.
 ## Failure behavior
 
 Esplora and Subfrost set a 30-second HTTP request timeout. Esplora retries a
-retryable GET response at most twice (three attempts with backoff); transport
+retryable GET response at most twice (three attempts with backoff). Subfrost
+retries one safe JSON-RPC read after an HTTP 429, honoring `Retry-After` up to
+60 seconds and waiting 60 seconds when the header is absent. Transport
 timeouts are not retried, and neither driver automatically retries broadcast.
 For a hostname with multiple DNS addresses, each nonfinal TCP connection
 attempt is capped at two seconds (or the remaining request deadline, if

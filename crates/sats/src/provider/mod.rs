@@ -115,7 +115,7 @@ impl DriverKind {
     }
 
     /// The audited capability table: what each driver can do at most.
-    fn default_caps(self) -> &'static [Capability] {
+    fn supported_caps(self) -> &'static [Capability] {
         match self {
             DriverKind::Esplora => &[
                 Capability::ChainSync,
@@ -137,6 +137,20 @@ impl DriverKind {
                 Capability::GuardNative,
                 Capability::AlkanesView,
             ],
+        }
+    }
+
+    /// Capabilities enabled when configuration omits an explicit filter.
+    /// Subfrost is a chain provider by default; indexed protocol behavior is
+    /// opt-in even though the driver implements it.
+    fn default_caps(self) -> &'static [Capability] {
+        match self {
+            DriverKind::Subfrost => &[
+                Capability::ChainSync,
+                Capability::ChainFees,
+                Capability::ChainBroadcast,
+            ],
+            _ => self.supported_caps(),
         }
     }
 }
@@ -213,6 +227,7 @@ pub enum AlkanesSource {
 #[derive(Debug)]
 pub struct Services {
     network: Network,
+    fee_target_blocks: u16,
     sync: Option<ChainSource>,
     fees: Option<FeeSource>,
     broadcast: Option<BroadcastSource>,
@@ -228,13 +243,20 @@ pub fn resolve(
     network: Network,
 ) -> Result<Services, ProviderError> {
     let net_name = network_name(network);
+    let fee_target_blocks = config.fee_targets.get(net_name).copied().unwrap_or(2);
+    if !(1..=1008).contains(&fee_target_blocks) {
+        return Err(ProviderError::BadConfig {
+            name: "fee_targets".into(),
+            reason: format!("{net_name} confirmation target must be between 1 and 1008 blocks"),
+        });
+    }
 
     // CLI overrides replace the whole provider set for the active network.
     let specs: Vec<ProviderSpec> = if !cli.is_empty() {
         cli.iter()
             .map(|p| {
                 let name = format!("cli:{}", driver_name(p.kind));
-                build_spec(&name, p.kind, &p.url, None, None)
+                build_spec(&name, p.kind, &p.url, None, None, None)
             })
             .collect::<Result<_, _>>()?
     } else {
@@ -259,7 +281,8 @@ pub fn resolve(
                     kind,
                     &p.url,
                     p.capabilities.as_deref(),
-                    p.auth.as_ref().and_then(|a| a.bearer.clone()),
+                    p.api_key.as_deref(),
+                    p.auth.as_ref(),
                 )
             })
             .collect::<Result<_, _>>()?
@@ -323,6 +346,7 @@ pub fn resolve(
 
     Ok(Services {
         network,
+        fee_target_blocks,
         sync: sync_spec.map(|s| match &s.driver {
             Driver::Esplora(e) => ChainSource::Esplora(e.clone()),
             Driver::Subfrost(c) => ChainSource::Subfrost(c.clone()),
@@ -360,13 +384,20 @@ fn build_spec(
     kind: DriverKind,
     url: &str,
     cap_filter: Option<&[String]>,
-    bearer: Option<String>,
+    api_key: Option<&str>,
+    auth: Option<&crate::config::AuthConfig>,
 ) -> Result<ProviderSpec, ProviderError> {
     let bad = |reason: String| ProviderError::BadConfig {
         name: name.to_string(),
         reason,
     };
-    let mut caps: BTreeSet<Capability> = kind.default_caps().iter().copied().collect();
+    let mut caps: BTreeSet<Capability> = match cap_filter {
+        Some(_) => kind.supported_caps(),
+        None => kind.default_caps(),
+    }
+    .iter()
+    .copied()
+    .collect();
     if let Some(filter) = cap_filter {
         let mut wanted = BTreeSet::new();
         for token in filter {
@@ -382,13 +413,38 @@ fn build_spec(
         }
     }
     let driver = match kind {
-        DriverKind::Esplora => Driver::Esplora(EsploraProvider::new(
-            name.to_string(),
-            url.to_string(),
-            bearer,
-        )),
-        DriverKind::Subfrost => Driver::Subfrost(SubfrostClient::new(url.to_string())),
-        DriverKind::Mock => Driver::Mock(MockProvider::new(url).map_err(bad)?),
+        DriverKind::Esplora => {
+            if api_key.is_some() {
+                return Err(bad(
+                    "api_key authentication is only valid for subfrost".into()
+                ));
+            }
+            Driver::Esplora(EsploraProvider::new(
+                name.to_string(),
+                url.to_string(),
+                auth.and_then(|a| a.bearer.clone()),
+            ))
+        }
+        DriverKind::Subfrost => {
+            if auth.is_some() {
+                return Err(bad(
+                    "auth configuration is only valid for esplora; put api_key directly under the subfrost provider".into(),
+                ));
+            }
+            if api_key.is_some_and(|key| key.trim().is_empty()) {
+                return Err(bad("subfrost api_key must not be empty".into()));
+            }
+            Driver::Subfrost(SubfrostClient::new(
+                url.to_string(),
+                api_key.map(str::to_owned),
+            ))
+        }
+        DriverKind::Mock => {
+            if api_key.is_some() || auth.is_some() {
+                return Err(bad("authentication is not valid for mock providers".into()));
+            }
+            Driver::Mock(MockProvider::new(url).map_err(bad)?)
+        }
     };
     Ok(ProviderSpec {
         name: name.to_string(),
@@ -424,6 +480,7 @@ fn legacy_or_default_esplora(
         name,
         DriverKind::Esplora,
         &url,
+        None,
         None,
         None,
     )?))
@@ -496,10 +553,10 @@ impl Services {
         }
     }
 
-    /// Estimated fee rate for confirmation within `target` blocks, floored
-    /// at 1 sat/vB. An unusable rate from the endpoint is a typed fee
-    /// error, never a silently cast number.
-    pub fn estimate_fee_rate(&self, target: u16) -> Result<FeeRate, ProviderError> {
+    /// Estimated fee rate for the configured confirmation target, floored at
+    /// 1 sat/vB. An unusable rate from the endpoint is a typed fee error,
+    /// never a silently cast number.
+    pub fn estimate_fee_rate(&self) -> Result<FeeRate, ProviderError> {
         let source = self
             .fees
             .as_ref()
@@ -509,7 +566,8 @@ impl Services {
             FeeSource::Subfrost(c) => (c.fee_estimates()?, c.display_url().to_string()),
             FeeSource::Mock(m) => (m.fee_estimates()?, "mock".to_string()),
         };
-        pick_fee_rate(&estimates, target).map_err(|message| ProviderError::Fees { url, message })
+        pick_fee_rate(&estimates, self.fee_target_blocks)
+            .map_err(|message| ProviderError::Fees { url, message })
     }
 
     /// Broadcast and record the transaction as unconfirmed in the wallet.
@@ -625,6 +683,7 @@ mod tests {
             network: network.into(),
             url: url.into(),
             capabilities: caps.map(|c| c.into_iter().map(String::from).collect()),
+            api_key: None,
             auth: None,
         }
     }
@@ -632,6 +691,7 @@ mod tests {
     fn config_with(providers: BTreeMap<String, ProviderConfig>) -> Config {
         Config {
             network: "signet".into(),
+            fee_targets: BTreeMap::new(),
             esplora: BTreeMap::new(),
             providers,
         }
@@ -667,15 +727,47 @@ mod tests {
             pick_fee_rate(&HashMap::from([(2u16, 0.0)]), 2).unwrap(),
             FeeRate::from_sat_per_vb_u32(1)
         );
+        // Human policy selects the long target from a provider map without
+        // giving the agent control over the rate.
+        let testnet = HashMap::from([(2u16, 211.591), (1008u16, 1.0)]);
+        assert_eq!(
+            pick_fee_rate(&testnet, 1008).unwrap(),
+            FeeRate::from_sat_per_vb_u32(1)
+        );
     }
 
     #[test]
     fn defaults_resolve_when_nothing_configured() {
         let services = resolve(&config_with(BTreeMap::new()), &[], Network::Signet).unwrap();
+        assert_eq!(services.fee_target_blocks, 2);
         assert!(services.sync.is_some());
         assert!(services.fees.is_some());
         assert!(services.broadcast.is_some());
         assert!(!services.has_guards());
+    }
+
+    #[test]
+    fn fee_target_is_human_policy_scoped_to_the_active_network() {
+        let mut config = config_with(BTreeMap::new());
+        config.fee_targets.insert("signet".into(), 1008);
+        config.fee_targets.insert("mainnet".into(), 6);
+
+        let signet = resolve(&config, &[], Network::Signet).unwrap();
+        let mainnet = resolve(&config, &[], Network::Bitcoin).unwrap();
+        assert_eq!(signet.fee_target_blocks, 1008);
+        assert_eq!(mainnet.fee_target_blocks, 6);
+    }
+
+    #[test]
+    fn unusable_fee_target_is_rejected() {
+        for target in [0, 1009] {
+            let mut config = config_with(BTreeMap::new());
+            config.fee_targets.insert("signet".into(), target);
+            assert!(matches!(
+                resolve(&config, &[], Network::Signet),
+                Err(ProviderError::BadConfig { .. })
+            ));
+        }
     }
 
     #[test]
@@ -854,11 +946,70 @@ mod tests {
                 network: "signet".into(),
                 url: "http://a.example".into(),
                 capabilities: None,
+                api_key: None,
                 auth: Some(AuthConfig {
                     bearer: Some("token".into()),
                 }),
             },
         )]));
         assert!(resolve(&config, &[], Network::Signet).is_ok());
+    }
+
+    #[test]
+    fn subfrost_api_key_is_typed_and_driver_specific() {
+        let config = config_with(BTreeMap::from([(
+            "subfrost".into(),
+            ProviderConfig {
+                driver: "subfrost".into(),
+                network: "signet".into(),
+                url: "http://a.example".into(),
+                capabilities: None,
+                api_key: Some("secret".into()),
+                auth: None,
+            },
+        )]));
+        let services = resolve(&config, &[], Network::Signet).unwrap();
+        assert!(!services.has_guards());
+        assert!(services.alkanes.is_none());
+        match services.sync.unwrap() {
+            ChainSource::Subfrost(client) => {
+                assert!(!format!("{client:?}").contains("secret"));
+            }
+            _ => panic!("expected subfrost"),
+        }
+
+        let mut wrong_driver = config;
+        wrong_driver.providers.get_mut("subfrost").unwrap().driver = "esplora".into();
+        assert!(matches!(
+            resolve(&wrong_driver, &[], Network::Signet),
+            Err(ProviderError::BadConfig { .. })
+        ));
+
+        let mut empty_key = config_with(BTreeMap::from([(
+            "subfrost".into(),
+            provider("subfrost", "signet", "http://a.example", None),
+        )]));
+        empty_key.providers.get_mut("subfrost").unwrap().api_key = Some("  ".into());
+        assert!(matches!(
+            resolve(&empty_key, &[], Network::Signet),
+            Err(ProviderError::BadConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn subfrost_indexed_capabilities_require_explicit_opt_in() {
+        let config = config_with(BTreeMap::from([(
+            "subfrost".into(),
+            provider(
+                "subfrost",
+                "signet",
+                "http://a.example",
+                Some(vec!["guard", "alkanes.view"]),
+            ),
+        )]));
+        let services = resolve(&config, &[], Network::Signet).unwrap();
+        assert!(services.has_guards());
+        assert!(services.alkanes.is_some());
+        assert!(matches!(services.sync, Some(ChainSource::Esplora(_))));
     }
 }
