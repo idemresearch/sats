@@ -139,7 +139,7 @@ pub fn build_with_observer(
         None => {
             observe(Stage::EstimatingFees);
             services
-                .estimate_fee_rate(2)
+                .estimate_fee_rate()
                 .context("cannot estimate fee — pass --fee-rate")?
         }
     };

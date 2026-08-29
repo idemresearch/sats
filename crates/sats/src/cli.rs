@@ -155,7 +155,7 @@ pub enum AlkanesCommand {
         /// Calldata words (the first is conventionally the opcode)
         #[arg(value_name = "INPUTS")]
         inputs: Vec<u128>,
-        /// Fee rate in sat/vB (default: estimated for ~2 blocks)
+        /// Fee rate in sat/vB (default: estimated for configured target)
         #[arg(long, value_name = "SAT_VB")]
         fee_rate: Option<u64>,
         /// Sats carried by the pointer output the call's assets land on
@@ -207,7 +207,7 @@ pub struct SendArgs {
     /// Amount in sats (shorthand ok: 10k, 1.5m)
     #[arg(value_parser = crate::amount::parse)]
     pub amount: u64,
-    /// Fee rate in sat/vB (default: estimated for ~2 blocks)
+    /// Fee rate in sat/vB (default: estimated for configured target)
     #[arg(long, value_name = "SAT_VB")]
     pub fee_rate: Option<u64>,
     /// Spend UTXOs at inscription postage values (546/330 sats)

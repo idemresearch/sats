@@ -154,7 +154,7 @@ pub fn execute(
             FeeRate::from_sat_per_vb_u32(sat_vb)
         }
         None => services
-            .estimate_fee_rate(2)
+            .estimate_fee_rate()
             .context("cannot estimate fee — pass --fee-rate")?,
     };
     let pointer = ctx.wallet.reveal_next_address(KeychainKind::External);

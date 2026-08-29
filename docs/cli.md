@@ -500,6 +500,14 @@ for sats. A minimal configuration is:
 network = "signet"
 ```
 
+Fee-estimate confirmation targets are human policy, scoped per network, and
+default to 2 blocks. For a low-priority signet workflow:
+
+```toml
+[fee_targets]
+signet = 1008
+```
+
 Typed providers are configured under `[providers.<name>]`:
 
 ```toml
@@ -510,6 +518,9 @@ driver = "subfrost"
 network = "mainnet"
 url = "https://mainnet.subfrost.io/v4/jsonrpc"
 capabilities = ["chain", "guard"]
+
+[providers.subfrost.auth]
+api_key = "replace-with-key"
 ```
 
 See [Providers and guards](providers.md) for drivers, capability filters,

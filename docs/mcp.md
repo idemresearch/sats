@@ -302,7 +302,8 @@ Locked wallet — an error, deliberately not a denial:
 
 `send` does not expose fee-rate, dust, guard, signer, PSBT, or provider-bypass
 parameters. The agent supplies only destination, integer satoshis, and
-optionally its idempotency key.
+optionally its idempotency key. Fee estimation uses the network's
+human-configured `[fee_targets]` policy; the agent cannot change it.
 
 ## Idempotent retries
 
