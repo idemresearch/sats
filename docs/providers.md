@@ -38,8 +38,9 @@ require an explicit capability opt-in.
 | `subfrost` | sync, fees, broadcast | ord, alkanes | alkanes.view |
 
 The Subfrost driver maps the provider's namespaced JSON-RPC methods onto the
-fixed sats capability contract. Guard answers are presence-only; protocol
-values are not interpreted by sats. Like guards, `alkanes.view` never
+fixed sats capability contract, using `btc_sendrawtransaction` for broadcast.
+Guard answers are presence-only; protocol values are not interpreted by sats.
+Like guards, `alkanes.view` never
 resolves from the legacy or built-in fallback tiers: configuring one is an
 explicit trust decision, and the endpoint's network is validated before any
 view result is used.

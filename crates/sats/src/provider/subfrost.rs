@@ -40,7 +40,9 @@ const MAX_RETRY_AFTER_SECS: u64 = 60;
 /// live endpoint without spreading provider shapes through the application.
 mod dialect {
     pub const FEE_ESTIMATES: &str = "esplora_fee-estimates";
-    pub const BROADCAST: &str = "esplora_broadcast";
+    /// Subfrost documents broadcast through its Bitcoin Core passthrough.
+    /// `esplora_broadcast` is not a supported route on the public gateway.
+    pub const BROADCAST: &str = "btc_sendrawtransaction";
     pub const ORD_OUTPUT: &str = "ord_output";
     pub const ALKANES_BY_OUTPOINT: &str = "alkanes_protorunesbyoutpoint";
     /// Contract bytecode by alkane id. Params: one `{block, tx}` object
@@ -848,6 +850,37 @@ mod tests {
             assert!(request.contains("x-subfrost-api-key: header-secret"));
         }
         assert!(!format!("{client:?}").contains("header-secret"));
+    }
+
+    #[test]
+    fn broadcast_uses_bitcoin_core_passthrough_and_requires_the_txid() {
+        use sats_core::bitcoin::{absolute, transaction};
+
+        let tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+        let txid = tx.compute_txid();
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": txid.to_string(),
+        })
+        .to_string();
+        let (url, requests) = local_server(vec![response("200 OK", "", &body)]);
+        let client = SubfrostClient::new(url, None);
+
+        assert_eq!(client.broadcast(&tx).unwrap(), txid);
+        let request = requests.recv().unwrap();
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+        let request: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(request["method"], "btc_sendrawtransaction");
+        assert_eq!(
+            request["params"][0],
+            hex::encode(consensus::encode::serialize(&tx))
+        );
     }
 
     #[test]
