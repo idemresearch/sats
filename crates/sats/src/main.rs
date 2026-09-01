@@ -66,14 +66,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         ),
         Command::Psbt { command } => match command {
             cli::PsbtCommand::Inspect { file } => commands::psbt::inspect(network, &file, json),
-            cli::PsbtCommand::Sign { file, session, out } => commands::psbt::sign(
-                &store,
-                network,
-                file.as_deref(),
-                session.as_deref(),
-                out.as_deref(),
-                json,
-            ),
+            cli::PsbtCommand::Sign { file, out } => {
+                commands::psbt::sign(&store, network, &file, out.as_deref(), json)
+            }
         },
         Command::Tx { command } => match command {
             cli::TxCommand::Broadcast { target } => {
@@ -111,11 +106,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 commands::recipients::disallow(&store, network, &name, &address, json)
             }
             cli::AgentCommand::List => commands::grants::run(&store, network, json),
-            cli::AgentCommand::Approve {
-                id,
-                max_fee,
-                duration,
-            } => commands::approve::run(&store, network, &id, max_fee, &duration, json),
+            cli::AgentCommand::Approve { id, duration } => {
+                commands::approve::run(&store, network, &id, &duration, json)
+            }
             cli::AgentCommand::Deny { id } => commands::deny::run(&store, network, &id, json),
             cli::AgentCommand::Requests { all, watch } => {
                 commands::requests::run(&store, network, all, watch, json)

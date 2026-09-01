@@ -30,6 +30,9 @@ type WasmWallet = {
     feeRate: number,
     now: number
   ): string;
+  requests(now: number): string;
+  approve(id: string, now: number): string;
+  deny(id: string, now: number): string;
   history(): string;
 };
 
@@ -63,6 +66,9 @@ const COMPLETIONS = [
   "sats agent list",
   "sats agent revoke ",
   "sats agent send ",
+  "sats agent requests",
+  "sats agent approve ",
+  "sats agent deny ",
 ];
 
 function cssValue(name: string, fallback: string): string {
@@ -132,10 +138,15 @@ const HELP: Line[] = [
   ["t-o", "  sats faucet [amount]         playground faucet (default 100k)"],
   ["t-o", "  sats send <addr> <amt>       prepare · confirm · sign · broadcast"],
   ["t-o", "  sats history                 finalized transactions"],
+  ["t-dim", "the agent surface — what an AI can do:"],
+  ["t-o", "  sats agent send <name> <addr> <amt>    propose a send (it asks)"],
+  ["t-dim", "your control plane — the agent cannot call these:"],
   ["t-o", "  sats agent grant <name> --budget <sats> [--for 24h]"],
+  ["t-o", "  sats agent requests          review pending asks"],
+  ["t-o", "  sats agent approve <id>      authorize one exact ask, once"],
+  ["t-o", "  sats agent deny <id>         dismiss an ask"],
   ["t-o", "  sats agent list              current authority"],
   ["t-o", "  sats agent revoke <name>     delete a grant"],
-  ["t-o", "  sats agent send <name> <addr> <amt>    run a granted send"],
   ["t-o", "  clear · reset"],
   ["t-dim", "amount shorthand: 25k = 25,000 · 1.5m = 1,500,000"],
 ].map(([cls, text]) => ({ cls, text }));
@@ -532,20 +543,28 @@ export default function Playground() {
         text:
           "granted " +
           grant.agent +
+          " · mode ask — every send waits for your approval" +
           (grant.replaced ? " · previous grant replaced" : ""),
       });
-      push({
-        cls: "t-dim",
-        text:
-          "Try it: sats agent send " +
-          grant.agent +
-          " <address> <amount>",
-      });
+      push(
+        {
+          cls: "t-dim",
+          text:
+            "the agent asks:   sats agent send " +
+            grant.agent +
+            " <address> <amount>",
+        },
+        {
+          cls: "t-dim",
+          text: "you decide:       sats agent requests · sats agent approve <id>",
+        }
+      );
       return;
     }
     if (sub === "list") {
       const rows = JSON.parse(wallet.grants(now())) as {
         agent: string;
+        mode: string;
         remaining_sat: number;
         budget_sat: number;
         tx_count: number;
@@ -561,6 +580,7 @@ export default function Playground() {
           text:
             grant.agent.padEnd(12) +
             " " +
+            grant.mode.padEnd(8) +
             fmt(grant.remaining_sat) +
             "/" +
             fmt(grant.budget_sat) +
@@ -570,6 +590,74 @@ export default function Playground() {
             (grant.expired ? " · expired" : ""),
         });
       }
+      return;
+    }
+    if (sub === "requests") {
+      const rows = JSON.parse(wallet.requests(now())) as {
+        id: string;
+        agent: string;
+        recipient: string;
+        amount_sat: number;
+        reason: string;
+        approvable: boolean;
+        approval_ready: boolean;
+      }[];
+      if (rows.length === 0) {
+        push({ cls: "t-dim", text: "no pending asks" });
+        return;
+      }
+      for (const row of rows) {
+        push({
+          cls: "t-o",
+          text:
+            row.id.padEnd(12) +
+            row.agent.padEnd(10) +
+            fmt(row.amount_sat).padStart(10) +
+            " sat → " +
+            row.recipient.slice(0, 16) +
+            "… · " +
+            row.reason +
+            (row.approval_ready ? " · approval armed" : ""),
+        });
+      }
+      push({
+        cls: "t-dim",
+        text: "approve one exactly once: sats agent approve <id>",
+      });
+      return;
+    }
+    if (sub === "approve") {
+      if (!args[1]) {
+        push({ cls: "t-r", text: "usage: sats agent approve <id>" });
+        return;
+      }
+      const approved = JSON.parse(wallet.approve(args[1], now()));
+      push(
+        {
+          cls: "t-g",
+          text:
+            "approved " +
+            approved.approved +
+            " · " +
+            fmt(approved.amount_sat) +
+            " sat to " +
+            String(approved.recipient).slice(0, 16) +
+            "… · single use",
+        },
+        {
+          cls: "t-dim",
+          text: "the agent's next identical send consumes this approval",
+        }
+      );
+      return;
+    }
+    if (sub === "deny") {
+      if (!args[1]) {
+        push({ cls: "t-r", text: "usage: sats agent deny <id>" });
+        return;
+      }
+      const denied = JSON.parse(wallet.deny(args[1], now()));
+      push({ cls: "t-g", text: "dismissed " + denied.denied });
       return;
     }
     if (sub === "revoke") {
@@ -608,9 +696,7 @@ export default function Playground() {
               fmt(result.amount_sat) +
               " sat · fee " +
               fmt(result.fee_sat) +
-              " sat · grant '" +
-              args[1] +
-              "'",
+              " sat · approved by you, signed by the wallet",
           },
           {
             cls: "t-dim",
@@ -622,19 +708,46 @@ export default function Playground() {
               "…",
           }
         );
+      } else if (result.approvable) {
+        push(
+          {
+            cls: "t-r",
+            text:
+              "denied · " +
+              result.reason +
+              " — no signature was produced",
+          },
+          {
+            cls: "t-dim",
+            text:
+              "the agent is blocked here · request " + result.request_id,
+          },
+          {
+            cls: "t-dim",
+            text:
+              "as the human: sats agent approve " +
+              result.request_id +
+              " · sats agent deny " +
+              result.request_id,
+          }
+        );
       } else {
         push(
-          { cls: "t-r", text: "denied · no signature was produced" },
-          ...JSON.stringify(result, null, 2)
-            .split("\n")
-            .map((text) => ({ cls: "t-o", text: "  " + text }))
+          {
+            cls: "t-r",
+            text:
+              "denied · " +
+              result.reason +
+              " — not approvable; only changing the grant lifts it",
+          },
+          { cls: "t-dim", text: "  " + result.message }
         );
       }
       return;
     }
     push({
       cls: "t-r",
-      text: "usage: sats agent grant|list|revoke|send",
+      text: "usage: sats agent grant|list|revoke|send|requests|approve|deny",
     });
   }
 

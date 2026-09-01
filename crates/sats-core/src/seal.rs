@@ -1,11 +1,10 @@
 //! Sealed blobs: authenticated encryption for secrets at rest.
 //!
-//! Two modes share one versioned format, distinguished by `kdf`:
-//! - `"argon2id"` — password-based (the master seed file)
-//! - `"none"` — a caller-provided random 32-byte key (grant-wrapped seeds)
+//! One mode, one versioned format: `kdf: "argon2id"`, password-based
+//! (the master seed file). Any other `kdf` value fails closed.
 //!
 //! Cipher is XChaCha20-Poly1305; the caller's AAD binds a blob to its
-//! purpose so a grant blob can never be replayed as a seed file.
+//! purpose so a blob can never be replayed for another one.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -18,7 +17,6 @@ use crate::error::SealError;
 
 const VERSION: u32 = 1;
 const KDF_ARGON2ID: &str = "argon2id";
-const KDF_NONE: &str = "none";
 
 /// Argon2id parameters: 64 MiB, 3 passes, 1 lane.
 const M_KIB: u32 = 65536;
@@ -66,25 +64,6 @@ pub fn seal(plaintext: &[u8], password: &[u8], aad: &[u8]) -> Result<SealedBlob,
     })
 }
 
-/// Seal `plaintext` under a caller-provided random 32-byte key (no KDF).
-pub fn seal_with_key(
-    plaintext: &[u8],
-    key: &[u8; 32],
-    aad: &[u8],
-) -> Result<SealedBlob, SealError> {
-    let (nonce, ct) = encrypt(key, plaintext, aad)?;
-    Ok(SealedBlob {
-        v: VERSION,
-        kdf: KDF_NONE.into(),
-        m_kib: 0,
-        t: 0,
-        p: 0,
-        salt: String::new(),
-        nonce: B64.encode(nonce),
-        ct: B64.encode(ct),
-    })
-}
-
 /// Open a password-sealed blob.
 pub fn open(
     blob: &SealedBlob,
@@ -103,36 +82,6 @@ pub fn open(
     let salt = b64_field(&blob.salt, "salt")?;
     let key = derive_key(password, &salt, blob.m_kib, blob.t, blob.p)?;
     decrypt(&key, blob, aad)
-}
-
-/// Open a key-sealed blob.
-pub fn open_with_key(
-    blob: &SealedBlob,
-    key: &[u8; 32],
-    aad: &[u8],
-) -> Result<Zeroizing<Vec<u8>>, SealError> {
-    check_version(blob)?;
-    if blob.kdf != KDF_NONE {
-        return Err(SealError::UnsupportedKdf(blob.kdf.clone()));
-    }
-    decrypt(key, blob, aad)
-}
-
-/// A fresh random 32-byte key, base64-encoded (grant keys).
-pub fn generate_key_b64() -> Result<String, SealError> {
-    let mut key = Zeroizing::new([0u8; 32]);
-    getrandom::fill(key.as_mut()).map_err(|_| SealError::Rng)?;
-    Ok(B64.encode(key.as_slice()))
-}
-
-/// Decode a base64 key produced by [`generate_key_b64`].
-pub fn decode_key_b64(s: &str) -> Result<Zeroizing<[u8; 32]>, SealError> {
-    let bytes = b64_field(s, "key")?;
-    let arr: [u8; 32] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| SealError::Malformed("key must be 32 bytes".into()))?;
-    Ok(Zeroizing::new(arr))
 }
 
 fn check_version(blob: &SealedBlob) -> Result<(), SealError> {
@@ -231,27 +180,13 @@ mod tests {
     }
 
     #[test]
-    fn key_round_trip() {
-        let key_b64 = generate_key_b64().unwrap();
-        let key = decode_key_b64(&key_b64).unwrap();
-        let blob = seal_with_key(b"wrapped seed", &key, AAD).unwrap();
-        assert_eq!(blob.kdf, "none");
-        let pt = open_with_key(&blob, &key, AAD).unwrap();
-        assert_eq!(pt.as_slice(), b"wrapped seed");
-    }
-
-    #[test]
-    fn mode_confusion_rejected() {
-        let key = decode_key_b64(&generate_key_b64().unwrap()).unwrap();
-        let blob = seal_with_key(b"x", &key, AAD).unwrap();
+    fn unknown_kdf_rejected() {
+        // A "none" kdf blob (a pre-release grant-wrapped-seed shape) or
+        // any other unknown kdf value must fail closed.
+        let mut blob = seal(b"x", b"pw", AAD).unwrap();
+        blob.kdf = "none".into();
         assert!(matches!(
             open(&blob, b"pw", AAD),
-            Err(SealError::UnsupportedKdf(_))
-        ));
-
-        let blob2 = seal(b"x", b"pw", AAD).unwrap();
-        assert!(matches!(
-            open_with_key(&blob2, &key, AAD),
             Err(SealError::UnsupportedKdf(_))
         ));
     }

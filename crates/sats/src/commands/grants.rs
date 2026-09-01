@@ -14,8 +14,8 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
     // reads. Pruning takes the grant lock internally.
     store.prune_expired_grants(net_name, now)?;
     let grants = store.active_grants(net_name, now)?;
-    // v1 records are not authority, but they are on disk and a human
-    // needs to be told so rather than shown an empty list.
+    // Wrapped-seed records are not authority, but they are on disk and a
+    // human needs to be told so rather than shown an empty list.
     let legacy = store.legacy_grants(net_name)?;
 
     if json {
@@ -31,15 +31,15 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
                     "spent_sat": g.spent_sat,
                     "remaining_sat": g.remaining_sat(),
                     "max_tx_sat": g.max_tx_sat,
-                    "ask_max_tx_sat": g.ask_max_tx_sat,
                     "max_fee_sat": g.max_fee_sat,
                     "tx_count": g.tx_count,
                     "expires_at": g.expires_at,
                 })
             })
             .collect();
-        // The array shape is the documented contract; the v1 notice goes
-        // to stderr so stdout stays exactly the list a script expects.
+        // The array shape is the documented contract; the wrapped-seed
+        // notice goes to stderr so stdout stays exactly the list a
+        // script expects.
         for agent in &legacy {
             eprintln!("⚠ {}", reissue_notice(agent));
         }
@@ -85,7 +85,7 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
                 format_sats(g.spent_sat),
                 format_sats(g.remaining_sat()),
                 g.max_tx_sat.map(format_sats).unwrap_or_else(|| "—".into()),
-                g.max_fee_sat.map(format_sats).unwrap_or_else(|| "—".into()),
+                format_sats(g.max_fee_sat),
                 g.tx_count.to_string(),
                 format!(
                     "in {}",
@@ -118,10 +118,11 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// What a human must do about a grant left in the v1 format.
+/// What a human must do about a grant left in the pre-daemon
+/// wrapped-seed format.
 fn reissue_notice(agent: &str) -> String {
     format!(
-        "grant for {agent:?} uses the v1 format and cannot sign — re-issue it: \
+        "grant for {agent:?} is a pre-daemon record and cannot sign — re-issue it: \
          sats agent revoke {agent} && sats agent grant {agent} --budget <sats>"
     )
 }

@@ -290,17 +290,14 @@ mod tests {
                     budget_sat: 50000,
                     spent_sat: 123,
                     max_tx_sat: Some(1000),
-                    max_fee_sat: Some(200),
+                    max_fee_sat: 200,
                     created_at: 0,
                     expires_at: u64::MAX,
                     tx_count: 1,
                     token_hash: token.token_hash,
                     token_id: token.token_id,
                     mode: Default::default(),
-                    ask_max_tx_sat: None,
                     allowed_recipients: None,
-                    suspended: None,
-                    strikes: Vec::new(),
                 },
             )
             .unwrap();

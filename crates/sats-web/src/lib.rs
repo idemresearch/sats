@@ -26,9 +26,11 @@ use bdk_wallet::bitcoin::{
 use bdk_wallet::chain::{BlockId, ConfirmationBlockTime, TxUpdate};
 use bdk_wallet::{KeychainKind, Update, Wallet};
 use bip39::Mnemonic;
-use sats_core::authz::{GRANT_FORMAT_VERSION, Grant, SpendRequest};
+use sats_core::authz::{GRANT_FORMAT_VERSION, Grant, IntentApproval, SpendRequest};
 use sats_core::fmt::format_sats;
+use sats_core::intent::SendIntent;
 use sats_core::plan::{PreparedSpend, TransactionRecord};
+use sats_core::request::{AgentRequest, REQUEST_FORMAT_VERSION, RequestOutcome};
 use sats_core::signer::{LocalSigner, Signer};
 use sats_core::{amount, engine, seed, token};
 use serde_json::json;
@@ -46,6 +48,10 @@ struct Sim {
     height: u32,
     grants: HashMap<String, Grant>,
     prepared: HashMap<String, PreparedSpend>,
+    /// Durable agent requests, exactly the native record type: every
+    /// agent send terminates in an ask, and the human approves one
+    /// request at a time.
+    requests: HashMap<String, AgentRequest>,
     history: Vec<TransactionRecord>,
 }
 
@@ -141,6 +147,7 @@ impl Sim {
             height: 0,
             grants: HashMap::new(),
             prepared: HashMap::new(),
+            requests: HashMap::new(),
             history: Vec::new(),
         };
         // A little simulated history so the tip looks like a live chain.
@@ -304,9 +311,7 @@ impl Sim {
         if !finalized {
             return Err("signing did not finalize the transaction".to_string());
         }
-        let mut record = plan
-            .into_transaction(psbt, None)
-            .map_err(|e| e.to_string())?;
+        let mut record = plan.into_transaction(psbt).map_err(|e| e.to_string())?;
         let tx = record.tx().map_err(|e| e.to_string())?;
         record.mark_broadcast();
         self.confirm_tx(tx, now)?;
@@ -355,7 +360,13 @@ impl Sim {
             return Err("--for must be a positive duration".to_string());
         }
         let max_tx_sat = max_tx_str.as_deref().map(amount::parse).transpose()?;
-        let max_fee_sat = max_fee_str.as_deref().map(amount::parse).transpose()?;
+        // Every grant carries a hard fee cap, exactly like the native
+        // grant command: chosen, or defaulted from the budget.
+        let max_fee_sat = max_fee_str
+            .as_deref()
+            .map(amount::parse)
+            .transpose()?
+            .unwrap_or_else(|| sats_core::authz::default_max_fee_sat(budget_sat));
 
         // Same shape as the native grant: a capability token, never key
         // material. The playground has no daemon to hold a seed behind a
@@ -378,10 +389,7 @@ impl Sim {
             token_id: issued.token_id.clone(),
             token_hash: issued.token_hash.clone(),
             mode: Default::default(),
-            ask_max_tx_sat: None,
             allowed_recipients: None,
-            suspended: None,
-            strikes: Vec::new(),
         };
         let out = json!({
             "agent": grant.agent,
@@ -405,6 +413,7 @@ impl Sim {
             .map(|g| {
                 json!({
                     "agent": g.agent,
+                    "mode": g.mode.as_str(),
                     "budget_sat": g.budget_sat,
                     "spent_sat": g.spent_sat,
                     "remaining_sat": g.remaining_sat(),
@@ -428,7 +437,9 @@ impl Sim {
 
     /// The agent send loop the MCP server runs: re-read the grant, plan,
     /// reserve budget before signing, refund only if signing failed.
-    /// Denials are successful results, not errors.
+    /// Denials are successful results, not errors — and the normal first
+    /// result of a novel send is the terminal ask: no agent-originated
+    /// spend reaches the signer without a one-time human approval.
     fn agent_send(
         &mut self,
         agent: &str,
@@ -442,53 +453,293 @@ impl Sim {
                 "no grant named {agent:?} — create one with `sats agent grant`"
             ));
         }
+        // The digest hashes the normalized recipient spelling, exactly
+        // like the native shim.
+        let normalized = parse_recipient(recipient)?.to_string();
+        let amount_sat = amount::parse(amount_str)?;
+        let digest = SendIntent {
+            network: NETWORK_NAME.into(),
+            agent: agent.into(),
+            recipient: normalized.clone(),
+            amount_sat,
+        }
+        .digest();
         let plan = self.plan(recipient, amount_str, fee_rate, now)?;
         let req = SpendRequest {
             amount_sat: plan.amount_sat,
             fee_sat: plan.fee_sat,
         };
-        let grant = self.grants.get_mut(agent).expect("checked above");
-        if let Err(reason) = grant.reserve_send(recipient, &req, "", None, now) {
-            // The CLI's detail lines are column-aligned; joined onto one
-            // line the padding is noise, so collapse runs of spaces.
-            let detail = reason
-                .human()
-                .lines()
-                .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
-                .collect::<Vec<_>>()
-                .join("; ");
-            let message = format!("human authorization required: {detail}");
-            return Ok(json!({
-                "status": "denied",
-                "reason": reason.code(),
-                "message": message,
-                "amount_sat": req.amount_sat,
-                "fee_sat": req.fee_sat,
+        // A one-time approval armed by the human for exactly this intent
+        // is the only authority that can lift the ask.
+        let approval_holder = self
+            .requests
+            .values()
+            .find(|record| {
+                record.agent == agent
+                    && record
+                        .approval
+                        .as_ref()
+                        .is_some_and(|a| a.is_valid_for(&digest, now))
             })
-            .to_string());
-        }
-        match self.sign_and_broadcast(plan, now) {
-            Ok(record) => {
-                let grant = self.grants.get(agent).expect("still present");
+            .map(|record| record.id.clone());
+        let mut approval = approval_holder
+            .as_ref()
+            .and_then(|id| self.requests.get(id))
+            .and_then(|record| record.approval.clone());
+        let grant = self.grants.get_mut(agent).expect("checked above");
+        match grant.reserve_send(&normalized, &req, &digest, approval.as_mut(), now) {
+            Err(reason) => {
+                // The CLI's detail lines are column-aligned; joined onto
+                // one line the padding is noise, so collapse spaces.
+                let detail = reason
+                    .human()
+                    .lines()
+                    .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let id =
+                    self.record_denial(agent, &normalized, amount_sat, &digest, &reason, now)?;
+                let mut message = format!("human authorization required: {detail}");
+                if reason.approvable() {
+                    message.push_str(&format!(
+                        " — the agent is blocked here; as the human, run: sats agent approve {id}"
+                    ));
+                }
                 Ok(json!({
-                    "status": "sent",
-                    "txid": record.txid,
-                    "amount_sat": record.amount_sat,
-                    "fee_sat": record.fee_sat,
-                    "total_sat": record.total_sat(),
-                    "grant_remaining_sat": grant.remaining_sat(),
-                    "grant_tx_count": grant.tx_count,
+                    "status": "denied",
+                    "reason": reason.code(),
+                    "approvable": reason.approvable(),
+                    "message": message,
+                    "request_id": id,
+                    "amount_sat": req.amount_sat,
+                    "fee_sat": req.fee_sat,
                 })
                 .to_string())
             }
-            Err(e) => {
-                // Signing failed, so no signature exists: refund.
-                if let Some(grant) = self.grants.get_mut(agent) {
-                    grant.refund(&req);
+            Ok(()) => {
+                // Consume-before-sign, like the native daemon: the burned
+                // approval lands on its holder before the signature.
+                if let (Some(holder), Some(consumed)) = (&approval_holder, &mut approval) {
+                    consumed.consumed_at = Some(now);
+                    consumed.consumed_by_request = Some(holder.clone());
+                    if let Some(record) = self.requests.get_mut(holder) {
+                        record.approval = Some(consumed.clone());
+                        record.updated_at = now;
+                    }
                 }
-                Err(e)
+                match self.sign_and_broadcast(plan, now) {
+                    Ok(record) => {
+                        if let Some(holder) = &approval_holder
+                            && let Some(pending) = self.requests.get_mut(holder)
+                        {
+                            pending.outcome = Some(RequestOutcome::Sent {
+                                txid: record.txid.clone(),
+                                fee_sat: record.fee_sat,
+                                resolved_at: now,
+                            });
+                            pending.updated_at = now;
+                        }
+                        let grant = self.grants.get(agent).expect("still present");
+                        Ok(json!({
+                            "status": "sent",
+                            "txid": record.txid,
+                            "amount_sat": record.amount_sat,
+                            "fee_sat": record.fee_sat,
+                            "total_sat": record.total_sat(),
+                            "grant_remaining_sat": grant.remaining_sat(),
+                            "grant_tx_count": grant.tx_count,
+                        })
+                        .to_string())
+                    }
+                    Err(e) => {
+                        // Signing failed, so no signature exists: refund
+                        // the budget; the approval stays consumed.
+                        if let Some(grant) = self.grants.get_mut(agent) {
+                            grant.refund(&req);
+                        }
+                        Err(e)
+                    }
+                }
             }
         }
+    }
+
+    /// Record (or refresh) the pending request a denial leaves behind for
+    /// the human review queue. One undismissed record per intent digest,
+    /// so repeated identical asks never spam the queue.
+    fn record_denial(
+        &mut self,
+        agent: &str,
+        recipient: &str,
+        amount_sat: u64,
+        digest: &str,
+        reason: &sats_core::authz::DenyReason,
+        now: u64,
+    ) -> Result<String, String> {
+        let existing = self
+            .requests
+            .values()
+            .find(|record| {
+                record.agent == agent
+                    && record.intent_digest == digest
+                    && !record.has_side_effect()
+                    && record.dismissed_at.is_none()
+            })
+            .map(|record| record.id.clone());
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let bytes = random_bytes32()?;
+                format!(
+                    "r-{:02x}{:02x}{:02x}{:02x}",
+                    bytes[0], bytes[1], bytes[2], bytes[3]
+                )
+            }
+        };
+        let record = self
+            .requests
+            .entry(id.clone())
+            .or_insert_with(|| AgentRequest {
+                format_version: REQUEST_FORMAT_VERSION,
+                id: id.clone(),
+                network: NETWORK_NAME.into(),
+                agent: agent.into(),
+                client_request_id: None,
+                recipient: recipient.into(),
+                amount_sat,
+                intent_digest: digest.into(),
+                created_at: now,
+                updated_at: now,
+                outcome: None,
+                approval: None,
+                dismissed_at: None,
+            });
+        record.outcome = Some(RequestOutcome::Denied {
+            deny: reason.clone(),
+            resolved_at: now,
+        });
+        record.updated_at = now;
+        Ok(id)
+    }
+
+    /// The human review queue: pending asks, with whatever approval is
+    /// already armed.
+    fn requests_view(&self, now: u64) -> Result<String, String> {
+        let mut rows: Vec<_> = self
+            .requests
+            .values()
+            .filter(|record| record.is_pending())
+            .collect();
+        rows.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        let out: Vec<_> = rows
+            .into_iter()
+            .map(|record| {
+                let (reason, approvable) = match &record.outcome {
+                    Some(RequestOutcome::Denied { deny, .. }) => {
+                        (deny.code().to_string(), deny.approvable())
+                    }
+                    _ => ("unknown".into(), false),
+                };
+                json!({
+                    "id": record.id,
+                    "agent": record.agent,
+                    "recipient": record.recipient,
+                    "amount_sat": record.amount_sat,
+                    "reason": reason,
+                    "approvable": approvable,
+                    "approval_ready": record
+                        .approval
+                        .as_ref()
+                        .is_some_and(|a| a.is_valid_for(&record.intent_digest, now)),
+                })
+            })
+            .collect();
+        Ok(json!(out).to_string())
+    }
+
+    /// The human's one-time approval of an exact pending ask — the
+    /// control-plane act; nothing an agent can call.
+    fn approve(&mut self, id: &str, now: u64) -> Result<String, String> {
+        let record = self
+            .requests
+            .get(id)
+            .ok_or_else(|| format!("no request {id:?} — see: sats agent requests"))?;
+        if record.has_side_effect() {
+            return Err(format!(
+                "request {id} was already sent — nothing to approve"
+            ));
+        }
+        let Some(RequestOutcome::Denied { deny, .. }) = &record.outcome else {
+            return Err(format!("request {id} is not awaiting review"));
+        };
+        if !deny.approvable() {
+            return Err(format!(
+                "request {id} was denied {}, which no approval can lift — the only \
+                 escalation is changing the grant itself",
+                deny.code()
+            ));
+        }
+        let grant = self
+            .grants
+            .get(&record.agent)
+            .ok_or_else(|| format!("no active grant for {:?}", record.agent))?;
+        // Recheck against the current grant, exactly like the native
+        // command: an old ask cannot arm an approval for a proposal the
+        // grant's boundaries now refuse.
+        if let sats_core::authz::Decision::Deny(current) = sats_core::authz::evaluate_send(
+            grant,
+            &record.recipient,
+            &SpendRequest {
+                amount_sat: record.amount_sat,
+                fee_sat: 0,
+            },
+            now,
+        ) && !current.approvable()
+        {
+            return Err(format!(
+                "the current grant denies request {id} with {} — no approval can lift it",
+                current.code()
+            ));
+        }
+        let expires_at = now.saturating_add(3_600);
+        let digest = record.intent_digest.clone();
+        let record = self.requests.get_mut(id).expect("checked above");
+        record.approval = Some(IntentApproval {
+            intent_digest: digest,
+            approved_at: now,
+            expires_at,
+            consumed_at: None,
+            consumed_by_request: None,
+        });
+        record.dismissed_at = None;
+        record.updated_at = now;
+        Ok(json!({
+            "approved": id,
+            "agent": record.agent,
+            "recipient": record.recipient,
+            "amount_sat": record.amount_sat,
+            "expires_at": expires_at,
+            "single_use": true,
+        })
+        .to_string())
+    }
+
+    /// Dismiss a pending ask and revoke its unconsumed approval.
+    fn deny(&mut self, id: &str, now: u64) -> Result<String, String> {
+        let record = self
+            .requests
+            .get_mut(id)
+            .ok_or_else(|| format!("no request {id:?} — see: sats agent requests"))?;
+        if record
+            .approval
+            .as_ref()
+            .is_some_and(|a| a.consumed_at.is_none())
+        {
+            record.approval = None;
+        }
+        record.dismissed_at = Some(now);
+        record.updated_at = now;
+        Ok(json!({ "denied": id }).to_string())
     }
 
     fn history(&self) -> Result<String, String> {
@@ -626,6 +877,21 @@ impl Playground {
             .agent_send(agent, recipient, amount, fee_rate, now as u64))
     }
 
+    /// The human review queue of pending asks.
+    pub fn requests(&self, now: f64) -> Result<String, JsError> {
+        js(self.sim_ref()?.requests_view(now as u64))
+    }
+
+    /// The human control plane: approve one exact pending ask, once.
+    pub fn approve(&mut self, id: &str, now: f64) -> Result<String, JsError> {
+        js(self.sim_mut()?.approve(id, now as u64))
+    }
+
+    /// The human control plane: dismiss a pending ask.
+    pub fn deny(&mut self, id: &str, now: f64) -> Result<String, JsError> {
+        js(self.sim_mut()?.deny(id, now as u64))
+    }
+
     pub fn history(&self) -> Result<String, JsError> {
         js(self.sim_ref()?.history())
     }
@@ -746,20 +1012,89 @@ mod tests {
     }
 
     #[test]
-    fn agent_send_within_grant_draws_budget_down() {
+    fn agent_send_asks_and_the_approved_retry_draws_budget_down() {
         let mut sim = funded_sim();
         let addr = own_address(&mut sim);
         sim.grant("claude", "50k", None, None, 86_400, NOW).unwrap();
+        let grants = value(&sim.grants(NOW).unwrap());
+        assert_eq!(grants[0]["mode"], "ask", "every grant asks");
+
+        // The novel send terminates in the ask and files a request.
+        let asked = value(&sim.agent_send("claude", &addr, "10k", 2, NOW).unwrap());
+        assert_eq!(asked["status"], "denied");
+        assert_eq!(asked["reason"], "ask_required");
+        assert_eq!(asked["approvable"], true);
+        let id = asked["request_id"].as_str().unwrap().to_string();
+        assert!(
+            asked["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("sats agent approve {id}")),
+        );
+        let queue = value(&sim.requests_view(NOW).unwrap());
+        assert_eq!(queue.as_array().unwrap().len(), 1);
+        assert_eq!(queue[0]["id"], id.as_str());
+        assert_eq!(queue[0]["approval_ready"], false);
+
+        // Asking again identically refreshes the same request, not a
+        // second queue entry — and still draws nothing.
+        let again = value(&sim.agent_send("claude", &addr, "10k", 2, NOW).unwrap());
+        assert_eq!(again["request_id"], id.as_str());
+        assert_eq!(
+            value(&sim.requests_view(NOW).unwrap())
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let grants = value(&sim.grants(NOW).unwrap());
+        assert_eq!(grants[0]["spent_sat"], 0, "asks draw no budget");
+
+        // The human approves; the identical retry signs exactly once.
+        let approved = value(&sim.approve(&id, NOW).unwrap());
+        assert_eq!(approved["single_use"], true);
         let sent = value(&sim.agent_send("claude", &addr, "10k", 2, NOW).unwrap());
-        assert_eq!(sent["status"], "sent");
+        assert_eq!(sent["status"], "sent", "got: {sent}");
         let fee = sent["fee_sat"].as_u64().unwrap();
         assert_eq!(
             sent["grant_remaining_sat"].as_u64().unwrap(),
             50_000 - 10_000 - fee
         );
-
         let grants = value(&sim.grants(NOW).unwrap());
         assert_eq!(grants[0]["tx_count"], 1);
+
+        // The approval is consumed: the next identical send asks again.
+        let fresh = value(&sim.agent_send("claude", &addr, "10k", 2, NOW).unwrap());
+        assert_eq!(fresh["reason"], "ask_required", "got: {fresh}");
+        let grants = value(&sim.grants(NOW).unwrap());
+        assert_eq!(grants[0]["tx_count"], 1, "no second signature");
+    }
+
+    #[test]
+    fn deny_dismisses_and_hard_refusals_cannot_be_approved() {
+        let mut sim = funded_sim();
+        let addr = own_address(&mut sim);
+        sim.grant("claude", "50k", None, None, 86_400, NOW).unwrap();
+        let asked = value(&sim.agent_send("claude", &addr, "5k", 2, NOW).unwrap());
+        let id = asked["request_id"].as_str().unwrap().to_string();
+        sim.deny(&id, NOW).unwrap();
+        assert!(
+            value(&sim.requests_view(NOW).unwrap())
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "dismissed asks leave the queue"
+        );
+
+        // An expired grant is a hard refusal no approval can lift, and
+        // approve refuses to arm one for it.
+        let late = NOW + 86_400;
+        let expired = value(&sim.agent_send("claude", &addr, "5k", 2, late).unwrap());
+        assert_eq!(expired["reason"], "expired");
+        assert_eq!(expired["approvable"], false);
+        let id = expired["request_id"].as_str().unwrap().to_string();
+        let err = sim.approve(&id, late).unwrap_err();
+        assert!(err.contains("no approval can lift"), "{err}");
     }
 
     #[test]

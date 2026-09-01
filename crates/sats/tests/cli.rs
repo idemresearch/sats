@@ -393,13 +393,14 @@ fn balance_tolerates_sync_failure_and_reports_it() {
 fn psbt_sign_needs_an_explicit_source() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
-    // No hidden "newest session" default: FILE or --session is required.
+    // No hidden "newest session" default: FILE is required, and the
+    // removed --session flag stays removed.
     sats(&dir).args(["psbt", "sign"]).assert().code(2);
     sats(&dir)
         .args(["psbt", "sign", "--session", "nope"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("no PSBT session nope"));
+        .code(2)
+        .stderr(predicate::str::contains("--session"));
     sats(&dir)
         .args([
             "psbt",
@@ -543,12 +544,12 @@ fn grant_list_revoke_lifecycle() {
         .stderr(predicate::str::contains("no grant"));
 }
 
-/// A grant with only a budget still gets a fee cap: without one, a bad
-/// fee estimate can burn the whole budget as miner fees. The default is
-/// max(2% of budget, 1000 sat), clamped to the budget; lifting it takes
-/// the explicit `--no-max-fee`.
+/// Every grant carries a hard fee cap: without one, a bad fee estimate
+/// can burn the whole budget as miner fees. The default is max(2% of
+/// budget, 1000 sat), clamped to the budget; there is no way to issue a
+/// grant without one.
 #[test]
-fn grant_defaults_a_fee_cap_and_no_max_fee_opts_out() {
+fn grant_always_carries_a_fee_cap() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
 
@@ -564,13 +565,8 @@ fn grant_defaults_a_fee_cap_and_no_max_fee_opts_out() {
     assert_eq!(granted_fee(&["--budget", "200k"]), 4_000, "2% of budget");
     assert_eq!(granted_fee(&["--budget", "500"]), 500, "clamped to budget");
     assert_eq!(granted_fee(&["--budget", "50k", "--max-fee", "250"]), 250);
-    assert_eq!(
-        granted_fee(&["--budget", "50k", "--no-max-fee"]),
-        serde_json::Value::Null,
-        "lifting the cap is explicit"
-    );
 
-    // The two fee flags contradict each other; clap refuses the pair.
+    // The removed opt-out stays removed.
     sats(&dir)
         .args([
             "agent",
@@ -578,21 +574,19 @@ fn grant_defaults_a_fee_cap_and_no_max_fee_opts_out() {
             "claude",
             "--budget",
             "50k",
-            "--max-fee",
-            "250",
             "--no-max-fee",
         ])
         .assert()
         .code(2);
 
-    // The human output names the default and both escape hatches.
+    // The human output names the default and how to choose one.
     sats(&dir)
         .args(["agent", "grant", "claude", "--budget", "50k"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Max fee"))
         .stdout(predicate::str::contains("default"))
-        .stdout(predicate::str::contains("--no-max-fee"));
+        .stdout(predicate::str::contains("--max-fee"));
 }
 
 #[test]
@@ -831,14 +825,13 @@ fn agent_log_renders_events_and_filters_by_request() {
     assert_eq!(limited.as_array().unwrap()[0]["event"], "quantum_settled");
 }
 
-/// The hard ceiling flag validates its band geometry and lands in both
-/// the JSON emission and the grant file.
+/// One amount boundary: `--max-tx` is hard, the removed band flag stays
+/// removed, and the grant file carries the first released format.
 #[test]
-fn grant_hard_ceiling_validates_and_persists() {
+fn grant_writes_the_first_released_format() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
 
-    // A ceiling below the automatic cap is a negative-width ask band.
     sats(&dir)
         .args([
             "agent",
@@ -849,11 +842,10 @@ fn grant_hard_ceiling_validates_and_persists() {
             "--max-tx",
             "10000",
             "--ask-max-tx",
-            "5000",
+            "25000",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("must be at least"));
+        .code(2);
     assert!(
         !dir.path().join("signet/grants/claude.json").exists(),
         "a refused grant writes nothing"
@@ -862,27 +854,19 @@ fn grant_hard_ceiling_validates_and_persists() {
     let issued = json_stdout(
         sats(&dir)
             .args([
-                "--json",
-                "agent",
-                "grant",
-                "claude",
-                "--budget",
-                "50000",
-                "--max-tx",
-                "10000",
-                "--ask-max-tx",
-                "25000",
+                "--json", "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
             ])
             .assert()
             .success(),
     );
-    assert_eq!(issued["ask_max_tx_sat"], 25_000);
+    assert_eq!(issued["max_tx_sat"], 10_000);
     let grant: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(dir.path().join("signet/grants/claude.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(grant["ask_max_tx_sat"], 25_000);
-    assert_eq!(grant["format_version"], 3);
+    assert_eq!(grant["max_tx_sat"], 10_000);
+    assert_eq!(grant["format_version"], 1);
+    assert!(grant.get("ask_max_tx_sat").is_none());
 }
 
 /// `--watch` is the trusted discovery channel: it must announce each
@@ -913,7 +897,7 @@ fn agent_requests_watch_streams_newly_pending_asks() {
             "intent_digest": "d".repeat(64), "created_at": 1_000, "updated_at": 1_000,
             "outcome": {
                 "status": "denied",
-                "deny": { "reason": "over_ask_max", "requested_sat": 30_000, "ask_max_tx_sat": 25_000 },
+                "deny": { "reason": "over_max_tx", "requested_sat": 30_000, "max_tx_sat": 10_000 },
                 "resolved_at": 1_001,
             },
         });
@@ -972,7 +956,7 @@ fn agent_requests_watch_streams_newly_pending_asks() {
     // Approving removes it from the queue silently; only the next new
     // ask prints.
     sats(&dir)
-        .args(["agent", "approve", "k-w-1", "--max-fee", "100"])
+        .args(["agent", "approve", "k-w-1"])
         .assert()
         .success();
     fabricate_denied_request(&dir, "claude", "k-w-2");
@@ -1067,7 +1051,7 @@ fn agent_mode_transitions_gate_on_widening() {
 
     // Widening with the wrong password fails and changes nothing.
     sats(&dir)
-        .args(["agent", "mode", "claude", "auto"])
+        .args(["agent", "mode", "claude", "ask"])
         .env("SATS_PASSWORD", "wrong-password")
         .assert()
         .failure()
@@ -1076,12 +1060,12 @@ fn agent_mode_transitions_gate_on_widening() {
 
     // Widening with the right password succeeds; repeating is a no-op.
     sats(&dir)
-        .args(["agent", "mode", "claude", "auto"])
+        .args(["agent", "mode", "claude", "ask"])
         .assert()
         .success();
-    assert_eq!(grant_mode(&dir), "auto");
+    assert_eq!(grant_mode(&dir), "ask");
     sats(&dir)
-        .args(["agent", "mode", "claude", "auto"])
+        .args(["agent", "mode", "claude", "ask"])
         .assert()
         .success()
         .stdout(predicate::str::contains("already"));
@@ -1090,6 +1074,13 @@ fn agent_mode_transitions_gate_on_widening() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown mode"));
+    // There is no autonomous mode: "auto" is just an unknown word.
+    sats(&dir)
+        .args(["agent", "mode", "claude", "auto"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown mode"));
+    assert_eq!(grant_mode(&dir), "ask");
 
     // Both real transitions are attributable in the log, with direction.
     let log = json_stdout(
@@ -1109,7 +1100,7 @@ fn agent_mode_transitions_gate_on_widening() {
     assert_eq!(changes[0]["to"], "observe");
     assert_eq!(changes[0]["widened"], false);
     assert_eq!(changes[1]["from"], "observe");
-    assert_eq!(changes[1]["to"], "auto");
+    assert_eq!(changes[1]["to"], "ask");
     assert_eq!(changes[1]["widened"], true);
 
     // The list shows the mode column.
@@ -1119,7 +1110,66 @@ fn agent_mode_transitions_gate_on_widening() {
             .assert()
             .success(),
     );
-    assert_eq!(list.as_array().unwrap()[0]["mode"], "auto");
+    assert_eq!(list.as_array().unwrap()[0]["mode"], "ask");
+}
+
+/// Pre-release state discipline: a grant file spelling the removed
+/// `auto` mode is unreleased development state. It is never honored as
+/// any mode and never migrated — commands that use the grant fail with
+/// the recreate hint, listing skips it, and re-granting replaces it.
+#[test]
+fn unreleased_auto_state_fails_closed_and_is_recreated() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args([
+            "agent", "grant", "claude", "--budget", "50000", "--mode", "auto",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown mode"));
+    sats(&dir)
+        .args(["agent", "grant", "claude", "--budget", "50000"])
+        .assert()
+        .success();
+    let grant_path = dir.path().join("signet/grants/claude.json");
+    let mut grant: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&grant_path).unwrap()).unwrap();
+    grant["mode"] = serde_json::json!("auto");
+    std::fs::write(&grant_path, grant.to_string()).unwrap();
+
+    // A command that reasons about the grant refuses with the fix.
+    sats(&dir)
+        .args(["agent", "mode", "claude", "observe"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not migrated; recreate it"));
+    // Listing does not honor it as authority in any mode.
+    let list = json_stdout(
+        sats(&dir)
+            .args(["--json", "agent", "list"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(list, serde_json::json!([]));
+    // The file is untouched — nothing migrates unreleased state...
+    let raw = std::fs::read_to_string(&grant_path).unwrap();
+    assert!(raw.contains("auto"), "no silent rewrite: {raw}");
+
+    // ...and the named recreate flow replaces it with a clean
+    // current-format record.
+    sats(&dir)
+        .args(["agent", "revoke", "claude"])
+        .assert()
+        .success();
+    sats(&dir)
+        .args(["agent", "grant", "claude", "--budget", "50000"])
+        .assert()
+        .success();
+    let grant: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&grant_path).unwrap()).unwrap();
+    assert_eq!(grant["mode"], "ask");
+    assert_eq!(grant["format_version"], 1);
 }
 
 /// Allowlist edits carry the attenuation rule (allow = password,
@@ -1260,6 +1310,8 @@ fn agent_allowlist_edits_gate_on_widening() {
     );
 }
 
+/// Write the durable record an agent's novel ask leaves behind: an
+/// in-grant proposal resolved with the terminal, approvable ask.
 fn fabricate_denied_request(dir: &TempDir, agent: &str, id: &str) {
     let requests_dir = dir.path().join("signet/agent-requests").join(agent);
     std::fs::create_dir_all(&requests_dir).unwrap();
@@ -1269,13 +1321,13 @@ fn fabricate_denied_request(dir: &TempDir, agent: &str, id: &str) {
         "network": "signet",
         "agent": agent,
         "recipient": common::ADDRESS,
-        "amount_sat": 20_000,
+        "amount_sat": 5_000,
         "intent_digest": "d".repeat(64),
         "created_at": 1_000,
         "updated_at": 1_001,
         "outcome": {
             "status": "denied",
-            "deny": { "reason": "over_max_tx", "requested_sat": 20_000, "max_tx_sat": 10_000 },
+            "deny": { "reason": "ask_required" },
             "resolved_at": 1_001,
         },
     });
@@ -1283,16 +1335,16 @@ fn fabricate_denied_request(dir: &TempDir, agent: &str, id: &str) {
 }
 
 #[test]
-fn approve_requires_the_password_and_arms_a_single_use_exception() {
+fn approve_requires_the_password_and_arms_a_single_use_approval() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     fabricate_denied_request(&dir, "claude", "k-big-1");
 
     // Without a live grant there is no approval to arm, even for a
-    // historically approvable request. Refuse before the password.
+    // recorded ask. Refuse before the password.
     sats(&dir)
         .env("SATS_PASSWORD", "wrong")
-        .args(["agent", "approve", "k-big-1", "--max-fee", "500"])
+        .args(["agent", "approve", "k-big-1"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("no active grant"));
@@ -1306,7 +1358,7 @@ fn approve_requires_the_password_and_arms_a_single_use_exception() {
     // The wrong password is a hard failure that writes no approval.
     sats(&dir)
         .env("SATS_PASSWORD", "wrong")
-        .args(["agent", "approve", "k-big-1", "--max-fee", "500"])
+        .args(["agent", "approve", "k-big-1"])
         .assert()
         .failure();
     let request: serde_json::Value = serde_json::from_slice(
@@ -1315,36 +1367,48 @@ fn approve_requires_the_password_and_arms_a_single_use_exception() {
     .unwrap();
     assert!(request.get("approval").is_none());
 
-    // This denial recorded no fee estimate, so the ceiling is explicit.
-    sats(&dir)
-        .args(["agent", "approve", "k-big-1"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("--max-fee"));
-
+    // The routine bare approve arms a digest-bound single-use approval;
+    // the fee stays bounded by the grant's own fee cap at send time.
     let approved = json_stdout(
         sats(&dir)
-            .args(["agent", "approve", "k-big-1", "--max-fee", "500", "--json"])
+            .args(["agent", "approve", "k-big-1", "--json"])
             .assert()
             .success(),
     );
     assert_eq!(approved["id"], "k-big-1");
-    assert_eq!(approved["max_fee_sat"], 500);
     assert_eq!(approved["replaced"], false);
+
+    // Approving again replaces the standing unconsumed approval.
+    let approved = json_stdout(
+        sats(&dir)
+            .args(["agent", "approve", "k-big-1", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(approved["replaced"], true);
     let request: serde_json::Value = serde_json::from_slice(
         &std::fs::read(dir.path().join("signet/agent-requests/claude/k-big-1.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(request["approval"]["max_fee_sat"], 500);
     assert_eq!(request["approval"]["intent_digest"], "d".repeat(64));
+    assert!(
+        request["approval"].get("max_fee_sat").is_none(),
+        "an approval carries no fee bound of its own — the grant's cap governs"
+    );
 
     // An ambiguous prefix refuses rather than guessing.
     fabricate_denied_request(&dir, "claude", "k-big-2");
     sats(&dir)
-        .args(["agent", "approve", "k-big", "--max-fee", "500"])
+        .args(["agent", "approve", "k-big"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("ambiguous"));
+
+    // The removed per-approval fee ceiling stays removed.
+    sats(&dir)
+        .args(["agent", "approve", "k-big-1", "--max-fee", "500"])
+        .assert()
+        .code(2);
 }
 
 #[test]
@@ -1377,7 +1441,7 @@ fn approve_rechecks_policy_before_writing() {
     lock.lock().unwrap();
     let stdout_path = dir.path().join("approve-output.txt");
     let mut child = Command::new(env!("CARGO_BIN_EXE_sats"))
-        .args(["agent", "approve", "k-race-1", "--max-fee", "500"])
+        .args(["agent", "approve", "k-race-1"])
         .env("SATS_DIR", dir.path())
         .env("SATS_PASSWORD", common::PASSWORD)
         .env("NO_COLOR", "1")
@@ -1433,7 +1497,7 @@ fn deny_dismisses_and_revokes_the_unconsumed_approval() {
         .success();
     fabricate_denied_request(&dir, "claude", "k-big-1");
     sats(&dir)
-        .args(["agent", "approve", "k-big-1", "--max-fee", "500"])
+        .args(["agent", "approve", "k-big-1"])
         .assert()
         .success();
 

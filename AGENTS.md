@@ -15,6 +15,7 @@ linked for the area you are changing.
 
 Primary references:
 
+- [Direction](docs/direction.md): the invariant and stable design decisions.
 - [Architecture](docs/architecture.md): module ownership and request flows.
 - [Security](docs/security.md): key, grant, signing, and provider invariants.
 - [CLI](docs/cli.md): current user-facing commands and configuration.
@@ -34,14 +35,35 @@ seed in memory. The MCP server is a shim: it prepares and broadcasts, and
 carries a bearer token that names a policy rather than opening anything.
 
 Prepared spends are PSBTs. Normal sends keep them in memory; an explicit
-export writes the unsigned PSBT to a user-named file artifact, and stored
-PSBT sessions are read-only legacy state from older releases. Once signed,
+export writes the unsigned PSBT to a user-named file artifact. Once signed,
 durable state contains private raw transaction hex rather than a signed
 PSBT. The persisted BDK wallet is watch-only. Human and agent sends share
 validation, sync, protection, fee estimation, and preparation. Agent sends
-add deterministic authorization before a signature is produced.
+add deterministic authorization and a one-time human approval before a
+signature is produced: no agent-originated spend may reach the signer
+without explicit, one-time human authorization bound to that action.
+There is no autonomous agent spend mode. See `docs/direction.md`.
 
 Signet is the default. Mainnet must remain an explicit choice.
+
+## Pre-release compatibility policy
+
+sats has not shipped a release. There are no users and no compatibility
+contract to preserve. Until the first release:
+
+- Do not keep obsolete behavior for compatibility.
+- Prefer deletion over aliases, migrations, and deprecated code paths.
+- Development state may be invalidated: unsupported pre-release state
+  fails with a clear error naming the fix — recreate it — never with a
+  silent migration.
+- Migration code exists only for a released format or real user data.
+- Security simplification always wins over compatibility with unreleased
+  behavior.
+
+One recorded exception: a pre-daemon grant file carrying `wrapped_seed`
+is detected and refused with wallet-rotation guidance, because that file
+is a possible seed disclosure and "recreate the grant" would be dangerous
+advice for exactly that file.
 
 ## Repository ownership
 
@@ -51,7 +73,7 @@ Signet is the default. Mainnet must remain an explicit choice.
 | `crates/sats-core/src/authz.rs` | Pure grant decisions, reservation, and refund rules |
 | `crates/sats-core/src/token.rs` | Agent capability tokens: mint, hash, constant-time verify |
 | `crates/sats-core/src/verify.rs` | Recomputing a PSBT's payments and fee from the wallet's own descriptors |
-| `crates/sats-core/src/plan.rs` | Ephemeral prepared spends, explicit PSBT sessions, finalized transaction records, and legacy-plan compatibility |
+| `crates/sats-core/src/plan.rs` | Ephemeral prepared spends and finalized transaction records |
 | `crates/sats-core/src/seed.rs` | BIP-39 seed handling and BIP-86 descriptors |
 | `crates/sats-core/src/seal.rs` | Versioned authenticated secret sealing |
 | `crates/sats-core/src/signer.rs` | Signer trait and local in-memory signer |
@@ -59,7 +81,7 @@ Signet is the default. Mainnet must remain an explicit choice.
 | `crates/sats/src/cli.rs` | Clap command and flag definitions |
 | `crates/sats/src/commands/` | Human CLI workflows and rendering |
 | `crates/sats/src/provider/` | Native chain providers, capability resolution, and guards |
-| `crates/sats/src/store.rs` | Paths, atomic files, permissions, PSBT sessions, finalized transactions, legacy plans, and grants |
+| `crates/sats/src/store.rs` | Paths, atomic files, permissions, finalized transactions, grants, requests, and the event log |
 | `crates/sats/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
 | `crates/sats/src/daemon/` | satsd: socket protocol, lock state, and the granted agent send path |
 | `crates/sats/src/mcp/` | MCP transport and schemas — a shim over the daemon |
@@ -71,6 +93,20 @@ Signet is the default. Mainnet must remain an explicit choice.
 `main.rs` is a composition root. Do not put feature logic there.
 
 ## Non-negotiable invariants
+
+These come first; everything else serves them:
+
+- Agents never have signing authority. Only `satsd` holds key material,
+  and nothing agent-facing may hold, receive, or reconstruct it.
+- Every agent-originated spend requires explicit, one-time human
+  authorization bound to that exact action before it reaches the signer.
+- A grant defines what an agent is allowed to propose. Human approval
+  authorizes one valid proposal inside the grant — it cannot exceed the
+  grant.
+- MCP and agent-facing code must never expose a generic signing
+  primitive.
+- Pre-release, prefer removing obsolete security models over supporting
+  them (see the pre-release compatibility policy above).
 
 ### Portable core
 
@@ -101,7 +137,7 @@ and rendering belong to callers.
 - A grant carries no key material. Never reintroduce a field from which a
   seed can be recovered; only a token hash belongs beside a policy.
 - A bearer token is emitted once, at creation, and never persisted.
-- Write PSBT sessions and finalized transaction records with restrictive
+- Write finalized transaction records and agent requests with restrictive
   permissions; both expose wallet and payment metadata.
 
 ### Agent authorization
@@ -114,9 +150,20 @@ and rendering belong to callers.
 - Operational conditions carry a typed `error_code`; policy refusals carry a
   denial `reason`. Never conflate them — a locked wallet is not a denial a
   human can approve.
-- Preserve check order: expiry, amount cap, fee cap, remaining budget.
+- A send never allows on the grant alone: every grant boundary is hard —
+  expiry, mode, intent authority, overflow, recipient allowlist, amount
+  cap, fee cap, budget — and a proposal inside all of them terminates in
+  the one approvable refusal, `ask_required`. The only allow a spend can
+  reach rides a digest-bound one-time approval, which lifts only that
+  terminal ask, never a boundary. Never reintroduce an autonomous path
+  to the signer, and never make a boundary approvable.
+- Preserve check order: the specific boundary answers before the
+  terminal ask, so a refusal names what was crossed. `ask_required` must
+  stay the single approvable reason.
 - Budget includes amount plus fee.
-- Reserve and persist budget before signing.
+- Reserve and persist budget before signing, and construct the signer only
+  after the reservation succeeds (`send::authorize` takes it as a factory
+  for exactly this reason).
 - Refund only when signing failed and no signature exists.
 - Never refund a signed transaction after a broadcast failure.
 - Re-read the grant on every send so revocation takes effect immediately.
@@ -198,13 +245,18 @@ Call it from the shared native workflow so CLI and MCP cannot diverge.
 
 ### State format change
 
-Existing seed, PSBT-session, finalized-transaction, legacy-plan, grant,
-config, and SQLite state are compatibility surfaces. Grant records are
-versioned (`GRANT_FORMAT_VERSION`); v1 records are read, reported, and
-refused rather than honored, because honoring one restores a seed
-disclosure. Define backward-reading
-behavior before changing a serialized shape. Preserve atomic writes and
-restrictive permissions for sensitive files.
+The pre-release compatibility policy applies: serialized shapes may
+change freely, and unsupported development state fails with a clear
+error naming the recreate step. Grant records carry
+`GRANT_FORMAT_VERSION` (currently 1, the first released schema);
+records claiming a newer version are refused because they may carry
+restrictions this build cannot see. Request and event records carry
+their own versions and are read tolerantly for the same forward-safety
+reason. The one backward-reading exception is the pre-daemon
+`wrapped_seed` grant, refused with wallet-rotation guidance. Preserve
+atomic writes and restrictive permissions for sensitive files. After
+the first release, define backward-reading behavior before changing a
+released shape.
 
 ## Documentation policy
 

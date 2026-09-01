@@ -28,18 +28,6 @@ pub fn run(
     if lifetime == 0 {
         bail!("--for must be a positive duration");
     }
-    // The hard ceiling bounds what may even be asked for; a ceiling below
-    // the automatic cap would make the ask band negative-width nonsense.
-    if let (Some(max_tx), Some(ask_max_tx)) = (args.max_tx, args.ask_max_tx)
-        && ask_max_tx < max_tx
-    {
-        bail!(
-            "--ask-max-tx ({} sat) must be at least --max-tx ({} sat) — amounts up to \
-             --max-tx are automatic, up to --ask-max-tx are approvable, above it never",
-            format_sats(ask_max_tx),
-            format_sats(max_tx),
-        );
-    }
     // Recipients are parsed and network-checked here, at the boundary,
     // and stored in the canonical spelling the intent digest hashes.
     // No --to means no allowlist: every recipient, as before.
@@ -65,15 +53,13 @@ pub fn run(
         }
         Some(list)
     };
-    // A grant with no fee cap lets one bad fee estimate burn the whole
-    // budget as miner fees, so the cap defaults on. Lifting it entirely
-    // is `--no-max-fee`, an explicit choice.
-    let defaulted_fee = args.max_fee.is_none() && !args.no_max_fee;
-    let max_fee = match (args.max_fee, args.no_max_fee) {
-        (Some(cap), _) => Some(cap),
-        (None, true) => None,
-        (None, false) => Some(sats_core::authz::default_max_fee_sat(budget)),
-    };
+    // A grant with no fee cap would let one bad fee estimate burn the
+    // whole budget as miner fees, so every grant carries one: chosen
+    // with --max-fee, defaulted otherwise.
+    let defaulted_fee = args.max_fee.is_none();
+    let max_fee = args
+        .max_fee
+        .unwrap_or_else(|| sats_core::authz::default_max_fee_sat(budget));
     let net_name = network_name(network);
     let replacing = store.load_grant(net_name, agent)?.is_some();
 
@@ -82,9 +68,15 @@ pub fn run(
             ("Grant", agent.to_string()),
             ("Budget", format!("{} sat", format_sats(budget))),
         ];
-        if mode != sats_core::authz::GrantMode::Auto {
-            rows.push(("Mode", mode.as_str().to_string()));
-        }
+        rows.push((
+            "Mode",
+            match mode {
+                sats_core::authz::GrantMode::Ask => {
+                    "ask — every send needs your approval".to_string()
+                }
+                sats_core::authz::GrantMode::Observe => "observe — read-only".to_string(),
+            },
+        ));
         if let Some(list) = &allowed_recipients {
             for recipient in list {
                 rows.push(("To", recipient.clone()));
@@ -93,30 +85,19 @@ pub fn run(
         if let Some(max_tx) = args.max_tx {
             rows.push(("Max tx", format!("{} sat", format_sats(max_tx))));
         }
-        if let Some(ask_max_tx) = args.ask_max_tx {
-            rows.push((
-                "Ask max",
-                format!(
-                    "{} sat (above this: never approvable)",
-                    format_sats(ask_max_tx)
-                ),
-            ));
-        }
-        if let Some(max_fee) = max_fee {
-            let row = if defaulted_fee {
-                format!(
-                    "{} sat (default — set with --max-fee, lift with --no-max-fee)",
-                    format_sats(max_fee)
-                )
-            } else {
-                format!("{} sat", format_sats(max_fee))
-            };
-            rows.push(("Max fee", row));
-        }
+        let fee_row = if defaulted_fee {
+            format!(
+                "{} sat (default — choose with --max-fee)",
+                format_sats(max_fee)
+            )
+        } else {
+            format!("{} sat", format_sats(max_fee))
+        };
+        rows.push(("Max fee", fee_row));
         rows.push(("For", ui::human_duration(lifetime)));
         ui::kv_rows(&rows);
         if network == Network::Bitcoin {
-            ui::warn("mainnet grant — this agent will spend real bitcoin");
+            ui::warn("mainnet grant — approvals you issue will spend real bitcoin");
         }
     }
 
@@ -141,10 +122,7 @@ pub fn run(
         token_id: issued.token_id.clone(),
         token_hash: issued.token_hash.clone(),
         mode,
-        ask_max_tx_sat: args.ask_max_tx,
         allowed_recipients,
-        suspended: None,
-        strikes: Vec::new(),
     };
     // Under the grant lock so an in-flight agent send cannot interleave
     // its budget write with this replacement.
@@ -164,7 +142,6 @@ pub fn run(
                 "allowed_recipients": grant.allowed_recipients,
                 "budget_sat": grant.budget_sat,
                 "max_tx_sat": grant.max_tx_sat,
-                "ask_max_tx_sat": grant.ask_max_tx_sat,
                 "max_fee_sat": grant.max_fee_sat,
                 "expires_at": grant.expires_at,
                 "replaced": replacing,
@@ -191,8 +168,10 @@ pub fn run(
             "  claude mcp add sats --env SATS_AGENT_TOKEN={} -- sats agent serve {agent}",
             *issued.secret
         ));
+        ui::dim("review asks:         sats agent requests --watch");
+        ui::dim("approve one:         sats agent approve <id>");
         ui::dim(&format!("revoke any time:     sats agent revoke {agent}"));
-        ui::dim("the token spends only this budget; it cannot recover the seed");
+        ui::dim("the token cannot spend on its own: every send waits for your approval");
     }
     Ok(())
 }

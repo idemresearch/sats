@@ -42,7 +42,6 @@ pub enum EventKind {
         stage: String,
     },
     Approved {
-        max_fee_sat: u64,
         approval_expires_at: u64,
     },
     ApprovalRevoked,
@@ -52,8 +51,6 @@ pub enum EventKind {
     Reserved {
         total_sat: u64,
         remaining_sat: u64,
-        /// "grant" or "approval".
-        via: String,
     },
     Refunded {
         total_sat: u64,
@@ -124,7 +121,7 @@ impl AgentEvent {
 }
 
 /// The placeholder request id and intent digest for control-plane events
-/// (mode changes, suspensions): they belong to the grant, not a request.
+/// (mode changes, allowlist edits): they belong to the grant, not a request.
 pub const CONTROL_EVENT_ID: &str = "-";
 
 #[cfg(test)]
@@ -148,7 +145,6 @@ mod tests {
         let e = event(EventKind::Reserved {
             total_sat: 4_781,
             remaining_sat: 45_219,
-            via: "grant".into(),
         });
         let json = serde_json::to_value(&e).unwrap();
         assert_eq!(json["event"], "reserved");
@@ -190,7 +186,6 @@ mod tests {
                 amount_sat: 1,
             }),
             event(EventKind::Approved {
-                max_fee_sat: 1,
                 approval_expires_at: 2,
             }),
             event(EventKind::ApprovalRevoked),
@@ -209,7 +204,7 @@ mod tests {
             }),
             event(EventKind::Conflicted),
             event(EventKind::ModeChanged {
-                from: "auto".into(),
+                from: "ask".into(),
                 to: "observe".into(),
                 widened: false,
             }),
@@ -230,13 +225,13 @@ mod tests {
     fn mode_changed_round_trips_with_direction() {
         let e = event(EventKind::ModeChanged {
             from: "observe".into(),
-            to: "auto".into(),
+            to: "ask".into(),
             widened: true,
         });
         let json = serde_json::to_value(&e).unwrap();
         assert_eq!(json["event"], "mode_changed");
         assert_eq!(json["from"], "observe");
-        assert_eq!(json["to"], "auto");
+        assert_eq!(json["to"], "ask");
         assert_eq!(json["widened"], true);
         let back: AgentEvent = serde_json::from_value(json).unwrap();
         assert!(matches!(
