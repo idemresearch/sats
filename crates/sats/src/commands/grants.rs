@@ -13,6 +13,11 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
     // surface, unlike the daemon's unauthenticated status op, which only
     // reads. Pruning takes the grant lock internally.
     store.prune_expired_grants(net_name, now)?;
+    // Listing also retires legacy autonomous records: a grant still
+    // spelling the removed `auto` mode is rewritten as `ask` on disk.
+    for grant in store.active_grants(net_name, now)? {
+        store.normalize_grant_autonomy(net_name, &grant.agent)?;
+    }
     let grants = store.active_grants(net_name, now)?;
     // v1 records are not authority, but they are on disk and a human
     // needs to be told so rather than shown an empty list.

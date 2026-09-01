@@ -262,9 +262,9 @@ pub struct GrantArgs {
     /// Issue the grant with no per-transaction fee cap at all
     #[arg(long)]
     pub no_max_fee: bool,
-    /// Authority mode: auto (sends inside the caps execute), ask (every
-    /// send needs a one-time approval), or observe (read-only)
-    #[arg(long, default_value = "auto", value_name = "auto|ask|observe")]
+    /// Authority mode: ask (every send needs a one-time approval) or
+    /// observe (read-only)
+    #[arg(long, default_value = "ask", value_name = "ask|observe")]
     pub mode: String,
     /// Restrict standing authority to these recipients (repeatable).
     /// At least one --to makes the allowlist finite: any other recipient
@@ -286,8 +286,8 @@ pub enum AgentCommand {
     Mode {
         /// Agent name
         name: String,
-        /// auto, ask, or observe
-        #[arg(value_name = "auto|ask|observe")]
+        /// ask or observe
+        #[arg(value_name = "ask|observe")]
         mode: String,
     },
     /// Add a recipient to a grant's allowlist (password required)

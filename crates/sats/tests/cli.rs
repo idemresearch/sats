@@ -1067,7 +1067,7 @@ fn agent_mode_transitions_gate_on_widening() {
 
     // Widening with the wrong password fails and changes nothing.
     sats(&dir)
-        .args(["agent", "mode", "claude", "auto"])
+        .args(["agent", "mode", "claude", "ask"])
         .env("SATS_PASSWORD", "wrong-password")
         .assert()
         .failure()
@@ -1076,12 +1076,12 @@ fn agent_mode_transitions_gate_on_widening() {
 
     // Widening with the right password succeeds; repeating is a no-op.
     sats(&dir)
-        .args(["agent", "mode", "claude", "auto"])
+        .args(["agent", "mode", "claude", "ask"])
         .assert()
         .success();
-    assert_eq!(grant_mode(&dir), "auto");
+    assert_eq!(grant_mode(&dir), "ask");
     sats(&dir)
-        .args(["agent", "mode", "claude", "auto"])
+        .args(["agent", "mode", "claude", "ask"])
         .assert()
         .success()
         .stdout(predicate::str::contains("already"));
@@ -1090,6 +1090,14 @@ fn agent_mode_transitions_gate_on_widening() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown mode"));
+    // The removed autonomous mode is refused with its reason, not
+    // treated as a typo.
+    sats(&dir)
+        .args(["agent", "mode", "claude", "auto"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("removed"));
+    assert_eq!(grant_mode(&dir), "ask");
 
     // Both real transitions are attributable in the log, with direction.
     let log = json_stdout(
@@ -1109,7 +1117,7 @@ fn agent_mode_transitions_gate_on_widening() {
     assert_eq!(changes[0]["to"], "observe");
     assert_eq!(changes[0]["widened"], false);
     assert_eq!(changes[1]["from"], "observe");
-    assert_eq!(changes[1]["to"], "auto");
+    assert_eq!(changes[1]["to"], "ask");
     assert_eq!(changes[1]["widened"], true);
 
     // The list shows the mode column.
@@ -1119,7 +1127,67 @@ fn agent_mode_transitions_gate_on_widening() {
             .assert()
             .success(),
     );
-    assert_eq!(list.as_array().unwrap()[0]["mode"], "auto");
+    assert_eq!(list.as_array().unwrap()[0]["mode"], "ask");
+}
+
+/// A grant left on disk by a pre-removal binary — still spelling the
+/// autonomous `auto` mode — is enforced as ask, rewritten as ask by the
+/// first control-plane touch, and journaled exactly once. Creating a
+/// new auto grant is refused with the reason.
+#[test]
+fn legacy_auto_grants_tighten_to_ask_on_first_use() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args([
+            "agent", "grant", "claude", "--budget", "50000", "--mode", "auto",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("removed"));
+    sats(&dir)
+        .args(["agent", "grant", "claude", "--budget", "50000"])
+        .assert()
+        .success();
+    let grant_path = dir.path().join("signet/grants/claude.json");
+    let mut grant: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&grant_path).unwrap()).unwrap();
+    grant["mode"] = serde_json::json!("auto");
+    std::fs::write(&grant_path, grant.to_string()).unwrap();
+
+    // Listing reports ask and retires the legacy spelling from disk, so
+    // a later downgrade cannot read autonomy back out of the file.
+    let list = json_stdout(
+        sats(&dir)
+            .args(["--json", "agent", "list"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(list.as_array().unwrap()[0]["mode"], "ask");
+    let raw = std::fs::read_to_string(&grant_path).unwrap();
+    assert!(!raw.contains("auto"), "legacy autonomy retired: {raw}");
+
+    // The tightening is journaled exactly once, and re-listing neither
+    // rewrites nor journals again.
+    let migrations = |dir: &TempDir| {
+        json_stdout(
+            sats(dir)
+                .args(["agent", "log", "--json"])
+                .assert()
+                .success(),
+        )
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["event"] == "mode_changed" && e["from"] == "auto")
+        .count()
+    };
+    assert_eq!(migrations(&dir), 1);
+    sats(&dir)
+        .args(["--json", "agent", "list"])
+        .assert()
+        .success();
+    assert_eq!(migrations(&dir), 1);
 }
 
 /// Allowlist edits carry the attenuation rule (allow = password,
@@ -1315,13 +1383,22 @@ fn approve_requires_the_password_and_arms_a_single_use_exception() {
     .unwrap();
     assert!(request.get("approval").is_none());
 
-    // This denial recorded no fee estimate, so the ceiling is explicit.
-    sats(&dir)
-        .args(["agent", "approve", "k-big-1"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("--max-fee"));
+    // This denial recorded no fee estimate; the ceiling falls back to
+    // the grant's own fee cap (defaulted to 1000 sat here), so the
+    // routine bare approve works without a flag.
+    let approved = json_stdout(
+        sats(&dir)
+            .args(["agent", "approve", "k-big-1", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(
+        approved["max_fee_sat"], 1_000,
+        "the grant's fee cap is the standing fee tolerance"
+    );
+    assert_eq!(approved["replaced"], false);
 
+    // An explicit ceiling still overrides, replacing the standing one.
     let approved = json_stdout(
         sats(&dir)
             .args(["agent", "approve", "k-big-1", "--max-fee", "500", "--json"])
@@ -1330,7 +1407,7 @@ fn approve_requires_the_password_and_arms_a_single_use_exception() {
     );
     assert_eq!(approved["id"], "k-big-1");
     assert_eq!(approved["max_fee_sat"], 500);
-    assert_eq!(approved["replaced"], false);
+    assert_eq!(approved["replaced"], true);
     let request: serde_json::Value = serde_json::from_slice(
         &std::fs::read(dir.path().join("signet/agent-requests/claude/k-big-1.json")).unwrap(),
     )
@@ -1345,6 +1422,28 @@ fn approve_requires_the_password_and_arms_a_single_use_exception() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("ambiguous"));
+
+    // Only a grant deliberately issued with no fee cap still demands an
+    // explicit ceiling: there is no standing tolerance to fall back on.
+    sats(&dir)
+        .args([
+            "agent",
+            "grant",
+            "claude",
+            "--budget",
+            "50000",
+            "--max-tx",
+            "10000",
+            "--no-max-fee",
+        ])
+        .assert()
+        .success();
+    fabricate_denied_request(&dir, "claude", "k-nocap-1");
+    sats(&dir)
+        .args(["agent", "approve", "k-nocap-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--max-fee"));
 }
 
 #[test]

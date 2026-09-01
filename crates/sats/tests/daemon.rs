@@ -78,7 +78,7 @@ fn a_grant_file_holds_no_key_material() {
     let grant: serde_json::Value = serde_json::from_str(&raw).unwrap();
 
     assert_eq!(grant["format_version"], 3);
-    assert_eq!(grant["mode"], "auto", "fresh grants carry full autonomy");
+    assert_eq!(grant["mode"], "ask", "every fresh grant asks by default");
     assert!(grant.get("wrapped_seed").is_none(), "v1 field survived");
     assert!(grant.get("grant_key").is_none(), "v1 field survived");
     assert!(

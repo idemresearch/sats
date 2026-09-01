@@ -256,6 +256,12 @@ fn dispatch(
                 claimed,
                 &psbt,
                 excluded_utxos,
+                || {
+                    Ok(Box::new(sats_core::signer::LocalSigner::new(
+                        key.mnemonic()?,
+                        key.network,
+                    )))
+                },
             );
             // Anything other than a signature ends the send: drop the
             // claim so a retry can re-evaluate under the same id.

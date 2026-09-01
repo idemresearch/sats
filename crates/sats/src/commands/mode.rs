@@ -1,9 +1,9 @@
-//! Switch a grant's authority mode: auto, ask, or observe.
+//! Switch a grant's authority mode: ask or observe.
 //!
 //! The attenuation rule, made mechanical: tightening authority
-//! (auto→ask→observe) needs no password — reducing what an agent may do
-//! stays cheap — while widening requires the wallet password, exactly
-//! like issuing the grant did.
+//! (ask→observe) needs no password — reducing what an agent may do
+//! stays cheap — while widening (observe→ask) requires the wallet
+//! password, exactly like issuing the grant did.
 
 use anyhow::{Context, Result, bail};
 use sats_core::authz::GrantMode;
@@ -108,7 +108,6 @@ pub fn run(store: &Store, network: Network, agent: &str, mode: &str, json: bool)
         println!();
         ui::ok(&format!("{agent} is now in {} mode", target.as_str()));
         match target {
-            GrantMode::Auto => ui::dim("sends inside the caps execute without you"),
             GrantMode::Ask => ui::dim("every send now waits for: sats agent approve"),
             GrantMode::Observe => ui::dim("no send can be authorized or approved"),
         }

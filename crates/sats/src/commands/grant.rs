@@ -28,14 +28,15 @@ pub fn run(
     if lifetime == 0 {
         bail!("--for must be a positive duration");
     }
-    // The hard ceiling bounds what may even be asked for; a ceiling below
-    // the automatic cap would make the ask band negative-width nonsense.
+    // The hard ceiling bounds what may even be asked for; a ceiling
+    // below the per-transaction cap would make the exceptional band
+    // negative-width nonsense.
     if let (Some(max_tx), Some(ask_max_tx)) = (args.max_tx, args.ask_max_tx)
         && ask_max_tx < max_tx
     {
         bail!(
             "--ask-max-tx ({} sat) must be at least --max-tx ({} sat) — amounts up to \
-             --max-tx are automatic, up to --ask-max-tx are approvable, above it never",
+             --max-tx ask routinely, up to --ask-max-tx ask as exceptions, above it never",
             format_sats(ask_max_tx),
             format_sats(max_tx),
         );
@@ -82,9 +83,15 @@ pub fn run(
             ("Grant", agent.to_string()),
             ("Budget", format!("{} sat", format_sats(budget))),
         ];
-        if mode != sats_core::authz::GrantMode::Auto {
-            rows.push(("Mode", mode.as_str().to_string()));
-        }
+        rows.push((
+            "Mode",
+            match mode {
+                sats_core::authz::GrantMode::Ask => {
+                    "ask — every send needs your approval".to_string()
+                }
+                sats_core::authz::GrantMode::Observe => "observe — read-only".to_string(),
+            },
+        ));
         if let Some(list) = &allowed_recipients {
             for recipient in list {
                 rows.push(("To", recipient.clone()));
@@ -116,7 +123,7 @@ pub fn run(
         rows.push(("For", ui::human_duration(lifetime)));
         ui::kv_rows(&rows);
         if network == Network::Bitcoin {
-            ui::warn("mainnet grant — this agent will spend real bitcoin");
+            ui::warn("mainnet grant — approvals you issue will spend real bitcoin");
         }
     }
 
@@ -191,8 +198,10 @@ pub fn run(
             "  claude mcp add sats --env SATS_AGENT_TOKEN={} -- sats agent serve {agent}",
             *issued.secret
         ));
+        ui::dim("review asks:         sats agent requests --watch");
+        ui::dim("approve one:         sats agent approve <id>");
         ui::dim(&format!("revoke any time:     sats agent revoke {agent}"));
-        ui::dim("the token spends only this budget; it cannot recover the seed");
+        ui::dim("the token cannot spend on its own: every send waits for your approval");
     }
     Ok(())
 }

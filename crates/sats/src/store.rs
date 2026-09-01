@@ -384,6 +384,76 @@ impl Store {
         Ok(Some(grant))
     }
 
+    /// Whether the raw on-disk record still spells the removed
+    /// autonomous mode: an explicit legacy `"auto"`, or no `mode` field
+    /// at all (v2 records, whose absence meant auto to the binaries that
+    /// wrote them). v1 and unreadable records answer false — their own
+    /// load paths refuse them with better messages.
+    fn grant_file_carries_legacy_autonomy(&self, network: &str, agent: &str) -> Result<bool> {
+        let agent = agent_component(agent)?;
+        let path = self.grants_dir(network).join(format!("{agent}.json"));
+        if !path.exists() {
+            return Ok(false);
+        }
+        let bytes = fs::read(&path)?;
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return Ok(false);
+        };
+        if is_legacy_grant(&value) {
+            return Ok(false);
+        }
+        Ok(match value.get("mode") {
+            None => true,
+            Some(mode) => mode == "auto",
+        })
+    }
+
+    /// Load a grant and, when its durable record still spells the
+    /// removed autonomous mode, rewrite it as `ask` so a later downgrade
+    /// cannot read autonomy back out of the file. In-memory coercion
+    /// already makes `auto` unenforceable by this build; this makes the
+    /// disk agree, and journals the tightening as a `mode_changed` event
+    /// so the audit log shows when it happened.
+    ///
+    /// Takes the per-network grant lock for the rewrite — callers must
+    /// not already hold it (the lock does not nest within a process).
+    /// Pure read surfaces (`check_request`, `requests --watch`) keep
+    /// using [`Store::load_grant`], which coerces without writing.
+    pub fn normalize_grant_autonomy(&self, network: &str, agent: &str) -> Result<Option<Grant>> {
+        if !self.grant_file_carries_legacy_autonomy(network, agent)? {
+            return self.load_grant(network, agent);
+        }
+        let _lock = self.lock_grants(network)?;
+        // Re-check under the lock: a concurrent replacement or revoke wins.
+        if !self.grant_file_carries_legacy_autonomy(network, agent)? {
+            return self.load_grant(network, agent);
+        }
+        let Some(mut grant) = self.load_grant(network, agent)? else {
+            return Ok(None);
+        };
+        grant.format_version = sats_core::authz::GRANT_FORMAT_VERSION;
+        self.save_grant(network, &grant)?;
+        if let Err(err) = self.append_event(
+            network,
+            &AgentEvent {
+                format_version: sats_core::event::EVENT_FORMAT_VERSION,
+                at: unix_now(),
+                network: network.to_string(),
+                agent: grant.agent.clone(),
+                request_id: sats_core::event::CONTROL_EVENT_ID.into(),
+                intent_digest: sats_core::event::CONTROL_EVENT_ID.into(),
+                kind: sats_core::event::EventKind::ModeChanged {
+                    from: "auto".into(),
+                    to: grant.mode.as_str().into(),
+                    widened: false,
+                },
+            },
+        ) {
+            eprintln!("⚠ event log append failed: {err:#}");
+        }
+        Ok(Some(grant))
+    }
+
     /// Agent names whose grant files are still in the v1 format, so read
     /// surfaces can report them instead of silently showing no grant.
     pub fn legacy_grants(&self, network: &str) -> Result<Vec<String>> {
@@ -990,7 +1060,11 @@ mod tests {
         fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
         let loaded = store.load_grant("signet", "claude").unwrap().unwrap();
         assert_eq!(loaded.format_version, 2);
-        assert_eq!(loaded.mode, sats_core::authz::GrantMode::Auto);
+        assert_eq!(
+            loaded.mode,
+            sats_core::authz::GrantMode::Ask,
+            "the absent v2 mode tightens to ask — autonomy was removed"
+        );
         assert_eq!(loaded.ask_max_tx_sat, None);
         assert!(loaded.suspended.is_none());
 
@@ -1006,6 +1080,117 @@ mod tests {
             message.contains("newer sats"),
             "future grant must be refused, got: {message}"
         );
+    }
+
+    fn grant_file_json(store: &Store, network: &str) -> serde_json::Value {
+        let path = store.grants_dir(network).join("claude.json");
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap()
+    }
+
+    fn migration_events(store: &Store, network: &str) -> usize {
+        let log = store.events_dir(network).join("log.jsonl");
+        if !log.exists() {
+            return 0;
+        }
+        fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("\"mode_changed\"") && line.contains("\"auto\""))
+            .count()
+    }
+
+    /// A durable record still spelling the removed `auto` mode is
+    /// rewritten as `ask` on first normalization — so a later downgrade
+    /// cannot read autonomy back out of the file — and the tightening is
+    /// journaled exactly once.
+    #[test]
+    fn normalize_rewrites_legacy_auto_once() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        store.save_grant("signet", &grant("signet")).unwrap();
+        let path = store.grants_dir("signet").join("claude.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["mode"] = serde_json::json!("auto");
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let normalized = store
+            .normalize_grant_autonomy("signet", "claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!(normalized.mode, sats_core::authz::GrantMode::Ask);
+        let on_disk = grant_file_json(&store, "signet");
+        assert_eq!(on_disk["mode"], "ask");
+        assert_eq!(
+            on_disk["format_version"],
+            sats_core::authz::GRANT_FORMAT_VERSION
+        );
+        assert!(
+            !fs::read_to_string(&path).unwrap().contains("auto"),
+            "the legacy spelling must not survive on disk"
+        );
+        assert_eq!(migration_events(&store, "signet"), 1);
+
+        // Idempotent: a second normalization neither rewrites nor
+        // journals again.
+        store
+            .normalize_grant_autonomy("signet", "claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!(migration_events(&store, "signet"), 1);
+    }
+
+    /// A v2 record (no `mode` field — its absence meant auto to the
+    /// binaries that wrote it) is normalized to an explicit v3 `ask`.
+    #[test]
+    fn normalize_rewrites_v2_records_as_v3_ask() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        store.save_grant("signet", &grant("signet")).unwrap();
+        let path = store.grants_dir("signet").join("claude.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.insert("format_version".into(), serde_json::json!(2));
+        object.remove("mode");
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        let normalized = store
+            .normalize_grant_autonomy("signet", "claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!(normalized.mode, sats_core::authz::GrantMode::Ask);
+        let on_disk = grant_file_json(&store, "signet");
+        assert_eq!(on_disk["mode"], "ask");
+        assert_eq!(
+            on_disk["format_version"],
+            sats_core::authz::GRANT_FORMAT_VERSION,
+            "the rewrite lands the current format"
+        );
+        assert_eq!(migration_events(&store, "signet"), 1);
+    }
+
+    /// Current records pass through untouched, and a missing grant is
+    /// simply absent — normalization never invents state.
+    #[test]
+    fn normalize_leaves_current_records_untouched() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        assert!(
+            store
+                .normalize_grant_autonomy("signet", "claude")
+                .unwrap()
+                .is_none()
+        );
+        store.save_grant("signet", &grant("signet")).unwrap();
+        let path = store.grants_dir("signet").join("claude.json");
+        let before = fs::read(&path).unwrap();
+        store
+            .normalize_grant_autonomy("signet", "claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before, "no gratuitous rewrite");
+        assert_eq!(migration_events(&store, "signet"), 0);
     }
 
     /// The audit view survives the future: a line whose kind this build

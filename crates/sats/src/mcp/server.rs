@@ -150,8 +150,8 @@ pub struct GrantResult {
     pub active: bool,
     pub agent: String,
     pub network: String,
-    /// Authority mode: "auto" (sends inside the caps execute), "ask"
-    /// (every send needs a one-time approval), or "observe" (read-only).
+    /// Authority mode: "ask" (every send needs a one-time human
+    /// approval) or "observe" (read-only). There is no autonomous mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     /// Standing recipient allowlist. Absent means unrestricted; an empty
@@ -220,8 +220,8 @@ pub struct SendResult {
     /// request_id_conflict, request_in_flight, request_incomplete.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
-    /// True when this send was authorized by a one-time human approval
-    /// rather than the grant's standing caps.
+    /// True when this send was authorized by a one-time human approval —
+    /// the only way an agent-originated send is ever signed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via_approval: Option<bool>,
     /// On denied results only: whether a one-time human approval can lift
@@ -538,19 +538,22 @@ impl SatsMcp {
         .map(Json)
     }
 
-    #[tool(description = "Send bitcoin. Enforced deterministically against the \
-        human-authorized grant (budget, per-tx cap, hard ceiling, fee cap, expiry, \
-        mode, recipient rules). Returns status='sent' with the txid, or \
-        status='denied' with the reason — a denial means human authorization is \
-        required, not that you should retry unchanged. Denied results carry \
-        approvable: true when a human can approve exactly this request once \
-        (relay the message and request_id, then retry the identical send after \
-        approval), and approvable: false when no approval exists for it — only \
-        the human changing the grant can, so do not ask repeatedly. Pass \
-        request_id (1-64 chars of A-Za-z0-9_-) to make retries safe: the same \
-        key with the same address and amount never pays twice, and returns the \
-        recorded outcome instead. While waiting on a human decision, poll \
-        check_request instead of retrying send.",
+    #[tool(description = "Propose a bitcoin send. You cannot cause a signature: \
+        every agent send needs a one-time human approval, so the normal result of \
+        a novel send is status='denied' with reason='ask_required' and a \
+        request_id — that is the request being filed for review, not a failure. \
+        Relay the message and request_id to your human, poll check_request while \
+        they decide, and after approval retry the identical send (same address, \
+        amount, and idempotency key). Enforced deterministically against the \
+        human-authorized grant (budget, per-tx cap, hard ceiling, fee cap, \
+        expiry, mode, recipient rules). Denied results carry approvable: true \
+        when a human can approve exactly this request once, and approvable: \
+        false when no approval exists for it — only the human changing the \
+        grant can, so do not ask repeatedly. Pass request_id (1-64 chars of \
+        A-Za-z0-9_-) to make retries safe: the same key with the same address \
+        and amount never pays twice, and returns the recorded outcome instead. \
+        While waiting on a human decision, poll check_request instead of \
+        retrying send.",
         // Client-side hints only: the annotations describe the tool, the
         // daemon's policy ladder is the security boundary. A client that
         // ignores them changes nothing about what can be signed.
@@ -895,15 +898,19 @@ impl ServerHandler for SatsMcp {
         info.server_info = rmcp::model::Implementation::new("sats", env!("CARGO_PKG_VERSION"));
         info.with_instructions(format!(
             "sats: a Bitcoin wallet this server operates as agent {:?} on {}, under a \
-             human-authorized spending grant. All amounts are integer satoshis. send() is \
-             enforced deterministically against the grant's policy — budget, per-transaction \
-             cap, hard ceiling, fee cap, expiry, mode, recipient rules; status='denied' means \
-             human authorization is required — relay the message and request_id to your human \
-             instead of retrying unchanged. A denial with approvable=true can be approved \
-             exactly once (sats agent approve); retry the identical send with the same \
-             request_id after approval: the one-time approval is consumed by exactly that \
-             intent. A denial with approvable=false cannot be approved at all — only the \
-             human changing the grant lifts it, so report it once and stop. \
+             human-authorized spending grant. You can observe, prepare, and propose; you \
+             cannot cause a signature — every agent send needs a one-time human approval. \
+             All amounts are integer satoshis. send() files a proposal, enforced \
+             deterministically against the grant's policy — budget, per-transaction cap, \
+             hard ceiling, fee cap, expiry, mode, recipient rules; the normal result of a \
+             novel send is status='denied' with reason='ask_required' and a request_id: \
+             that is the request awaiting review, not a failure. Relay the message and \
+             request_id to your human instead of retrying unchanged. A denial with \
+             approvable=true can be approved exactly once (sats agent approve); retry the \
+             identical send with the same request_id after approval: the one-time approval \
+             is consumed by exactly that intent. A denial with approvable=false cannot be \
+             approved at all — only the human changing the grant lifts it, so report it \
+             once and stop. \
              Pass request_id on every send so retries can never pay twice. While a request \
              waits on a human, poll check_request(request_id) — it is free, has no side \
              effects, and reports approval_ready under the current grant's hard restrictions; \

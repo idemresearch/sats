@@ -21,7 +21,7 @@ use sats_core::event::{AgentEvent, EVENT_FORMAT_VERSION, EventKind};
 use sats_core::intent::SendIntent;
 use sats_core::plan::{TransactionRecord, TransactionStatus, TxOrigin};
 use sats_core::request::{AgentRequest, REQUEST_FORMAT_VERSION, RequestOutcome};
-use sats_core::signer::{LocalSigner, Signer};
+use sats_core::signer::Signer;
 use sats_core::verify;
 
 use crate::daemon::protocol::{BroadcastOutcome, SendOutcome};
@@ -439,9 +439,12 @@ pub fn begin(
     .digest();
 
     // Re-read the grant on every send so `sats agent revoke` takes effect
-    // immediately, even mid-session. This copy is only for the precheck;
-    // the authoritative read happens under the grant lock in `authorize`.
-    let grant = match store.load_grant(net_name, agent) {
+    // immediately, even mid-session. The read also rewrites a durable
+    // record still spelling the removed autonomous mode as `ask`, so any
+    // use of a grant retires the legacy shape from disk. This copy is
+    // only for the precheck; the authoritative read happens under the
+    // grant lock in `authorize`.
+    let grant = match store.normalize_grant_autonomy(net_name, agent) {
         Ok(grant) => grant,
         Err(e) => return Begin::done(SendOutcome::error(format!("{e:#}"))),
     };
@@ -579,6 +582,15 @@ pub fn begin(
 /// amount and fee are recomputed from it; the recipient and amount stated
 /// at `BeginSend` — which the request record and intent digest already
 /// committed to — must match, or nothing is signed.
+///
+/// `make_signer` is the signer boundary: it is invoked exactly once, and
+/// only after the reservation has authorized and persisted the spend, so
+/// no denied or unapproved request can ever construct a signer. The
+/// daemon passes the in-memory `LocalSigner`; tests pass a counting
+/// probe to prove the boundary holds.
+// The parameters mirror the protocol stages one-to-one, and the signer
+// factory is a deliberate extra: bundling them would only hide the seam.
+#[allow(clippy::too_many_arguments)]
 pub fn authorize(
     store: &Store,
     key: &SigningKey,
@@ -587,6 +599,7 @@ pub fn authorize(
     flight: &mut InFlight,
     psbt: &str,
     excluded_utxos: u64,
+    make_signer: impl FnOnce() -> Result<Box<dyn Signer>>,
 ) -> SendOutcome {
     let request_id = flight.request.id.clone();
     let fail = |store: &Store, flight: &mut InFlight, message: String| -> SendOutcome {
@@ -790,10 +803,11 @@ pub fn authorize(
         );
     }
 
-    // Sign. The mnemonic exists only for this block.
+    // Sign. The signer — and any key material inside it — is constructed
+    // only here, after the reservation, and exists only for this block.
     let signed = (|| -> Result<Psbt> {
         let mut psbt = psbt;
-        let mut signer = LocalSigner::new(key.mnemonic()?, key.network);
+        let mut signer = make_signer()?;
         if !signer.sign(&mut psbt)? {
             anyhow::bail!("signer produced an unfinalized transaction");
         }
@@ -1062,6 +1076,8 @@ pub fn finish(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
     use std::str::FromStr;
     use std::time::Duration;
 
@@ -1070,7 +1086,9 @@ mod tests {
     use bdk_wallet::bitcoin::{Address, Amount, BlockHash, Network};
     use bdk_wallet::chain::{BlockId, ConfirmationBlockTime};
     use bdk_wallet::test_utils::{insert_checkpoint, receive_output};
-    use sats_core::authz::GRANT_FORMAT_VERSION;
+    use sats_core::authz::{GRANT_FORMAT_VERSION, GrantMode};
+    use sats_core::error::SignerError;
+    use sats_core::signer::LocalSigner;
     use sats_core::{seal, seed, token};
 
     use super::*;
@@ -1118,10 +1136,115 @@ mod tests {
         minted.secret.to_string()
     }
 
-    /// A wallet-owned, signable PSBT whose absolute fee is absurd enough
-    /// that `Psbt::extract_tx` refuses it (its ceiling is 25k sat/vB) —
-    /// the only way to reach the post-signature extraction failure.
-    fn absurd_fee_psbt(amount_sat: u64, fee_sat: u64) -> Psbt {
+    /// Mutate the stored grant in place, the way control-plane commands do.
+    fn update_grant(store: &Store, mutate: impl FnOnce(&mut Grant)) {
+        let mut grant = store.load_grant("signet", "claude").unwrap().unwrap();
+        mutate(&mut grant);
+        store.save_grant("signet", &grant).unwrap();
+    }
+
+    /// The canonical digest `begin` computes for a send to [`ADDRESS`].
+    fn digest_for(amount_sat: u64) -> String {
+        SendIntent {
+            network: "signet".into(),
+            agent: "claude".into(),
+            recipient: ADDRESS.into(),
+            amount_sat,
+        }
+        .digest()
+    }
+
+    /// Arm a one-time approval on a recorded request, the way
+    /// `sats agent approve` does: digest-bound, unconsumed, under an
+    /// explicit fee ceiling.
+    fn approve_request(store: &Store, id: &str, amount_sat: u64, max_fee_sat: u64) {
+        let mut record = store
+            .load_agent_request("signet", "claude", id)
+            .unwrap()
+            .unwrap();
+        let now = unix_now();
+        record.approval = Some(IntentApproval {
+            intent_digest: digest_for(amount_sat),
+            approved_at: now,
+            expires_at: now + 600,
+            max_fee_sat,
+            consumed_at: None,
+            consumed_by_request: None,
+        });
+        record.dismissed_at = None;
+        record.updated_at = now;
+        store.save_agent_request("signet", &record).unwrap();
+    }
+
+    /// The signer-boundary probe: counts `sign` invocations before
+    /// delegating to the real in-memory signer.
+    struct CountingSigner {
+        signs: Rc<Cell<usize>>,
+        inner: LocalSigner,
+    }
+
+    impl Signer for CountingSigner {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+
+        fn sign(&mut self, psbt: &mut Psbt) -> Result<bool, SignerError> {
+            self.signs.set(self.signs.get() + 1);
+            self.inner.sign(psbt)
+        }
+    }
+
+    fn counting_factory(
+        signs: Rc<Cell<usize>>,
+    ) -> impl FnOnce() -> anyhow::Result<Box<dyn Signer>> {
+        move || {
+            let mnemonic = seed::parse_mnemonic(MNEMONIC).unwrap();
+            Ok(Box::new(CountingSigner {
+                signs,
+                inner: LocalSigner::new(mnemonic, Network::Signet),
+            }))
+        }
+    }
+
+    /// Run one send attempt end to end through `begin` + `authorize`,
+    /// counting every signer invocation it causes.
+    fn attempt(
+        store: &Store,
+        key: &SigningKey,
+        token: &str,
+        request_key: &str,
+        amount_sat: u64,
+        fee_sat: u64,
+        signs: &Rc<Cell<usize>>,
+    ) -> SendOutcome {
+        match begin(
+            store,
+            "signet",
+            "claude",
+            token,
+            Some(request_key),
+            ADDRESS,
+            amount_sat,
+        ) {
+            Begin::Proceed(mut flight) => authorize(
+                store,
+                key,
+                "signet",
+                token,
+                &mut flight,
+                &signable_psbt(amount_sat, fee_sat).to_string(),
+                0,
+                counting_factory(signs.clone()),
+            ),
+            Begin::Done(outcome) => *outcome,
+        }
+    }
+
+    /// A wallet-owned, signable PSBT paying [`ADDRESS`] with an exact
+    /// absolute fee. An absurd fee (over `Psbt::extract_tx`'s 25k sat/vB
+    /// ceiling) is the one way to reach the post-signature extraction
+    /// failure; a sane fee exercises the ordinary signing path.
+    fn signable_psbt(amount_sat: u64, fee_sat: u64) -> Psbt {
         let mnemonic = seed::parse_mnemonic(MNEMONIC).unwrap();
         let (external, internal) = seed::public_descriptors(&mnemonic, Network::Signet).unwrap();
         let mut wallet = Wallet::create(external, internal)
@@ -1182,9 +1305,24 @@ mod tests {
         let token = grant_with_token(&store, 20_000_000);
         let amount_sat = 1_000;
         let fee_sat = 9_000_000; // ~58k sat/vB on this tx, over the 25k ceiling
-        let psbt = absurd_fee_psbt(amount_sat, fee_sat);
+        let psbt = signable_psbt(amount_sat, fee_sat);
         let expected_txid = psbt.unsigned_tx.compute_txid().to_string();
 
+        // Every send asks first: the novel attempt records the request
+        // and denies, a human approval arms it, the identical retry runs.
+        match begin(
+            &store,
+            "signet",
+            "claude",
+            &token,
+            Some("stuck"),
+            ADDRESS,
+            amount_sat,
+        ) {
+            Begin::Done(outcome) => assert_eq!(outcome.reason.as_deref(), Some("ask_required")),
+            Begin::Proceed(_) => panic!("an unapproved send must not proceed"),
+        }
+        approve_request(&store, "k-stuck", amount_sat, fee_sat);
         let mut flight = match begin(
             &store,
             "signet",
@@ -1201,6 +1339,7 @@ mod tests {
         assert!(!flight.authorizes(&"1".repeat(64)), "wrong token");
         assert!(!flight.authorizes("not-hex"), "malformed token");
 
+        let signs = Rc::new(Cell::new(0));
         let outcome = authorize(
             &store,
             &key,
@@ -1209,7 +1348,9 @@ mod tests {
             &mut flight,
             &psbt.to_string(),
             0,
+            counting_factory(signs.clone()),
         );
+        assert_eq!(signs.get(), 1, "the approved send signed exactly once");
         assert_eq!(outcome.status, "error");
         assert!(
             outcome
@@ -1266,7 +1407,241 @@ mod tests {
         assert_eq!(grant.spent_sat, amount_sat + fee_sat, "no second draw");
         assert_eq!(
             event_kinds(&store),
-            ["request_received", "reserved", "failed", "replayed"]
+            [
+                "request_received",
+                "denied",
+                "reserved",
+                "approval_consumed",
+                "failed",
+                "replayed"
+            ]
         );
+    }
+
+    /// The signer boundary, probed: every deny class ends with zero
+    /// signer invocations, even with an approval in hand where one could
+    /// plausibly be presented.
+    #[test]
+    fn no_unapproved_send_reaches_the_signer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let key = unlocked_key(&store);
+        let token = grant_with_token(&store, 20_000_000);
+        let signs = Rc::new(Cell::new(0));
+
+        // Distinct amounts per row: an approval binds the intent digest
+        // (recipient + amount), so identical intents would share one.
+
+        // Ask grant, no approval: the terminal ask.
+        let denied = attempt(&store, &key, &token, "plain", 1_000, 300, &signs);
+        assert_eq!(denied.reason.as_deref(), Some("ask_required"));
+        assert_eq!(denied.approvable, Some(true));
+
+        // Observe grant: read-only, an armed approval lifts nothing.
+        update_grant(&store, |g| g.mode = GrantMode::Observe);
+        let denied = attempt(&store, &key, &token, "observe", 1_100, 300, &signs);
+        assert_eq!(denied.reason.as_deref(), Some("observe_only"));
+        approve_request(&store, "k-observe", 1_100, 600);
+        let denied = attempt(&store, &key, &token, "observe", 1_100, 300, &signs);
+        assert_eq!(denied.reason.as_deref(), Some("observe_only"));
+        update_grant(&store, |g| g.mode = GrantMode::Ask);
+
+        // A migrated legacy-auto record: what used to execute unattended
+        // now asks, and the durable file is rewritten as ask by the send.
+        let path = store.grants_dir("signet").join("claude.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        raw["mode"] = serde_json::json!("auto");
+        std::fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+        let denied = attempt(&store, &key, &token, "legacy", 1_200, 300, &signs);
+        assert_eq!(denied.reason.as_deref(), Some("ask_required"));
+        let rewritten = std::fs::read_to_string(&path).unwrap();
+        assert!(!rewritten.contains("auto"), "legacy autonomy retired");
+
+        // Recipient outside the allowlist.
+        update_grant(&store, |g| {
+            g.allowed_recipients = Some(vec!["tb1pother".into()])
+        });
+        let denied = attempt(&store, &key, &token, "stranger", 1_300, 300, &signs);
+        assert_eq!(denied.reason.as_deref(), Some("recipient_not_allowed"));
+        update_grant(&store, |g| g.allowed_recipients = None);
+
+        // Above the hard ceiling: an armed approval lifts nothing.
+        update_grant(&store, |g| g.ask_max_tx_sat = Some(500));
+        let denied = attempt(&store, &key, &token, "ceiling", 1_400, 300, &signs);
+        assert_eq!(denied.reason.as_deref(), Some("over_ask_max"));
+        assert_eq!(denied.approvable, Some(false));
+        approve_request(&store, "k-ceiling", 1_400, 600);
+        let denied = attempt(&store, &key, &token, "ceiling", 1_400, 300, &signs);
+        assert_eq!(denied.reason.as_deref(), Some("over_ask_max"));
+        update_grant(&store, |g| g.ask_max_tx_sat = None);
+
+        // Expired grant.
+        update_grant(&store, |g| g.expires_at = 1);
+        let denied = attempt(&store, &key, &token, "expired", 1_500, 300, &signs);
+        assert_eq!(denied.reason.as_deref(), Some("expired"));
+
+        assert_eq!(signs.get(), 0, "no denied request may reach the signer");
+        // And none of it drew budget or produced a transaction.
+        update_grant(&store, |g| g.expires_at = unix_now() + 3_600);
+        let grant = store.load_grant("signet", "claude").unwrap().unwrap();
+        assert_eq!(grant.spent_sat, 0);
+        assert!(store.list_transactions("signet").unwrap().is_empty());
+    }
+
+    /// Mutating an approved intent — a different amount under the same
+    /// key, or a PSBT paying something else than the approved request —
+    /// never reaches the signer, and revocation between begin and
+    /// authorize wins.
+    #[test]
+    fn mutations_and_revocation_never_reach_the_signer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let key = unlocked_key(&store);
+        let token = grant_with_token(&store, 20_000_000);
+        let signs = Rc::new(Cell::new(0));
+
+        // Record and approve exactly 1_000 sat.
+        let denied = attempt(&store, &key, &token, "mut", 1_000, 300, &signs);
+        assert_eq!(denied.reason.as_deref(), Some("ask_required"));
+        approve_request(&store, "k-mut", 1_000, 600);
+
+        // Same key, different amount: the digest refuses before anything.
+        let conflict = attempt(&store, &key, &token, "mut", 2_000, 300, &signs);
+        assert_eq!(conflict.error_code.as_deref(), Some("request_id_conflict"));
+
+        // Same request, but the prepared PSBT pays a different amount:
+        // the begin-time commitment refuses before the reservation.
+        let mut flight = match begin(
+            &store,
+            "signet",
+            "claude",
+            &token,
+            Some("mut"),
+            ADDRESS,
+            1_000,
+        ) {
+            Begin::Proceed(flight) => flight,
+            Begin::Done(outcome) => panic!("approved begin refused: {outcome:?}"),
+        };
+        let wrong = signable_psbt(2_000, 300);
+        let outcome = authorize(
+            &store,
+            &key,
+            "signet",
+            &token,
+            &mut flight,
+            &wrong.to_string(),
+            0,
+            counting_factory(signs.clone()),
+        );
+        assert_eq!(outcome.status, "error");
+        assert!(
+            outcome
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("refusing to sign"),
+            "got: {:?}",
+            outcome.message
+        );
+        drop(flight);
+
+        // Revoked between begin and authorize: the under-lock re-read wins.
+        let mut flight = match begin(
+            &store,
+            "signet",
+            "claude",
+            &token,
+            Some("mut"),
+            ADDRESS,
+            1_000,
+        ) {
+            Begin::Proceed(flight) => flight,
+            Begin::Done(outcome) => panic!("approved begin refused: {outcome:?}"),
+        };
+        store.delete_grant("signet", "claude").unwrap();
+        let outcome = authorize(
+            &store,
+            &key,
+            "signet",
+            &token,
+            &mut flight,
+            &signable_psbt(1_000, 300).to_string(),
+            0,
+            counting_factory(signs.clone()),
+        );
+        assert_eq!(outcome.reason.as_deref(), Some("revoked"));
+
+        assert_eq!(signs.get(), 0, "no mutation may reach the signer");
+        assert!(store.list_transactions("signet").unwrap().is_empty());
+    }
+
+    /// The one legitimate path: a valid digest-bound approval plus the
+    /// identical retry signs exactly once, and neither the keyed replay
+    /// nor a fresh identical send signs again.
+    #[test]
+    fn an_approved_identical_retry_signs_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let key = unlocked_key(&store);
+        let token = grant_with_token(&store, 20_000_000);
+        let signs = Rc::new(Cell::new(0));
+
+        let denied = attempt(&store, &key, &token, "pay", 1_000, 300, &signs);
+        assert_eq!(denied.reason.as_deref(), Some("ask_required"));
+        assert_eq!(signs.get(), 0);
+        approve_request(&store, "k-pay", 1_000, 600);
+
+        // The identical retry signs, once, via the approval.
+        let mut flight = match begin(
+            &store,
+            "signet",
+            "claude",
+            &token,
+            Some("pay"),
+            ADDRESS,
+            1_000,
+        ) {
+            Begin::Proceed(flight) => flight,
+            Begin::Done(outcome) => panic!("approved begin refused: {outcome:?}"),
+        };
+        let outcome = authorize(
+            &store,
+            &key,
+            "signet",
+            &token,
+            &mut flight,
+            &signable_psbt(1_000, 300).to_string(),
+            0,
+            counting_factory(signs.clone()),
+        );
+        assert_eq!(outcome.status, "sent", "got: {outcome:?}");
+        assert_eq!(outcome.via_approval, Some(true));
+        assert_eq!(signs.get(), 1);
+        let txid = outcome.txid.clone().unwrap();
+        let closed = finish(
+            &store,
+            "signet",
+            &mut flight,
+            BroadcastOutcome::Broadcast { txid: txid.clone() },
+        );
+        assert_eq!(closed.status, "sent");
+        drop(flight);
+
+        // The keyed replay returns the recorded truth without signing.
+        let replay = attempt(&store, &key, &token, "pay", 1_000, 300, &signs);
+        assert_eq!(replay.status, "sent");
+        assert_eq!(replay.txid.as_deref(), Some(txid.as_str()));
+        assert_eq!(signs.get(), 1, "a replay never signs");
+
+        // A fresh identical send finds the approval consumed and asks.
+        let fresh = attempt(&store, &key, &token, "pay-2", 1_000, 300, &signs);
+        assert_eq!(fresh.reason.as_deref(), Some("ask_required"));
+        assert_eq!(signs.get(), 1, "a consumed approval never signs again");
+
+        let grant = store.load_grant("signet", "claude").unwrap().unwrap();
+        assert_eq!(grant.spent_sat, 1_300, "exactly one draw");
+        assert_eq!(store.list_transactions("signet").unwrap().len(), 1);
     }
 }

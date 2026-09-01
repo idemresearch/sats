@@ -183,6 +183,7 @@ fn mcp_stays_available_and_recovers_without_reconnecting() {
     common::write_mock_provider(&dir);
     common::fund_wallet(&dir, &[100_000]);
     let token = grant_token(&dir, "claude", &["--budget", "50000"]);
+    arm_approval(&dir, "claude", ADDRESS, 1_000, 5_000);
     let mut mcp = McpSession::start(&dir, "claude", &token);
     handshake(&mut mcp);
     let status = mcp.call_tool(2, "get_status", serde_json::json!({}));
@@ -246,6 +247,7 @@ fn send_progress_reports_real_stages_and_stops_on_denial() {
         &["--budget", "50000", "--max-tx", "10000"],
         &[100_000],
     );
+    arm_approval(&dir, "claude", ADDRESS, 1_000, 5_000);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     for (id, amount, expected) in [(2, 1000, "sent"), (3, 20000, "denied")] {
@@ -314,6 +316,7 @@ fn with_http_provider(dir: &TempDir, driver: &str, url: &str, capability: &str) 
 fn assert_sync_timeout(driver: &str) {
     let dir = TempDir::new().unwrap();
     let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    arm_approval(&dir, "claude", ADDRESS, 1_000, 5_000);
     let http = common::HttpServer::start(|_| None);
     let url = format!("{}/PRIVATE_PATH_KEY", http.url);
     with_http_provider(&dir, driver, &url, "chain.sync");
@@ -353,6 +356,7 @@ fn subfrost_timeout_refuses_stale_state_and_redacts_credentials() {
 fn esplora_retryable_get_is_limited_to_two_retries() {
     let dir = TempDir::new().unwrap();
     let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    arm_approval(&dir, "claude", ADDRESS, 1_000, 5_000);
     let http = common::HttpServer::start(|request| {
         assert!(request.starts_with("GET /fee-estimates "));
         Some((503, "unavailable".into()))
@@ -377,6 +381,7 @@ fn esplora_retryable_get_is_limited_to_two_retries() {
 fn broadcast_timeout_keeps_signed_transaction_and_reserved_budget() {
     let dir = TempDir::new().unwrap();
     let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    arm_approval(&dir, "claude", ADDRESS, 1_000, 5_000);
     let http = common::HttpServer::start(|request| {
         assert!(request.starts_with("POST /tx "));
         None
@@ -407,7 +412,13 @@ fn broadcast_timeout_keeps_signed_transaction_and_reserved_budget() {
     assert!(spent > 1000);
     assert_eq!(
         event_kinds(&dir),
-        ["request_received", "reserved", "signed", "broadcast_failed"]
+        [
+            "request_received",
+            "reserved",
+            "approval_consumed",
+            "signed",
+            "broadcast_failed"
+        ]
     );
     let replay = mcp.call_tool(3, "send", params);
     assert_eq!(replay, result);
@@ -458,6 +469,58 @@ fn event_kinds(dir: &TempDir) -> Vec<String> {
         .collect()
 }
 
+/// Pre-arm a one-time human approval for an exact intent — the durable
+/// record `sats agent approve` would leave behind — so the next matching
+/// send can pass the terminal ask. Every agent send needs one now; there
+/// is no autonomous mode. The approval binds the canonical intent digest
+/// (network, agent, recipient, amount), exactly like the real command.
+fn arm_approval(dir: &TempDir, agent: &str, address: &str, amount_sat: u64, max_fee_sat: u64) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static ARMED: AtomicUsize = AtomicUsize::new(0);
+    let n = ARMED.fetch_add(1, Ordering::SeqCst);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let digest = sats_core::intent::SendIntent {
+        network: "signet".into(),
+        agent: agent.into(),
+        recipient: address.into(),
+        amount_sat,
+    }
+    .digest();
+    let id = format!("k-armed-{n}");
+    let record = serde_json::json!({
+        "format_version": 1,
+        "id": id,
+        "network": "signet",
+        "agent": agent,
+        "recipient": address,
+        "amount_sat": amount_sat,
+        "intent_digest": digest,
+        "created_at": now,
+        "updated_at": now,
+        "outcome": {
+            "status": "denied",
+            "deny": { "reason": "ask_required" },
+            "resolved_at": now,
+        },
+        "approval": {
+            "intent_digest": digest,
+            "approved_at": now,
+            "expires_at": now + 3_600,
+            "max_fee_sat": max_fee_sat,
+        },
+    });
+    let requests_dir = dir.path().join("signet/agent-requests").join(agent);
+    std::fs::create_dir_all(&requests_dir).unwrap();
+    std::fs::write(
+        requests_dir.join(format!("{id}.json")),
+        serde_json::to_vec_pretty(&record).unwrap(),
+    )
+    .unwrap();
+}
+
 #[test]
 fn mcp_send_succeeds_and_is_attributed() {
     let dir = TempDir::new().unwrap();
@@ -466,6 +529,7 @@ fn mcp_send_succeeds_and_is_attributed() {
         &["--budget", "50000", "--max-tx", "30000"],
         &[100_000],
     );
+    arm_approval(&dir, "claude", ADDRESS, 25_000, 5_000);
 
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
@@ -477,6 +541,10 @@ fn mcp_send_succeeds_and_is_attributed() {
     assert_eq!(sent["status"], "sent", "got: {sent}");
     assert_eq!(sent["amount_sat"], 25_000);
     assert_eq!(sent["request_id"], "k-job-1");
+    assert_eq!(
+        sent["via_approval"], true,
+        "an approval is the only way a send is signed"
+    );
     let txid = sent["txid"].as_str().unwrap().to_string();
 
     // The transaction reached the mock chain and its record names the
@@ -506,7 +574,13 @@ fn mcp_send_succeeds_and_is_attributed() {
     // And the causal chain is complete.
     assert_eq!(
         event_kinds(&dir),
-        ["request_received", "reserved", "signed", "broadcast"]
+        [
+            "request_received",
+            "reserved",
+            "approval_consumed",
+            "signed",
+            "broadcast"
+        ]
     );
 }
 
@@ -514,6 +588,7 @@ fn mcp_send_succeeds_and_is_attributed() {
 fn mcp_send_same_key_replays_without_double_spend() {
     let dir = TempDir::new().unwrap();
     let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    arm_approval(&dir, "claude", ADDRESS, 25_000, 5_000);
 
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
@@ -584,7 +659,12 @@ fn mcp_keyless_sends_never_replay() {
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     let params = serde_json::json!({ "address": ADDRESS, "amount_sat": 25_000 });
+    // Each keyless execution consumes its own single-use approval: the
+    // second identical send re-executes rather than replaying, and needs
+    // a fresh human decision.
+    arm_approval(&dir, "claude", ADDRESS, 25_000, 5_000);
     let first = mcp.call_tool(2, "send", params.clone());
+    arm_approval(&dir, "claude", ADDRESS, 25_000, 5_000);
     let second = mcp.call_tool(3, "send", params);
     assert_eq!(first["status"], "sent", "got: {first}");
     assert_eq!(second["status"], "sent", "got: {second}");
@@ -975,6 +1055,7 @@ fn a_locked_daemon_reports_locked_not_denied() {
         &["--budget", "50000", "--max-tx", "30000"],
         &[100_000],
     );
+    arm_approval(&dir, "claude", ADDRESS, 20_000, 5_000);
     run_sats(&dir, &["daemon", "lock"]);
 
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
@@ -1073,6 +1154,7 @@ fn a_wrong_token_writes_nothing() {
     // Replace the grant, then serve with the token that still matches the
     // *new* one so the process starts, and speak the stale one on the wire.
     let fresh = grant_token(&dir, "claude", &["--budget", "50000"]);
+    arm_approval(&dir, "claude", ADDRESS, 1_000, 5_000);
 
     let mut mcp = McpSession::start(&dir, "claude", &fresh);
     handshake(&mut mcp);
@@ -1243,6 +1325,7 @@ fn finish_requires_the_token_that_began_the_send() {
     let dir = TempDir::new().unwrap();
     run_sats(&dir, &["init"]);
     let token = grant_token(&dir, "claude", &["--budget", "50000"]);
+    arm_approval(&dir, "claude", ADDRESS, 1_000, 5_000);
     let _daemon = Daemon::start(&dir);
 
     let mut conn = DaemonConn::open(&dir);
@@ -1287,11 +1370,12 @@ fn finish_requires_the_token_that_began_the_send() {
     assert_eq!(event_kinds(&dir), ["request_received", "failed"]);
 }
 
-/// The three amount bands end to end: automatic under max_tx, one-time
-/// approvable up to ask_max_tx, and a hard refusal above it that carries
-/// no hint and that `sats agent approve` refuses to arm.
+/// The amount bands end to end: a routine ask under max_tx, the
+/// specific over_max_tx ask up to ask_max_tx — both one-time approvable
+/// — and a hard refusal above the ceiling that carries no hint and that
+/// `sats agent approve` refuses to arm. Nothing executes unattended.
 #[test]
-fn amount_bands_split_auto_ask_and_hard_deny() {
+fn amount_bands_split_ask_and_hard_deny() {
     let dir = TempDir::new().unwrap();
     let fx = funded_setup(
         &dir,
@@ -1308,19 +1392,29 @@ fn amount_bands_split_auto_ask_and_hard_deny() {
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
 
-    // Auto band: at the cap, inclusive.
-    let sent = mcp.call_tool(
+    // Routine band: at the cap, inclusive — the terminal ask, and the
+    // approval loop executes it exactly once.
+    let routine = mcp.call_tool(
         2,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 10_000, "request_id": "auto-1" }),
+    );
+    assert_eq!(routine["status"], "denied", "got: {routine}");
+    assert_eq!(routine["reason"], "ask_required");
+    assert_eq!(routine["approvable"], true);
+    run_sats(&dir, &["agent", "approve", "k-auto-1", "--max-fee", "5000"]);
+    let sent = mcp.call_tool(
+        3,
         "send",
         serde_json::json!({ "address": ADDRESS, "amount_sat": 10_000, "request_id": "auto-1" }),
     );
     assert_eq!(sent["status"], "sent", "got: {sent}");
     assert!(sent.get("approvable").is_none(), "sent carries no verdict");
 
-    // Ask band: denied, marked approvable, and the message names the
-    // exact one-time exception command.
+    // Exceptional band: the specific over_max_tx reason, still marked
+    // approvable, and the message names the exact exception command.
     let ask = mcp.call_tool(
-        3,
+        4,
         "send",
         serde_json::json!({ "address": ADDRESS, "amount_sat": 10_001, "request_id": "ask-1" }),
     );
@@ -1333,19 +1427,19 @@ fn amount_bands_split_auto_ask_and_hard_deny() {
             .unwrap()
             .contains("sats agent approve k-ask-1")
     );
-    // The ceiling itself is still the ask band, inclusive.
+    // The ceiling itself is still the exceptional band, inclusive.
     let edge = mcp.call_tool(
-        4,
+        5,
         "send",
         serde_json::json!({ "address": ADDRESS, "amount_sat": 25_000, "request_id": "edge-1" }),
     );
     assert_eq!(edge["reason"], "over_max_tx", "got: {edge}");
     assert_eq!(edge["approvable"], true);
 
-    // Approve the ask-band request; the identical retry executes once.
+    // Approve the exceptional request; the identical retry executes once.
     run_sats(&dir, &["agent", "approve", "k-ask-1", "--max-fee", "5000"]);
     let approved = mcp.call_tool(
-        5,
+        6,
         "send",
         serde_json::json!({ "address": ADDRESS, "amount_sat": 10_001, "request_id": "ask-1" }),
     );
@@ -1354,7 +1448,7 @@ fn amount_bands_split_auto_ask_and_hard_deny() {
 
     // Hard band: denied, not approvable, no hint anywhere.
     let hard = mcp.call_tool(
-        6,
+        7,
         "send",
         serde_json::json!({ "address": ADDRESS, "amount_sat": 25_001, "request_id": "hard-1" }),
     );
@@ -1599,8 +1693,9 @@ fn check_request_resolves_prefixed_keys_and_preserves_canonical_ids() {
 }
 
 /// Ask mode proposes everything and executes only through approvals;
-/// observe mode reads but can never send; auto restores autonomy. All
-/// three flow through get_grant and take effect mid-session.
+/// observe mode reads but can never send; the removed auto mode cannot
+/// come back. Both modes flow through get_grant and take effect
+/// mid-session.
 #[test]
 fn modes_gate_the_send_path_end_to_end() {
     let dir = TempDir::new().unwrap();
@@ -1710,24 +1805,30 @@ fn modes_gate_the_send_path_end_to_end() {
     );
     assert_eq!(settled["status"], "sent");
     assert_eq!(settled["approval_ready"], false, "got: {settled}");
-
-    // Auto again (password-gated): the same send now just executes.
-    run_sats(&dir, &["agent", "mode", "claude", "auto"]);
     let sent = mcp.call_tool(
-        10,
+        12,
         "send",
-        serde_json::json!({ "address": ADDRESS, "amount_sat": 1_000, "request_id": "m-4" }),
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 1_000, "request_id": "m-2" }),
     );
     assert_eq!(sent["status"], "sent", "got: {sent}");
-    assert!(
-        sent.get("via_approval").is_none(),
-        "grant authority, no exception"
-    );
+    assert_eq!(sent["via_approval"], true);
+
+    // The removed autonomous mode cannot come back through the CLI.
+    let refused = Command::new(sats_bin())
+        .args(["agent", "mode", "claude", "auto"])
+        .env("SATS_DIR", dir.path())
+        .env("SATS_PASSWORD", PASSWORD)
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    assert!(!refused.status.success(), "auto was removed");
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("removed"));
 }
 
-/// The standing allowlist: listed recipients are automatic, strangers
-/// ask, an approval executes exactly one send to exactly one stranger,
-/// and nothing — not even that successful send — widens the list.
+/// The standing allowlist: listed recipients are routine asks, strangers
+/// are flagged recipient_not_allowed, an approval executes exactly one
+/// send to exactly one stranger, and nothing — not even that successful
+/// send — widens the list.
 #[test]
 fn recipient_allowlist_gates_standing_authority() {
     use bdk_wallet::bitcoin::Network;
@@ -1738,9 +1839,19 @@ fn recipient_allowlist_gates_standing_authority() {
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
 
-    // Listed: automatic within the caps.
-    let sent = mcp.call_tool(
+    // Listed: a routine ask, and the approval loop executes it.
+    let routine = mcp.call_tool(
         2,
+        "send",
+        serde_json::json!({ "address": ADDRESS, "amount_sat": 1_000, "request_id": "r-listed" }),
+    );
+    assert_eq!(routine["reason"], "ask_required", "got: {routine}");
+    run_sats(
+        &dir,
+        &["agent", "approve", "k-r-listed", "--max-fee", "500"],
+    );
+    let sent = mcp.call_tool(
+        9,
         "send",
         serde_json::json!({ "address": ADDRESS, "amount_sat": 1_000, "request_id": "r-listed" }),
     );
@@ -1774,19 +1885,18 @@ fn recipient_allowlist_gates_standing_authority() {
     );
     assert_eq!(again["reason"], "recipient_not_allowed", "got: {again}");
 
-    // Allowing it (password-gated) makes it automatic; disallowing (no
-    // password) makes it ask again.
+    // Allowing it (password-gated) makes it a routine ask; disallowing
+    // (no password) flags it again.
     run_sats(&dir, &["agent", "allow", "claude", &stranger]);
     let grant = mcp.call_tool(6, "get_grant", serde_json::json!({}));
     let listed = grant["allowed_recipients"].as_array().unwrap();
     assert_eq!(listed.len(), 2, "got: {grant}");
-    let auto = mcp.call_tool(
+    let now_routine = mcp.call_tool(
         7,
         "send",
         serde_json::json!({ "address": stranger, "amount_sat": 1_000, "request_id": "r-3" }),
     );
-    assert_eq!(auto["status"], "sent", "got: {auto}");
-    assert!(auto.get("via_approval").is_none(), "standing authority");
+    assert_eq!(now_routine["reason"], "ask_required", "got: {now_routine}");
     run_sats(&dir, &["agent", "disallow", "claude", &stranger]);
     let asks = mcp.call_tool(
         8,
@@ -1803,6 +1913,7 @@ fn recipient_allowlist_gates_standing_authority() {
 fn revoked_keyed_retry_still_replays_recorded_truth() {
     let dir = TempDir::new().unwrap();
     let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    arm_approval(&dir, "claude", ADDRESS, 1_000, 5_000);
 
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);

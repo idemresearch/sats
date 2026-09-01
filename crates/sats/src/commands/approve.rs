@@ -6,7 +6,7 @@
 //! with `sats agent deny`.
 
 use anyhow::{Context, Result, bail};
-use sats_core::authz::{Decision, DenyReason, IntentApproval, SpendRequest, evaluate_send};
+use sats_core::authz::{Decision, DenyReason, Grant, IntentApproval, SpendRequest, evaluate_send};
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
 use sats_core::request::{AgentRequest, RequestOutcome};
@@ -25,7 +25,10 @@ pub fn run(
 ) -> Result<()> {
     let net_name = network_name(network);
     let request = store.find_agent_request(net_name, id_or_prefix)?;
-    ensure_approvable(store, net_name, &request, now_checked()?)?;
+    // Any control-plane touch retires a legacy autonomous record from
+    // disk before this command reasons about the grant.
+    store.normalize_grant_autonomy(net_name, &request.agent)?;
+    let grant = ensure_approvable(store, net_name, &request, now_checked()?)?;
     match store.claim_agent_request(net_name, &request.agent, &request.id)? {
         Some(claim) => drop(claim),
         None => bail!(
@@ -41,15 +44,20 @@ pub fn run(
         bail!("--for must be a positive duration");
     }
 
-    // The ceiling defaults to twice the fee the denial recorded; a denial
-    // that never learned a real fee (the offline precheck) needs an
-    // explicit choice.
+    // The ceiling defaults to twice the fee the denial recorded. Most
+    // denials never saw a real fee (the terminal ask happens at the
+    // offline precheck), so the fallback is the grant's own fee cap —
+    // the human's standing fee tolerance — which keeps the routine
+    // `sats agent approve <id>` working without a flag. Only a grant
+    // deliberately issued with no fee cap requires an explicit choice.
     let recorded_fee = denied_fee(&request.outcome, request.amount_sat);
-    let max_fee_sat = match (max_fee, recorded_fee) {
-        (Some(explicit), _) => explicit,
-        (None, Some(fee)) => fee.saturating_mul(2),
-        (None, None) => bail!(
-            "the denial did not record a fee estimate — pass --max-fee <SATS> to set the ceiling"
+    let max_fee_sat = match (max_fee, recorded_fee, grant.max_fee_sat) {
+        (Some(explicit), _, _) => explicit,
+        (None, Some(fee), _) => fee.saturating_mul(2),
+        (None, None, Some(cap)) => cap,
+        (None, None, None) => bail!(
+            "the denial did not record a fee estimate and the grant carries no fee cap — \
+             pass --max-fee <SATS> to set the ceiling"
         ),
     };
 
@@ -64,8 +72,15 @@ pub fn run(
             rows.push(("Denied", deny.code().to_string()));
         }
         rows.push(("Max fee", format!("{} sat", format_sats(max_fee_sat))));
+        rows.push((
+            "Budget",
+            format!("{} sat remaining", format_sats(grant.remaining_sat())),
+        ));
         rows.push(("For", ui::human_duration(lifetime)));
         ui::kv_rows(&rows);
+        if request.amount_sat.saturating_add(max_fee_sat) > grant.remaining_sat() {
+            ui::warn("this send exceeds the remaining budget — approving overdraws it");
+        }
         if network == Network::Bitcoin {
             ui::warn("mainnet approval — this authorizes real bitcoin, once");
         }
@@ -150,10 +165,16 @@ pub fn run(
 }
 
 /// Refuse hard restrictions before prompting, then again under the grant
-/// lock before writing. The recorded denial alone can be stale. As in the
-/// daemon's precheck, fee zero checks the current amount and hard envelope;
-/// the daemon still checks the prepared transaction's actual fee later.
-fn ensure_approvable(store: &Store, network: &str, request: &AgentRequest, now: u64) -> Result<()> {
+/// lock before writing; hand back the grant the check ran against. The
+/// recorded denial alone can be stale. As in the daemon's precheck, fee
+/// zero checks the current amount and hard envelope; the daemon still
+/// checks the prepared transaction's actual fee later.
+fn ensure_approvable(
+    store: &Store,
+    network: &str,
+    request: &AgentRequest,
+    now: u64,
+) -> Result<Grant> {
     if matches!(request.outcome, Some(RequestOutcome::Sent { .. })) {
         bail!(
             "request {} was already sent — nothing to approve",
@@ -196,7 +217,7 @@ fn ensure_approvable(store: &Store, network: &str, request: &AgentRequest, now: 
             deny.code(),
         );
     }
-    Ok(())
+    Ok(grant)
 }
 
 /// The fee the recorded denial actually saw, when it saw one.
