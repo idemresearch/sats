@@ -31,10 +31,9 @@ pub fn sign_to_record(
     prepared: PreparedSpend,
     mnemonic: Mnemonic,
     network: Network,
-    source_id: Option<String>,
 ) -> Result<TransactionRecord> {
     let psbt = sign_psbt(&prepared, mnemonic, network)?;
-    Ok(prepared.into_transaction(psbt, source_id)?)
+    Ok(prepared.into_transaction(psbt)?)
 }
 
 /// Broadcast an already-persisted pending record, then mark and re-save it.

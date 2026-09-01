@@ -26,9 +26,7 @@ use bdk_wallet::bitcoin::{
 use bdk_wallet::chain::{BlockId, ConfirmationBlockTime, TxUpdate};
 use bdk_wallet::{KeychainKind, Update, Wallet};
 use bip39::Mnemonic;
-use sats_core::authz::{
-    GRANT_FORMAT_VERSION, Grant, IntentApproval, SpendRequest, default_max_fee_sat,
-};
+use sats_core::authz::{GRANT_FORMAT_VERSION, Grant, IntentApproval, SpendRequest};
 use sats_core::fmt::format_sats;
 use sats_core::intent::SendIntent;
 use sats_core::plan::{PreparedSpend, TransactionRecord};
@@ -313,9 +311,7 @@ impl Sim {
         if !finalized {
             return Err("signing did not finalize the transaction".to_string());
         }
-        let mut record = plan
-            .into_transaction(psbt, None)
-            .map_err(|e| e.to_string())?;
+        let mut record = plan.into_transaction(psbt).map_err(|e| e.to_string())?;
         let tx = record.tx().map_err(|e| e.to_string())?;
         record.mark_broadcast();
         self.confirm_tx(tx, now)?;
@@ -364,7 +360,13 @@ impl Sim {
             return Err("--for must be a positive duration".to_string());
         }
         let max_tx_sat = max_tx_str.as_deref().map(amount::parse).transpose()?;
-        let max_fee_sat = max_fee_str.as_deref().map(amount::parse).transpose()?;
+        // Every grant carries a hard fee cap, exactly like the native
+        // grant command: chosen, or defaulted from the budget.
+        let max_fee_sat = max_fee_str
+            .as_deref()
+            .map(amount::parse)
+            .transpose()?
+            .unwrap_or_else(|| sats_core::authz::default_max_fee_sat(budget_sat));
 
         // Same shape as the native grant: a capability token, never key
         // material. The playground has no daemon to hold a seed behind a
@@ -387,10 +389,7 @@ impl Sim {
             token_id: issued.token_id.clone(),
             token_hash: issued.token_hash.clone(),
             mode: Default::default(),
-            ask_max_tx_sat: None,
             allowed_recipients: None,
-            suspended: None,
-            strikes: Vec::new(),
         };
         let out = json!({
             "agent": grant.agent,
@@ -517,7 +516,7 @@ impl Sim {
                 })
                 .to_string())
             }
-            Ok(_via) => {
+            Ok(()) => {
                 // Consume-before-sign, like the native daemon: the burned
                 // approval lands on its holder before the signature.
                 if let (Some(holder), Some(consumed)) = (&approval_holder, &mut approval) {
@@ -547,7 +546,6 @@ impl Sim {
                             "amount_sat": record.amount_sat,
                             "fee_sat": record.fee_sat,
                             "total_sat": record.total_sat(),
-                            "via_approval": true,
                             "grant_remaining_sat": grant.remaining_sat(),
                             "grant_tx_count": grant.tx_count,
                         })
@@ -685,9 +683,9 @@ impl Sim {
             .grants
             .get(&record.agent)
             .ok_or_else(|| format!("no active grant for {:?}", record.agent))?;
-        // Recheck the hard envelope against the current grant, exactly
-        // like the native command: an old approvable denial cannot arm an
-        // exception a hard restriction now forbids.
+        // Recheck against the current grant, exactly like the native
+        // command: an old ask cannot arm an approval for a proposal the
+        // grant's boundaries now refuse.
         if let sats_core::authz::Decision::Deny(current) = sats_core::authz::evaluate_send(
             grant,
             &record.recipient,
@@ -703,9 +701,6 @@ impl Sim {
                 current.code()
             ));
         }
-        let max_fee_sat = grant
-            .max_fee_sat
-            .unwrap_or_else(|| default_max_fee_sat(grant.budget_sat));
         let expires_at = now.saturating_add(3_600);
         let digest = record.intent_digest.clone();
         let record = self.requests.get_mut(id).expect("checked above");
@@ -713,7 +708,6 @@ impl Sim {
             intent_digest: digest,
             approved_at: now,
             expires_at,
-            max_fee_sat,
             consumed_at: None,
             consumed_by_request: None,
         });
@@ -724,7 +718,6 @@ impl Sim {
             "agent": record.agent,
             "recipient": record.recipient,
             "amount_sat": record.amount_sat,
-            "max_fee_sat": max_fee_sat,
             "expires_at": expires_at,
             "single_use": true,
         })
@@ -1062,7 +1055,6 @@ mod tests {
         assert_eq!(approved["single_use"], true);
         let sent = value(&sim.agent_send("claude", &addr, "10k", 2, NOW).unwrap());
         assert_eq!(sent["status"], "sent", "got: {sent}");
-        assert_eq!(sent["via_approval"], true);
         let fee = sent["fee_sat"].as_u64().unwrap();
         assert_eq!(
             sent["grant_remaining_sat"].as_u64().unwrap(),

@@ -125,11 +125,11 @@ idempotency key, so a retried request can never pay twice, and `sats
 agent log` keeps the full causal chain from request through decision to
 transaction.
 
-The grant's caps shape the queue rather than opening a bypass: within
-`--max-tx` a proposal is a routine ask, above it an exceptional one
-(`over_max_tx`, still approvable), and above the hard `--ask-max-tx`
-ceiling it is refused outright with no approval path. A `--to` allowlist
-flags recipients outside it; `--mode observe` makes a grant read-only.
+The grant's boundaries are hard, and approval works only inside them:
+within `--max-tx` a proposal is a routine ask; above it — or over the
+fee cap or budget — it is refused outright with no approval path, and
+only changing the grant escalates. A `--to` allowlist refuses recipients
+outside it; `--mode observe` makes a grant read-only.
 On macOS, with your consent, `request_unlock` opens a local password
 dialog without exposing the password to the agent.
 

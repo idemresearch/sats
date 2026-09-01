@@ -57,16 +57,19 @@ Every agent action resolves through three verdicts:
   durable approval request is filed for exactly this intent, and a human
   decides.
 - **DENY** — the proposal violates a boundary the human pre-committed to:
-  the grant expired or was revoked, the amount is above the hard ceiling,
-  the intent is not grantable. Hard refusals are never approvable, and
-  the human is never bothered with them.
+  the grant expired or was revoked, the amount or fee exceeds a cap, the
+  budget is spent, the recipient is off the allowlist, the intent is not
+  grantable. Grant boundaries are never approvable, and the human is
+  never bothered with them.
 
 ## Grants are not signing authority
 
 An agent's grant defines what it may read and what it may *propose*:
-expiry, a total budget, per-transaction caps, a hard amount ceiling, a
-recipient allowlist, a fee cap, a network binding. A grant carries no key
-material — only the hash of the agent's bearer token beside the policy.
+expiry, a total budget, a per-transaction amount cap, a fee cap, a
+recipient allowlist, a network binding. Every boundary is hard, and a
+human approval authorizes one valid proposal inside them — approval
+cannot exceed the grant. A grant carries no key material — only the
+hash of the agent's bearer token beside the policy.
 
 A budget therefore means: *"this agent may ask me to authorize up to this
 much, under these constraints."* It does not mean the agent controls an
@@ -145,9 +148,7 @@ model:
   accounting stay per-payment regardless;
 - approval is digest-bound semantic authorization; the human reviews the
   recorded request, not the raw PSBT — the daemon's independent
-  derivation enforces the exact-transaction property instead;
-- the STOP/suspension state is enforced when a grant carries it, but no
-  shipped trigger sets or clears it yet.
+  derivation enforces the exact-transaction property instead.
 
 These are the debt to pay down — with hardware or independent-device
 signers, per-action unlock, and richer review surfaces — not properties

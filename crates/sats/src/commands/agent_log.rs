@@ -114,9 +114,8 @@ fn detail(event: &AgentEvent) -> String {
         } => format!("{} sat → {recipient}", format_sats(*amount_sat)),
         EventKind::Denied { deny, stage } => format!("{} at {stage}", deny.code()),
         EventKind::Approved {
-            max_fee_sat,
             approval_expires_at: _,
-        } => format!("max fee {} sat", format_sats(*max_fee_sat)),
+        } => String::new(),
         EventKind::ApprovalRevoked => String::new(),
         EventKind::ApprovalConsumed {
             consumed_by_request,
@@ -124,9 +123,8 @@ fn detail(event: &AgentEvent) -> String {
         EventKind::Reserved {
             total_sat,
             remaining_sat,
-            via,
         } => format!(
-            "{} sat via {via}, {} sat remaining",
+            "{} sat, {} sat remaining",
             format_sats(*total_sat),
             format_sats(*remaining_sat)
         ),

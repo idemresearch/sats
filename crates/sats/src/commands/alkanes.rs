@@ -200,8 +200,8 @@ pub fn execute(
     }
 
     let excluded_utxos = prepared.excluded_utxos;
-    let mut record = spend::sign_to_record(prepared, keys::unlock(store)?, network, None)?
-        .with_origin(TxOrigin {
+    let mut record =
+        spend::sign_to_record(prepared, keys::unlock(store)?, network)?.with_origin(TxOrigin {
             surface: "cli".into(),
             agent: None,
             request_id: None,

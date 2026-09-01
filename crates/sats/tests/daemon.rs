@@ -77,7 +77,7 @@ fn a_grant_file_holds_no_key_material() {
     let raw = std::fs::read_to_string(dir.path().join("signet/grants/claude.json")).unwrap();
     let grant: serde_json::Value = serde_json::from_str(&raw).unwrap();
 
-    assert_eq!(grant["format_version"], 3);
+    assert_eq!(grant["format_version"], 1);
     assert_eq!(grant["mode"], "ask", "every fresh grant asks by default");
     assert!(grant.get("wrapped_seed").is_none(), "v1 field survived");
     assert!(grant.get("grant_key").is_none(), "v1 field survived");
@@ -121,10 +121,12 @@ fn re_granting_replaces_the_token() {
     assert_eq!(grant["token_id"], second["token_id"]);
 }
 
-/// A v1 grant is read well enough to name itself, then refused. Honoring
-/// one would preserve exactly the weakness the daemon removes.
+/// A pre-daemon wrapped-seed grant is read well enough to name itself,
+/// then refused. Honoring one would preserve exactly the weakness the
+/// daemon removes — the one pre-release shape with a dedicated message,
+/// because the right advice is seed rotation, not a re-grant.
 #[test]
-fn a_v1_grant_is_refused_with_its_migration_path() {
+fn a_wrapped_seed_grant_is_refused_with_its_migration_path() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     let grants = dir.path().join("signet/grants");
@@ -153,7 +155,7 @@ fn a_v1_grant_is_refused_with_its_migration_path() {
         .args(["agent", "list"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("v1 format"))
+        .stdout(predicate::str::contains("pre-daemon"))
         .stdout(predicate::str::contains("sats agent revoke claude"));
 
     // The JSON contract stays an array; the notice goes to stderr.
@@ -164,14 +166,14 @@ fn a_v1_grant_is_refused_with_its_migration_path() {
     let listed: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
     assert!(listed.is_array(), "list --json must stay an array");
     assert_eq!(listed.as_array().unwrap().len(), 0);
-    assert!(String::from_utf8_lossy(&out.get_output().stderr).contains("v1 format"));
+    assert!(String::from_utf8_lossy(&out.get_output().stderr).contains("pre-daemon"));
 
     // And nothing will act on it.
     sats(&dir)
         .args(["agent", "serve", "claude"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("v1 format"))
+        .stderr(predicate::str::contains("pre-daemon"))
         .stderr(predicate::str::contains("treat the seed as disclosed"));
 }
 

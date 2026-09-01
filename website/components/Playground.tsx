@@ -646,11 +646,7 @@ export default function Playground() {
         },
         {
           cls: "t-dim",
-          text:
-            "the agent's next identical send consumes this approval " +
-            "(fee ceiling " +
-            fmt(approved.max_fee_sat) +
-            " sat)",
+          text: "the agent's next identical send consumes this approval",
         }
       );
       return;

@@ -23,7 +23,7 @@ wallet database contains public descriptors and chain state, not private key
 material.
 
 Sensitive files are written atomically with restrictive Unix permissions.
-This includes sealed keys, grants, explicit PSBT sessions, and finalized
+This includes sealed keys, grants, agent requests, and finalized
 transaction records. The data directories that hold them are owner-only
 (0700) as well, so directory listings — agent names, transaction ids,
 request ids — are as private as the files; existing installations are
@@ -121,29 +121,28 @@ users keep using the terminal unlock command.
 ## Agent grants
 
 `sats agent grant <name>` creates bounded authority to propose — never to
-sign. No mode lets an agent send execute without a one-time human
-approval. A grant carries:
+sign. A grant defines what an agent is allowed to propose; every boundary
+it carries is hard, and human approval authorizes one valid proposal
+inside the grant, never past it. A grant carries:
 
 - an authority mode — `ask` (the default: every send terminates in a
   one-time approvable ask) or `observe` (read-only) — switchable live
   with `sats agent mode`, where tightening never needs the password and
-  widening always does. The autonomous `auto` mode of earlier releases
-  was removed; see the format notes below for how its records read;
+  widening always does. There is no autonomous mode;
 - total budget, including transaction fees;
-- optional per-transaction amount cap — above it a proposal is the
-  specific `over_max_tx` instead of the routine `ask_required`, so the
-  queue tells routine from exceptional — and an optional hard ceiling
-  above which a send is never approvable;
+- an optional per-transaction amount cap — an amount above it is the
+  hard refusal `over_max_tx`, and the only escalation is changing the
+  grant;
 - an optional standing recipient allowlist (`--to`, edited with
-  `sats agent allow`/`disallow`): other recipients are flagged
+  `sats agent allow`/`disallow`): other recipients are the hard refusal
   `recipient_not_allowed`. Entries change only through the control
   plane — never through payment history, successful sends, or
   approvals, so an agent cannot launder an address into "known" by
   paying it once;
-- per-transaction fee cap — defaulted when not given to 2% of the budget,
-  at least 1000 sats and never above the budget, so one bad fee estimate
-  cannot burn the whole budget as miner fees; only the explicit
-  `--no-max-fee` issues a grant without one;
+- a per-transaction fee cap, always present — chosen with `--max-fee`,
+  otherwise defaulted to 2% of the budget, at least 1000 sats and never
+  above the budget — so one bad fee estimate cannot burn the whole
+  budget as miner fees;
 - expiry timestamp;
 - network binding;
 - running spend and transaction counts;
@@ -181,55 +180,29 @@ budgets and short expiries; revoke when not needed.
 Hardware- or passkey-backed `Signer` implementations can strengthen the
 daemon's own boundary further without changing transaction planning.
 
-### Grant format versions
+### Grant format
 
-The current on-disk grant format is v3, and its fields are:
+The on-disk grant format is `format_version: 1` — the first released
+schema. sats is pre-release, so earlier development shapes are not
+migrated: a record that does not parse as the current schema (for
+example, one spelling the removed development-era `auto` mode, or one
+missing a required field) fails with an error naming the fix — revoke
+and grant again. Loading a grant refuses `format_version` values above
+what the build understands: a newer sats may have written restrictions
+this build cannot see, and ignoring them would widen the agent's
+authority.
 
-- `mode`: `ask` or `observe` — how much standing authority the grant
-  carries. The removed autonomous `auto` value, and a v2 record's absent
-  mode (which meant auto to the binaries that wrote it), both read as
-  `ask`: the restrictive direction is always the safe one to take;
-- `ask_max_tx_sat`: a hard per-transaction ceiling above which a send is
-  never approvable;
-- `allowed_recipients`: a standing recipient allowlist in the digest's
-  normalized spelling (`null` means unrestricted, an empty list means
-  every recipient is flagged);
-- `suspended` and `strikes`: the STOP state and the refusal-storm
-  breaker's bookkeeping. The ladder enforces suspension whenever a grant
-  carries it, but no shipped command or automatic trigger sets or clears
-  these fields today — they are reserved by the format so records stay
-  readable when that wiring lands.
+The one deliberately recognized older shape is the pre-daemon grant
+that stored the master seed re-sealed under a key in the same file, so
+any process that could read it could sign without asking. Those records
+are read well enough to name themselves and are then **refused**, with
+the commands that replace them; honoring one would preserve exactly the
+weakness the daemon removes. `sats agent list` reports them rather than
+showing an empty table.
 
-Records still spelling `auto` are also rewritten: the first time anything
-uses such a grant — a send, `agent serve` startup, `agent list`,
-`approve`, or a control-plane edit — the durable file is normalized to an
-explicit v3 `ask` and the tightening is journaled as a `mode_changed`
-event, so a later downgrade to an older binary cannot read autonomy back
-out of the file. The format version stays 3: nothing new was added, reads
-only tighten, and older v3 binaries fully understand — and enforce as
-ask — every record this build writes.
-
-Loading a grant refuses `format_version` values above what the build
-understands, with an error naming the fix: a newer sats may have written
-restrictions this build cannot see, and ignoring them would widen the
-agent's authority. The honest caveat runs the other way in time: binaries
-older than v3 predate that check and ignore unknown fields, so they would
-enforce a normalized grant as their auto-within-caps. Do not run pre-v3
-binaries against a data directory holding v3 grants; upgrade every binary
-that shares the `SATS_DIR`. A downgrade to an older binary, like a
-hand-edited grant file, is a deliberate same-user act outside what code
-can enforce.
-
-Releases before the daemon (v1) stored the master seed re-sealed under a
-key in the same grant file, so any process that could read it could sign
-without asking. Those records are read well enough to name themselves and
-are then **refused**, with the commands that replace them; honoring one
-would preserve exactly the weakness the daemon removes. `sats agent list`
-reports them rather than showing an empty table.
-
-If an agent with shell access ever ran on a machine while a v1 grant existed,
-treat the seed as disclosed: move the funds to a fresh wallet rather than
-only revoking.
+If an agent with shell access ever ran on a machine while such a
+wrapped-seed grant existed, treat the seed as disclosed: move the funds
+to a fresh wallet rather than only revoking.
 
 ## Authorization order
 
@@ -237,40 +210,31 @@ The authorization engine is deterministic and pure, and every refusal is
 typed. A send never reaches an allow on the grant alone: the only allow a
 spend can obtain rides a one-time human approval, so "no unapproved
 agent-originated spend may reach the signer" is a structural property of
-the ladder, not a policy setting. The ladder has two halves. The **hard
-envelope** runs first, and none of its refusals can be lifted by a
-one-time approval:
+the ladder, not a policy setting. Every rung is a hard grant boundary —
+none of them can be lifted by an approval:
 
 1. expiry;
-2. suspension (STOP);
-3. observe mode;
-4. intent authority (only send is grantable today);
-5. arithmetic sanity — an amount + fee that overflows is the typed denial
+2. observe mode;
+3. intent authority (only send is grantable today);
+4. arithmetic sanity — an amount + fee that overflows is the typed denial
    `amount_overflow`, never a saturated number a budget could pass;
-6. the hard amount ceiling (`over_ask_max`), when the grant carries one.
+5. the recipient allowlist (`recipient_not_allowed`), when the grant
+   carries one;
+6. per-transaction amount cap (`over_max_tx`);
+7. per-transaction fee cap (`over_max_fee`);
+8. remaining total budget (`over_budget`);
+9. the terminal ask (`ask_required`): a proposal inside every boundary
+   still asks — the one refusal a one-time human approval lifts, and
+   the only approvable reason in the system.
 
-Only then the **ask band**, whose refusals a human may approve exactly
-once:
-
-7. the recipient rule (`recipient_not_allowed`), when the grant carries an
-   allowlist;
-8. per-transaction amount cap (`over_max_tx`);
-9. per-transaction fee cap (`over_max_fee`);
-10. remaining total budget (`over_budget`);
-11. the terminal ask (`ask_required`): a proposal inside every limit
-    still asks — the specific reasons run first so the review queue
-    tells a routine ask from an exceptional one.
-
-The order is deliberate and frozen by tests: an approvable reason must
-never mask a hard one, so a request that is both outside the allowlist and
-above the hard ceiling reports the ceiling. (Earlier releases ran the
-ask-mode check before the caps; with autonomy removed, the caps speak
-first so their reasons stay meaningful.) `DenyReason::approvable()` is
-the one predicate every surface keys off to decide whether a refusal may
-carry an approval path at all. A valid digest-bound approval lifts the
-ask band as a whole for exactly its intent — the digest pins recipient
-and amount, and the approval's own fee ceiling bounds the fee — while
-the hard envelope stands regardless.
+The order is deliberate and frozen by tests: the specific boundary
+answers before the terminal ask, so a refusal names what was crossed
+instead of the generic ask. `DenyReason::approvable()` is the one
+predicate every surface keys off to decide whether a refusal may carry
+an approval path at all, and it is true only for `ask_required`. A valid
+digest-bound approval lifts exactly that terminal ask for exactly its
+intent — the digest pins recipient and amount, and the fee stays bounded
+by the grant's own fee cap — while every boundary stands regardless.
 
 Budget drawdown is amount plus fee, and only an approved, signed send
 draws it: a denial — including the terminal ask — consumes nothing. The
@@ -278,9 +242,9 @@ MCP server performs a cheap amount-only precheck through the same full
 ladder — recipient rule included — so a novel proposal is recorded and
 denied before any network access; an approved retry prepares the
 transaction to learn the real fee, then the daemon makes the final
-decision. On the approval path the draw may exceed the remaining budget —
-the human explicitly approved that exact intent, and `sats agent approve`
-shows the remaining budget (and warns) before the password prompt.
+decision. The reserve re-runs the full ladder with every boundary hard,
+so a draw can never exceed the remaining budget: an approval authorizes
+a valid proposal inside the grant, never an overdraw.
 
 The engine takes the current time as an input, and the daemon's clock
 fails closed: if the system clock cannot be read, sends refuse with the
@@ -353,17 +317,16 @@ accepting the drawdown.
 
 ## One-time approvals
 
-`sats agent approve` converts one denied request into a single-use
-exception. Its trust model:
+`sats agent approve` converts one asked request into a single-use
+authorization. Its trust model:
 
 - the approval binds the request's canonical intent digest — network,
   agent, normalized recipient, amount — so it authorizes exactly the send
   the human reviewed, nothing adjacent;
-- the fee is not part of the digest (it varies per preparation), so the
-  approval carries its own explicit fee ceiling instead, shown before the
-  password prompt — defaulted from the recorded denial's fee when one
-  exists, otherwise from the grant's own fee cap; a prepared fee above it
-  is the typed denial `approval_fee_exceeded`;
+- the fee is not part of the digest (it varies per preparation), and the
+  approval carries no fee bound of its own: the grant's always-present
+  fee cap bounds the fee when the send executes, like every other grant
+  boundary;
 - creating an approval requires the wallet password — the prompt is the
   authorization, exactly as for grant creation. Verification is a trial
   unseal, so key material is derived briefly in the approving process and
@@ -371,16 +334,16 @@ exception. Its trust model:
   `satsd`, when the agent's identical retry authorizes. Dismissing a
   request and revoking its approval (`sats agent deny`) needs no
   password: reducing authority stays cheap;
-- an approval lifts only refusals whose `DenyReason::approvable()` is
-  true — the ask band: the quantitative caps, ask mode, and the recipient
-  rule. It never lifts the hard envelope: not grant expiry or revocation
-  (the kill switches that withdraw all authority at once — mechanically it
-  cannot, because the signing key lives behind the grant file), not
-  suspension, not observe mode, and not the hard amount ceiling, which is
-  the human's pre-commitment that no amount of asking can move;
+- an approval lifts only the terminal `ask_required` — the single
+  refusal whose `DenyReason::approvable()` is true. It never lifts a
+  grant boundary: not expiry or revocation (the kill switches that
+  withdraw all authority at once — mechanically it cannot, because the
+  signing key lives behind the grant file), not observe mode, not the
+  recipient allowlist, and not the amount, fee, or budget bounds, which
+  are the human's pre-commitments that no amount of asking can move;
 - approval creation rechecks the current grant before prompting and
   under the grant lock before writing; a missing grant or a current hard
-  refusal cannot arm an exception from an older approvable denial.
+  refusal cannot arm an approval from an older recorded ask.
   Read-only polling checks the same hard envelope before reporting an
   approval ready, without changing the recorded outcome or authorizing
   a signature;
@@ -487,11 +450,8 @@ composing a transaction from misread data.
 PSBTs are the preparation and signer contract. A normal human or agent send
 keeps the PSBT in memory. `sats send --export-psbt` is the explicit
 exception: it writes the unsigned PSBT to an owner-only file artifact the
-user names. Successful `sats psbt sign` converts an artifact — or a stored
-session from an older release, by explicit `--session` id — into a private
-raw finalized-transaction record. Stored sessions and pre-refactor plan
-files remain readable, permission-hardened, and are converted and deleted
-when used; new releases never write them.
+user names. Successful `sats psbt sign` converts an artifact into a
+private raw finalized-transaction record.
 
 `sats psbt sign FILE` accepts an external base64 or binary PSBT; a PSBT that
 still needs other signers is written back as a signed artifact rather than
@@ -513,7 +473,7 @@ That is reported as partial rather than treated as a broadcastable success.
 | Lied-about send amount or fee | Recomputed from the PSBT against the wallet's descriptors | An understated input burns the caller's own budget on an unrelayable transaction |
 | Compromised served process | Holds a token, never a key | Same as a stolen token |
 | Debugger attached to satsd | Process memory only; same-user | Seed recoverable where ptrace is permitted |
-| Grant left in v1 format | Read, reported, and refused for signing | The file itself is a seed disclosure until the wallet is rotated |
+| Pre-daemon wrapped-seed grant on disk | Read, reported, and refused for signing | The file itself is a seed disclosure until the wallet is rotated |
 | Revoked agent session | Grant reloaded on every send | A transaction signed before revocation remains valid |
 | Provider outage | Planning and configured guards fail closed | Loss of availability |
 | Malicious asset guard | Restrictive-only result | Can hide funds; incomplete results can miss assets |

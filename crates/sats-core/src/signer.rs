@@ -106,10 +106,6 @@ mod tests {
         assert_eq!(plan.total_sat(), plan.amount_sat + plan.fee_sat);
         assert_eq!(plan.id.len(), 8);
 
-        let session_json = serde_json::to_string(&plan.session()).unwrap();
-        let session: crate::plan::PsbtSession = serde_json::from_str(&session_json).unwrap();
-        assert_eq!(session.clone().into_prepared().unwrap().id, plan.id);
-
         // The watch-only wallet itself must NOT be able to sign.
         let mut psbt = plan.psbt().clone();
         let watch_only_result = wallet.sign(&mut psbt, SignOptions::default()).unwrap();
@@ -125,7 +121,7 @@ mod tests {
         let tx = psbt.clone().extract_tx().unwrap();
         assert!(tx.output.iter().any(|o| o.value.to_sat() == 25_000));
 
-        let record = plan.into_transaction(psbt, None).unwrap();
+        let record = plan.into_transaction(psbt).unwrap();
         assert_eq!(record.status, TransactionStatus::Pending);
         assert_eq!(record.txid, tx.compute_txid().to_string());
         assert_eq!(record.tx().unwrap(), tx);

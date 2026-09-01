@@ -45,7 +45,7 @@ own.
 | `token` | Agent capability tokens: mint, hash, constant-time verify |
 | `verify` | Recomputing a PSBT's payments and fee from the wallet's own descriptors |
 | `engine` | In-memory PSBT preparation and conservative UTXO exclusion |
-| `plan` | Prepared spends, legacy PSBT sessions, finalized transaction records, and legacy-plan conversion |
+| `plan` | Prepared spends and finalized transaction records |
 | `seed` | BIP-39 generation and parsing; BIP-86 public and private descriptors |
 | `seal` | Versioned Argon2id/XChaCha20-Poly1305 secret envelopes |
 | `signer` | Environment-neutral signer trait and local mnemonic signer |
@@ -61,7 +61,7 @@ adapters.
 | `main`, `cli` | Parse global flags and commands, resolve the selected network, dispatch workflows |
 | `commands` | Human CLI workflows and their text/JSON presentation |
 | `config` | TOML configuration and canonical network names |
-| `store` | XDG paths, atomic files, PSBT sessions, finalized transactions, legacy plans, grants, and sensitive-file permissions |
+| `store` | XDG paths, atomic files, finalized transactions, grants, requests, the event log, and sensitive-file permissions |
 | `walletd` | SQLite-backed watch-only BDK wallet creation, loading, and persistence |
 | `provider` | Typed capabilities, driver resolution, chain access, and UTXO guards |
 | `keys`, `password` | Unlock the master seed; prove the password without keeping anything |
@@ -104,7 +104,6 @@ isolated runs.
 | Configuration | `config.toml` | Default network and typed providers |
 | Master seed | `seed.sealed` | Password-sealed mnemonic |
 | Wallet | `<network>/wallet.sqlite` | Public descriptors and BDK changes only |
-| PSBT sessions | `<network>/psbts/<id>.json` | Read-only legacy state from older releases' staged workflow; new exports are PSBT file artifacts |
 | Finalized transactions | `<network>/transactions/<txid>.json` | Private raw transaction hex, pending/broadcast status, and payment metadata |
 | Legacy plans | `<network>/plans/<id>.json` | Pre-refactor state; read, permission-hardened, and converted on sign/broadcast |
 | Grants | `<network>/grants/<agent>.json` | Authority mode, limits, accounting, and the bearer token's hash — no key material |
@@ -114,7 +113,7 @@ isolated runs.
 | Agent requests | `<network>/agent-requests/<agent>/<id>.json` | One durable record per agent send: canonical intent digest, idempotency key, and resolved outcome |
 | Event log | `<network>/events/log.jsonl` | Append-only causal record of the agent path: one JSON line per state transition |
 
-Wallet state, sessions, transactions, legacy plans, and grants are namespaced
+Wallet state, transactions, requests, and grants are namespaced
 by Bitcoin network. The sealed master seed is shared so each network derives
 from the same mnemonic. Sensitive files are written atomically with
 restrictive permissions.
@@ -219,7 +218,7 @@ sequenceDiagram
     M->>P: broadcast
     M->>D: finish(broadcast result)
     D->>S: record outcome and causal events
-    M-->>A: sent (via_approval)
+    M-->>A: sent
 ```
 
 A send spans one connection: the claim taken by `begin_send` is released

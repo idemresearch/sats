@@ -1,17 +1,16 @@
-//! The explicit PSBT escape hatch: inspect and sign file artifacts. Stored
-//! sessions from older releases remain signable by explicit id only —
-//! signing never consumes hidden internal state.
+//! The explicit PSBT escape hatch: inspect and sign file artifacts.
+//! Signing consumes only the file the human names — never hidden
+//! internal state.
 
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use sats_core::bitcoin::{Address, Network, Psbt, ScriptBuf};
-use sats_core::plan::{LegacyPlanStatus, TransactionRecord};
+use sats_core::plan::TransactionRecord;
 use sats_core::signer::{LocalSigner, Signer};
 
-use crate::config::network_name;
 use crate::store::{Store, unix_now, write_atomic};
 use crate::{keys, ui, walletd};
 
@@ -99,21 +98,16 @@ pub fn inspect(network: Network, file: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Sign a PSBT file (or a stored legacy session by explicit id). A file
-/// that finalizes becomes a pending transaction record ready to broadcast;
-/// `--out` keeps everything a file artifact instead.
+/// Sign a PSBT file. A file that finalizes becomes a pending transaction
+/// record ready to broadcast; `--out` keeps everything a file artifact
+/// instead.
 pub fn sign(
     store: &Store,
     network: Network,
-    file: Option<&Path>,
-    session: Option<&str>,
+    file: &Path,
     out: Option<&Path>,
     json: bool,
 ) -> Result<()> {
-    if let Some(id) = session {
-        return sign_session(store, network, id, json);
-    }
-    let file = file.context("pass a PSBT file or --session ID")?;
     let bytes = fs::read(file).with_context(|| format!("cannot read {}", file.display()))?;
     let mut psbt = parse_psbt(&bytes)?;
 
@@ -193,7 +187,6 @@ pub fn sign(
         fee_sat,
         unix_now(),
         0,
-        None,
         &tx,
     );
     store.save_transaction(ctx.net_name, &record)?;
@@ -207,69 +200,6 @@ pub fn sign(
                 "recipient": record.recipient,
                 "amount_sat": record.amount_sat,
                 "fee_sat": record.fee_sat,
-            })
-        );
-    } else {
-        ui::ok(&format!("signed  {}", record.txid));
-        ui::dim(&format!("next: sats tx broadcast {}", record.txid));
-    }
-    Ok(())
-}
-
-/// Legacy-compat path: sign a stored PSBT session or pre-refactor plan.
-fn sign_session(store: &Store, network: Network, id: &str, json: bool) -> Result<()> {
-    let net_name = network_name(network);
-    enum Source {
-        Session,
-        Legacy,
-    }
-
-    let session_path = store.psbt_sessions_dir(net_name).join(format!("{id}.json"));
-    let legacy_path = store.legacy_plans_dir(net_name).join(format!("{id}.json"));
-    let (source_id, prepared, source) = if session_path.exists() {
-        let session = store.load_psbt_session(net_name, id)?;
-        let source_id = session.id.clone();
-        (source_id, session.into_prepared()?, Source::Session)
-    } else if legacy_path.exists() {
-        let legacy = store.load_legacy_plan(net_name, id)?;
-        match legacy.status {
-            LegacyPlanStatus::Unsigned => {}
-            LegacyPlanStatus::Signed => {
-                bail!(
-                    "plan {} is already signed — run: sats tx broadcast {}",
-                    legacy.id,
-                    legacy.id
-                )
-            }
-            LegacyPlanStatus::Broadcast => {
-                bail!("plan {} was already broadcast", legacy.id)
-            }
-        }
-        let source_id = legacy.id.clone();
-        (source_id, legacy.into_prepared()?, Source::Legacy)
-    } else {
-        bail!("no PSBT session {id}");
-    };
-
-    let record = crate::spend::sign_to_record(
-        prepared,
-        keys::unlock(store)?,
-        network,
-        Some(source_id.clone()),
-    )?;
-    store.save_transaction(net_name, &record)?;
-    match source {
-        Source::Session => store.delete_psbt_session(net_name, &source_id)?,
-        Source::Legacy => store.delete_legacy_plan(net_name, &source_id)?,
-    }
-
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "id": source_id,
-                "txid": record.txid,
-                "status": "signed",
             })
         );
     } else {

@@ -35,14 +35,10 @@ pub fn run(
     // Fail loudly at startup — `claude mcp add` time — not mid-conversation.
     // Order matters: "no grant" names the step a human has not done yet,
     // so it outranks a missing token, which is only meaningful once a
-    // grant exists to hold one. The read also retires a durable record
-    // still spelling the removed autonomous mode: it is rewritten as
-    // `ask` before this process serves a single tool.
-    let grant = store
-        .normalize_grant_autonomy(net_name, agent)?
-        .with_context(|| {
-            format!("no grant for {agent:?} — run: sats agent grant {agent} --budget <sats>")
-        })?;
+    // grant exists to hold one.
+    let grant = store.load_grant(net_name, agent)?.with_context(|| {
+        format!("no grant for {agent:?} — run: sats agent grant {agent} --budget <sats>")
+    })?;
     // Fail-closed clock: a broken clock refuses to serve rather than
     // treating every grant as unexpired.
     if grant.is_expired(now_checked()?) {

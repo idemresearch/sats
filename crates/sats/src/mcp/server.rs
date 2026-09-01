@@ -154,9 +154,9 @@ pub struct GrantResult {
     /// approval) or "observe" (read-only). There is no autonomous mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
-    /// Standing recipient allowlist. Absent means unrestricted; an empty
-    /// list means every recipient asks. Other recipients are the
-    /// approvable denial recipient_not_allowed.
+    /// Standing recipient allowlist. Absent means any recipient may be
+    /// proposed; listed recipients are the only ones the grant accepts —
+    /// others are the hard denial recipient_not_allowed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_recipients: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -205,9 +205,9 @@ pub struct SendResult {
     pub total_sat: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remaining_budget_sat: Option<u64>,
-    /// Denial code: expired, over_max_tx, over_max_fee, over_budget,
-    /// revoked, approval_fee_exceeded, amount_overflow, ask_required,
-    /// over_ask_max, observe_only, suspended, recipient_not_allowed.
+    /// Denial code: ask_required (approvable), or a grant boundary —
+    /// expired, over_max_tx, over_max_fee, over_budget, revoked,
+    /// amount_overflow, observe_only, recipient_not_allowed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -220,13 +220,10 @@ pub struct SendResult {
     /// request_id_conflict, request_in_flight, request_incomplete.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
-    /// True when this send was authorized by a one-time human approval —
-    /// the only way an agent-originated send is ever signed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub via_approval: Option<bool>,
     /// On denied results only: whether a one-time human approval can lift
-    /// this exact refusal. False means the hard envelope — asking cannot
-    /// move it, and only the human changing the grant can.
+    /// this exact refusal. True only for ask_required. False means a
+    /// grant boundary — asking cannot move it, and only the human
+    /// changing the grant can.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approvable: Option<bool>,
 }
@@ -246,7 +243,6 @@ impl From<SendOutcome> for SendResult {
             message: outcome.message,
             request_id: outcome.request_id,
             error_code: outcome.error_code,
-            via_approval: outcome.via_approval,
             approvable: outcome.approvable,
         }
     }
@@ -265,7 +261,6 @@ impl SendResult {
             message: Some(message),
             request_id: None,
             error_code: None,
-            via_approval: None,
             approvable: None,
         }
     }
@@ -480,7 +475,7 @@ impl SatsMcp {
                     spent_sat: Some(g.spent_sat),
                     remaining_sat: Some(g.remaining_sat()),
                     max_tx_sat: g.max_tx_sat,
-                    max_fee_sat: g.max_fee_sat,
+                    max_fee_sat: Some(g.max_fee_sat),
                     tx_count: Some(g.tx_count),
                     expires_at: Some(g.expires_at),
                     message: None,
@@ -513,11 +508,12 @@ impl SatsMcp {
         request_id a send result returned (or your bare idempotency key). This is the \
         sanctioned way to wait for a human decision: it reads the durable record only — \
         no chain access, no retry, no side effects, and polling it never counts against \
-        you. When a denial is awaiting approval, approval_ready=false; once the human \
-        approves and the current grant permits an exception, approval_ready=true — \
-        retry the identical send with its original client key. The daemon rechecks \
-        policy and the actual fee. A sent request reports its txid. Stored ids take \
-        precedence over bare-key aliases; prefer the id a send result returned.",
+        you. While an ask awaits the human, approval_ready=false; once the human \
+        approves and the proposal still fits inside the current grant, \
+        approval_ready=true — retry the identical send with its original client key. \
+        The daemon rechecks policy and the actual fee. A sent request reports its \
+        txid. Stored ids take precedence over bare-key aliases; prefer the id a send \
+        result returned.",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn check_request(
@@ -544,16 +540,15 @@ impl SatsMcp {
         request_id — that is the request being filed for review, not a failure. \
         Relay the message and request_id to your human, poll check_request while \
         they decide, and after approval retry the identical send (same address, \
-        amount, and idempotency key). Enforced deterministically against the \
-        human-authorized grant (budget, per-tx cap, hard ceiling, fee cap, \
-        expiry, mode, recipient rules). Denied results carry approvable: true \
-        when a human can approve exactly this request once, and approvable: \
-        false when no approval exists for it — only the human changing the \
-        grant can, so do not ask repeatedly. Pass request_id (1-64 chars of \
-        A-Za-z0-9_-) to make retries safe: the same key with the same address \
-        and amount never pays twice, and returns the recorded outcome instead. \
-        While waiting on a human decision, poll check_request instead of \
-        retrying send.",
+        amount, and idempotency key). Every grant boundary is hard and enforced \
+        deterministically (budget, per-tx amount cap, fee cap, expiry, mode, \
+        recipient allowlist): approvable=true means exactly this ask can be \
+        approved once; approvable=false names a boundary no approval lifts — \
+        only the human changing the grant can, so do not ask repeatedly. Pass \
+        request_id (1-64 chars of A-Za-z0-9_-) to make retries safe: the same \
+        key with the same address and amount never pays twice, and returns the \
+        recorded outcome instead. While waiting on a human decision, poll \
+        check_request instead of retrying send.",
         // Client-side hints only: the annotations describe the tool, the
         // daemon's policy ladder is the security boundary. A client that
         // ignores them changes nothing about what can be signed.
@@ -901,19 +896,19 @@ impl ServerHandler for SatsMcp {
              human-authorized spending grant. You can observe, prepare, and propose; you \
              cannot cause a signature — every agent send needs a one-time human approval. \
              All amounts are integer satoshis. send() files a proposal, enforced \
-             deterministically against the grant's policy — budget, per-transaction cap, \
-             hard ceiling, fee cap, expiry, mode, recipient rules; the normal result of a \
-             novel send is status='denied' with reason='ask_required' and a request_id: \
-             that is the request awaiting review, not a failure. Relay the message and \
-             request_id to your human instead of retrying unchanged. A denial with \
-             approvable=true can be approved exactly once (sats agent approve); retry the \
-             identical send with the same request_id after approval: the one-time approval \
-             is consumed by exactly that intent. A denial with approvable=false cannot be \
-             approved at all — only the human changing the grant lifts it, so report it \
-             once and stop. \
+             deterministically against the grant's hard boundaries — budget, \
+             per-transaction amount cap, fee cap, expiry, mode, recipient allowlist; the \
+             normal result of a novel send is status='denied' with reason='ask_required' \
+             and a request_id: that is the request awaiting review, not a failure. Relay \
+             the message and request_id to your human instead of retrying unchanged. \
+             approvable=true means exactly this ask can be approved once (sats agent \
+             approve); retry the identical send with the same request_id after approval: \
+             the one-time approval is consumed by exactly that intent. approvable=false \
+             names a grant boundary no approval lifts — only the human changing the \
+             grant can, so report it once and stop. \
              Pass request_id on every send so retries can never pay twice. While a request \
              waits on a human, poll check_request(request_id) — it is free, has no side \
-             effects, and reports approval_ready under the current grant's hard restrictions; \
+             effects, and reports approval_ready under the current grant's boundaries; \
              the daemon still checks policy and the actual fee on retry. Do not poll \
              by retrying send. Use get_grant() \
              to see the remaining budget before sending. Use get_status() for daemon \

@@ -63,7 +63,7 @@ pub enum Command {
     },
     /// Show pending and broadcast transactions, or one by txid
     Status {
-        /// Transaction id, unique prefix, or session id
+        /// Transaction id or unique prefix
         #[arg(value_name = "TXID")]
         txid: Option<String>,
         /// Skip chain sync; confirmation state may be stale
@@ -170,9 +170,9 @@ pub enum AlkanesCommand {
 #[derive(Subcommand)]
 pub enum TxCommand {
     /// Broadcast a raw transaction hex file, or a saved transaction by
-    /// txid, unique prefix, or session id
+    /// txid or unique prefix
     Broadcast {
-        /// Raw transaction hex file, or a txid/prefix/id (`sats status` lists them)
+        /// Raw transaction hex file, or a txid/prefix (`sats status` lists them)
         #[arg(value_name = "FILE|TXID")]
         target: String,
     },
@@ -189,13 +189,10 @@ pub enum PsbtCommand {
     /// Sign a PSBT file with the wallet seed
     Sign {
         /// PSBT file (base64 text or binary)
-        #[arg(value_name = "FILE", required_unless_present = "session")]
-        file: Option<PathBuf>,
-        /// Sign a stored PSBT session or pre-refactor plan by id instead
-        #[arg(long, value_name = "ID", conflicts_with = "file")]
-        session: Option<String>,
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
         /// Write the signed PSBT here instead of staging a broadcast
-        #[arg(long, value_name = "FILE", conflicts_with = "session")]
+        #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
 }
@@ -242,33 +239,21 @@ pub struct GrantArgs {
         value_name = "DURATION"
     )]
     pub duration: String,
-    /// Per-transaction amount cap in sats: the automatic band. Amounts
-    /// above it are denied, and a human can approve each denial once
+    /// Hard per-transaction amount cap in sats: amounts above it are
+    /// refused outright — the only escalation is changing the grant
     #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
     pub max_tx: Option<u64>,
-    /// Hard per-transaction ceiling in sats: amounts above it are never
-    /// approvable — the only escalation is changing the grant
-    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
-    pub ask_max_tx: Option<u64>,
-    /// Per-transaction fee cap in sats
+    /// Hard per-transaction fee cap in sats
     /// (default: 2% of the budget, at least 1000, never above the budget)
-    #[arg(
-        long,
-        value_name = "SATS",
-        value_parser = crate::amount::parse,
-        conflicts_with = "no_max_fee"
-    )]
+    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
     pub max_fee: Option<u64>,
-    /// Issue the grant with no per-transaction fee cap at all
-    #[arg(long)]
-    pub no_max_fee: bool,
     /// Authority mode: ask (every send needs a one-time approval) or
     /// observe (read-only)
     #[arg(long, default_value = "ask", value_name = "ask|observe")]
     pub mode: String,
-    /// Restrict standing authority to these recipients (repeatable).
-    /// At least one --to makes the allowlist finite: any other recipient
-    /// asks. Without --to, every recipient is allowed, as before
+    /// Restrict proposals to these recipients (repeatable). At least one
+    /// --to makes the allowlist finite: any other recipient is refused.
+    /// Without --to, every recipient may be proposed
     #[arg(long = "to", value_name = "ADDRESS")]
     pub to: Vec<String>,
 }
@@ -306,14 +291,10 @@ pub enum AgentCommand {
     },
     /// List active grants
     List,
-    /// Approve one denied request exactly once (password required)
+    /// Approve one asked request exactly once (password required)
     Approve {
         /// Request id or unique prefix (see: sats agent requests)
         id: String,
-        /// Fee ceiling in sats for the approved send (default: twice the
-        /// fee the denial recorded, when it recorded one)
-        #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
-        max_fee: Option<u64>,
         /// Approval lifetime (e.g. 1h, 30m)
         #[arg(long = "for", default_value = "1h", value_name = "DURATION")]
         duration: String,
@@ -323,7 +304,7 @@ pub enum AgentCommand {
         /// Request id or unique prefix
         id: String,
     },
-    /// Review agent send requests (denied ones await a human decision)
+    /// Review agent send requests (asked ones await a human decision)
     Requests {
         /// Include resolved and dismissed requests, not only pending ones
         #[arg(long, conflicts_with = "watch")]

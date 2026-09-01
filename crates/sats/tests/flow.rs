@@ -1,15 +1,12 @@
 //! End-to-end spend flows against a funded, persisted wallet and the
-//! hermetic mock provider: automatic sends, dry runs, the explicit
-//! PSBT/tx escape hatch, and legacy-state compatibility.
+//! hermetic mock provider: confirmed sends, dry runs, and the explicit
+//! PSBT/tx escape hatch.
 
 mod common;
 
-use std::fs;
-use std::str::FromStr;
-
-use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Network};
 use common::{ADDRESS, fund_wallet, init_wallet, json_stdout, sats, write_mock_provider};
 use predicates::prelude::*;
+use std::fs;
 use tempfile::TempDir;
 
 #[test]
@@ -248,103 +245,4 @@ fn psbt_sign_out_writes_artifact_only() {
     assert!(signed_path.exists());
     // Artifact only: no pending transaction was staged.
     assert!(!dir.path().join("signet/transactions").exists());
-}
-
-#[test]
-fn legacy_psbt_session_signs_by_explicit_id() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    write_mock_provider(&dir);
-    fund_wallet(&dir, &[100_000]);
-
-    // Fabricate the stored session an older release would have written.
-    let session = build_session(&dir);
-    let session_path = dir.path().join(format!(
-        "signet/psbts/{}.json",
-        session["id"].as_str().unwrap()
-    ));
-    fs::create_dir_all(session_path.parent().unwrap()).unwrap();
-    fs::write(&session_path, serde_json::to_vec_pretty(&session).unwrap()).unwrap();
-    let id = session["id"].as_str().unwrap();
-
-    let signed = json_stdout(
-        sats(&dir)
-            .args(["psbt", "sign", "--session", id, "--json"])
-            .assert()
-            .success(),
-    );
-    assert_eq!(signed["status"], "signed");
-    assert_eq!(signed["id"], id);
-    assert!(!session_path.exists(), "session must be consumed");
-
-    // The session id still resolves the saved transaction.
-    sats(&dir)
-        .args(["tx", "broadcast", id, "--json"])
-        .assert()
-        .success();
-}
-
-#[test]
-fn legacy_unsigned_plan_signs_by_explicit_id() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    write_mock_provider(&dir);
-    fund_wallet(&dir, &[100_000]);
-
-    let session = build_session(&dir);
-    let legacy = serde_json::json!({
-        "id": "legacyplan",
-        "network": "signet",
-        "recipient": session["recipient"],
-        "amount_sat": session["amount_sat"],
-        "fee_sat": session["fee_sat"],
-        "created_at": session["created_at"],
-        "status": "unsigned",
-        "psbt": session["psbt"],
-        "excluded_utxos": 0,
-    });
-    let legacy_path = dir.path().join("signet/plans/legacyplan.json");
-    fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-    fs::write(&legacy_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
-
-    let signed = json_stdout(
-        sats(&dir)
-            .args(["psbt", "sign", "--session", "legacyplan", "--json"])
-            .assert()
-            .success(),
-    );
-    assert_eq!(signed["status"], "signed");
-    assert!(!legacy_path.exists(), "legacy plan must be consumed");
-    sats(&dir)
-        .args(["tx", "broadcast", "legacyplan", "--json"])
-        .assert()
-        .success();
-}
-
-/// Build a PSBT session JSON the way an older release's staged workflow
-/// would have persisted it, using the same engine the CLI uses.
-fn build_session(dir: &TempDir) -> serde_json::Value {
-    let db = dir.path().join("signet/wallet.sqlite");
-    let mut conn = rusqlite::Connection::open(&db).unwrap();
-    let mut wallet = bdk_wallet::Wallet::load()
-        .check_network(Network::Signet)
-        .load_wallet(&mut conn)
-        .unwrap()
-        .expect("wallet exists");
-    let addr = Address::from_str(ADDRESS)
-        .unwrap()
-        .require_network(Network::Signet)
-        .unwrap();
-    let prepared = sats_core::engine::build_plan(
-        &mut wallet,
-        &addr,
-        Amount::from_sat(25_000),
-        FeeRate::from_sat_per_vb_u32(2),
-        &[],
-        "signet",
-        42,
-    )
-    .unwrap();
-    wallet.persist(&mut conn).unwrap();
-    serde_json::to_value(prepared.session()).unwrap()
 }

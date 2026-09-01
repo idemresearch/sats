@@ -157,8 +157,6 @@ pub struct SendOutcome {
     pub request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub via_approval: Option<bool>,
     /// On denied outcomes only: whether a one-time human approval can
     /// lift this exact refusal. False marks the hard envelope, where the
     /// only escalation is changing the grant itself.
@@ -437,19 +435,16 @@ mod tests {
     }
 
     /// `approvable` rides denied outcomes only, and tracks the typed
-    /// reason: the ask band true, the hard envelope false, bare-code
-    /// denials (revoked) false.
+    /// reason: the terminal ask true, every grant boundary false,
+    /// bare-code denials (revoked) false.
     #[test]
     fn approvable_marks_denials_and_nothing_else() {
-        let ask = SendOutcome::from_deny(&DenyReason::OverMaxTx {
-            requested_sat: 2,
-            max_tx_sat: 1,
-        });
+        let ask = SendOutcome::from_deny(&DenyReason::AskRequired);
         assert_eq!(serde_json::to_value(&ask).unwrap()["approvable"], true);
 
-        let hard = SendOutcome::from_deny(&DenyReason::OverAskMax {
+        let hard = SendOutcome::from_deny(&DenyReason::OverMaxTx {
             requested_sat: 2,
-            ask_max_tx_sat: 1,
+            max_tx_sat: 1,
         });
         assert_eq!(serde_json::to_value(&hard).unwrap()["approvable"], false);
 

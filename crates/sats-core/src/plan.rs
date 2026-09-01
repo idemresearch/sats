@@ -2,11 +2,8 @@
 //!
 //! A [`PreparedSpend`] exists only while a caller is reviewing, authorizing,
 //! and signing a transaction. Normal sends never serialize its PSBT; an
-//! explicit export writes a plain PSBT artifact instead. A [`PsbtSession`]
-//! is backward-reading state from older releases' staged workflow, while
-//! the durable retry/audit record is always a raw finalized transaction.
-
-use std::str::FromStr;
+//! explicit export writes a plain PSBT artifact instead. The durable
+//! retry/audit record is always a raw finalized transaction.
 
 use bdk_wallet::bitcoin::{Psbt, Transaction, consensus};
 use serde::{Deserialize, Serialize};
@@ -66,27 +63,8 @@ impl PreparedSpend {
         &self.psbt
     }
 
-    /// Materialize the explicit, resumable PSBT workflow.
-    pub fn session(&self) -> PsbtSession {
-        PsbtSession {
-            format_version: FORMAT_VERSION,
-            id: self.id.clone(),
-            network: self.network.clone(),
-            recipient: self.recipient.clone(),
-            amount_sat: self.amount_sat,
-            fee_sat: self.fee_sat,
-            created_at: self.created_at,
-            psbt: self.psbt.to_string(),
-            excluded_utxos: self.excluded_utxos,
-        }
-    }
-
     /// Consume a finalized PSBT and produce the only durable send record.
-    pub fn into_transaction(
-        self,
-        signed_psbt: Psbt,
-        source_id: Option<String>,
-    ) -> Result<TransactionRecord, PlanError> {
+    pub fn into_transaction(self, signed_psbt: Psbt) -> Result<TransactionRecord, PlanError> {
         if signed_psbt.unsigned_tx != self.psbt.unsigned_tx {
             return Err(PlanError::Psbt(
                 "signed PSBT does not match the prepared transaction".into(),
@@ -102,59 +80,8 @@ impl PreparedSpend {
             self.fee_sat,
             self.created_at,
             self.excluded_utxos,
-            source_id,
             &tx,
         ))
-    }
-}
-
-/// An unsigned PSBT persisted by older releases' explicit staged workflow.
-/// Retained for backward-reading; new code writes PSBT file artifacts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PsbtSession {
-    #[serde(default = "format_version")]
-    pub format_version: u32,
-    pub id: String,
-    pub network: String,
-    pub recipient: String,
-    pub amount_sat: u64,
-    pub fee_sat: u64,
-    pub created_at: u64,
-    pub psbt: String,
-    #[serde(default)]
-    pub excluded_utxos: u64,
-}
-
-impl PsbtSession {
-    pub fn total_sat(&self) -> u64 {
-        // Saturating: sessions are deserialized state, so the fields are
-        // not trusted to stay within range (matches authz arithmetic).
-        self.amount_sat.saturating_add(self.fee_sat)
-    }
-
-    pub fn into_prepared(self) -> Result<PreparedSpend, PlanError> {
-        if self.format_version != FORMAT_VERSION {
-            return Err(PlanError::Psbt(format!(
-                "unsupported PSBT session version {}",
-                self.format_version
-            )));
-        }
-        let psbt = Psbt::from_str(&self.psbt).map_err(|e| PlanError::Psbt(e.to_string()))?;
-        let prepared = PreparedSpend::new(
-            self.network,
-            self.recipient,
-            self.amount_sat,
-            self.fee_sat,
-            self.created_at,
-            self.excluded_utxos,
-            psbt,
-        );
-        if prepared.id != self.id {
-            return Err(PlanError::Psbt(
-                "PSBT session id does not match its transaction".into(),
-            ));
-        }
-        Ok(prepared)
     }
 }
 
@@ -181,9 +108,6 @@ pub struct TransactionRecord {
     pub tx_hex: String,
     #[serde(default)]
     pub excluded_utxos: u64,
-    /// Explicit PSBT-session or legacy-plan id, when one produced this tx.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_id: Option<String>,
     /// Which surface produced this transaction. Absent on records written
     /// by releases that predate attribution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -205,7 +129,6 @@ pub struct TxOrigin {
 }
 
 impl TransactionRecord {
-    #[allow(clippy::too_many_arguments)]
     pub fn from_transaction(
         network: String,
         recipient: String,
@@ -213,7 +136,6 @@ impl TransactionRecord {
         fee_sat: u64,
         created_at: u64,
         excluded_utxos: u64,
-        source_id: Option<String>,
         tx: &Transaction,
     ) -> Self {
         TransactionRecord {
@@ -227,7 +149,6 @@ impl TransactionRecord {
             status: TransactionStatus::Pending,
             tx_hex: hex::encode(consensus::serialize(tx)),
             excluded_utxos,
-            source_id,
             origin: None,
         }
     }
@@ -276,19 +197,6 @@ mod tests {
     /// Deserialized state is untrusted: extreme values must not overflow.
     #[test]
     fn total_saturates_on_deserialized_extremes() {
-        let session = PsbtSession {
-            format_version: FORMAT_VERSION,
-            id: "x".into(),
-            network: "signet".into(),
-            recipient: "tb1p".into(),
-            amount_sat: u64::MAX,
-            fee_sat: 1,
-            created_at: 0,
-            psbt: String::new(),
-            excluded_utxos: 0,
-        };
-        assert_eq!(session.total_sat(), u64::MAX);
-
         let record = TransactionRecord {
             format_version: FORMAT_VERSION,
             txid: String::new(),
@@ -300,7 +208,6 @@ mod tests {
             status: TransactionStatus::Pending,
             tx_hex: String::new(),
             excluded_utxos: 0,
-            source_id: None,
             origin: None,
         };
         assert_eq!(record.total_sat(), u64::MAX);
@@ -319,7 +226,6 @@ mod tests {
             status: TransactionStatus::Pending,
             tx_hex: String::new(),
             excluded_utxos: 0,
-            source_id: None,
             origin: None,
         }
         .with_origin(TxOrigin {
@@ -347,63 +253,5 @@ mod tests {
             json.get("origin").is_none(),
             "absent origin is not serialized"
         );
-    }
-}
-
-/// The pre-refactor persisted plan format. It remains readable so signed
-/// transactions and explicit unsigned sessions created by older releases can
-/// migrate without retaining a signed PSBT in new state.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LegacyPlan {
-    pub id: String,
-    pub network: String,
-    pub recipient: String,
-    pub amount_sat: u64,
-    pub fee_sat: u64,
-    pub created_at: u64,
-    pub status: LegacyPlanStatus,
-    pub psbt: String,
-    #[serde(default)]
-    pub excluded_utxos: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LegacyPlanStatus {
-    Unsigned,
-    Signed,
-    Broadcast,
-}
-
-impl LegacyPlan {
-    pub fn into_prepared(self) -> Result<PreparedSpend, PlanError> {
-        let psbt = Psbt::from_str(&self.psbt).map_err(|e| PlanError::Psbt(e.to_string()))?;
-        Ok(PreparedSpend::new(
-            self.network,
-            self.recipient,
-            self.amount_sat,
-            self.fee_sat,
-            self.created_at,
-            self.excluded_utxos,
-            psbt,
-        ))
-    }
-
-    pub fn into_transaction(self) -> Result<TransactionRecord, PlanError> {
-        let source_id = self.id.clone();
-        let psbt = Psbt::from_str(&self.psbt).map_err(|e| PlanError::Psbt(e.to_string()))?;
-        let tx = psbt
-            .extract_tx()
-            .map_err(|e| PlanError::Extract(e.to_string()))?;
-        Ok(TransactionRecord::from_transaction(
-            self.network,
-            self.recipient,
-            self.amount_sat,
-            self.fee_sat,
-            self.created_at,
-            self.excluded_utxos,
-            Some(source_id),
-            &tx,
-        ))
     }
 }

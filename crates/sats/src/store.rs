@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use sats_core::authz::{AGENT_NAME_RULE, Grant, valid_agent_name};
 use sats_core::event::AgentEvent;
-use sats_core::plan::{LegacyPlan, PsbtSession, TransactionRecord};
+use sats_core::plan::TransactionRecord;
 use sats_core::request::AgentRequest;
 use sats_core::seal::SealedBlob;
 
@@ -125,15 +125,6 @@ impl Store {
         self.data_dir.join(network).join("wallet.sqlite")
     }
 
-    /// Pre-refactor plan storage, retained for backward-reading only.
-    pub fn legacy_plans_dir(&self, network: &str) -> PathBuf {
-        self.data_dir.join(network).join("plans")
-    }
-
-    pub fn psbt_sessions_dir(&self, network: &str) -> PathBuf {
-        self.data_dir.join(network).join("psbts")
-    }
-
     pub fn transactions_dir(&self, network: &str) -> PathBuf {
         self.data_dir.join(network).join("transactions")
     }
@@ -180,34 +171,6 @@ impl Store {
         self.seed_path().exists()
     }
 
-    /// Read-only legacy state: new code never writes PSBT sessions —
-    /// `sats send --export-psbt` produces file artifacts instead.
-    pub fn load_psbt_session(&self, network: &str, id: &str) -> Result<PsbtSession> {
-        let path = self.psbt_sessions_dir(network).join(format!("{id}.json"));
-        if !path.exists() {
-            bail!("no PSBT session {id}");
-        }
-        let bytes = fs::read(&path)?;
-        let session: PsbtSession = serde_json::from_slice(&bytes)
-            .with_context(|| format!("corrupt PSBT session {}", path.display()))?;
-        if session.network != network {
-            bail!(
-                "PSBT session network {} does not match {network}",
-                session.network
-            );
-        }
-        session.clone().into_prepared()?;
-        Ok(session)
-    }
-
-    pub fn delete_psbt_session(&self, network: &str, id: &str) -> Result<()> {
-        let path = self.psbt_sessions_dir(network).join(format!("{id}.json"));
-        if path.exists() {
-            fs::remove_file(&path)?;
-        }
-        Ok(())
-    }
-
     pub fn save_transaction(&self, network: &str, record: &TransactionRecord) -> Result<()> {
         if record.network != network {
             bail!(
@@ -222,8 +185,7 @@ impl Store {
         write_atomic(&path, &serde_json::to_vec_pretty(record)?, true)
     }
 
-    /// Resolve a transaction by full/prefix txid or by the explicit PSBT
-    /// session id that produced it.
+    /// Resolve a transaction by full or prefix txid.
     pub fn load_transaction(&self, network: &str, id: &str) -> Result<TransactionRecord> {
         let dir = self.transactions_dir(network);
         let exact = dir.join(format!("{id}.json"));
@@ -243,7 +205,7 @@ impl Store {
             let Ok(record) = read_transaction(&path, network) else {
                 continue;
             };
-            if record.txid.starts_with(id) || record.source_id.as_deref() == Some(id) {
+            if record.txid.starts_with(id) {
                 matches.push(record);
             }
         }
@@ -281,32 +243,6 @@ impl Store {
         Ok(records)
     }
 
-    pub fn load_legacy_plan(&self, network: &str, id: &str) -> Result<LegacyPlan> {
-        let path = self.legacy_plans_dir(network).join(format!("{id}.json"));
-        if !path.exists() {
-            bail!("no legacy plan {id}");
-        }
-        harden_path(&path)?;
-        let bytes = fs::read(&path)?;
-        let plan: LegacyPlan = serde_json::from_slice(&bytes)
-            .with_context(|| format!("corrupt legacy plan {}", path.display()))?;
-        if plan.network != network {
-            bail!(
-                "legacy plan network {} does not match {network}",
-                plan.network
-            );
-        }
-        Ok(plan)
-    }
-
-    pub fn delete_legacy_plan(&self, network: &str, id: &str) -> Result<()> {
-        let path = self.legacy_plans_dir(network).join(format!("{id}.json"));
-        if path.exists() {
-            fs::remove_file(&path)?;
-        }
-        Ok(())
-    }
-
     /// Take the per-network advisory grant lock. Blocks until any
     /// concurrent holder releases it. Grant budgets are read-modify-write
     /// state: every reserve, refund, replacement, or revocation must happen
@@ -334,19 +270,22 @@ impl Store {
         write_atomic(&path, &serde_json::to_vec_pretty(grant)?, true)
     }
 
-    /// Load a grant, refusing the v1 format outright.
+    /// Load a grant, refusing records this build must not honor.
     ///
-    /// A v1 record stored the master seed re-sealed beside its own key,
-    /// so honoring one would preserve exactly the weakness the daemon
-    /// removes. It is read well enough to name itself and is then
-    /// refused with the commands that replace it.
+    /// A pre-daemon development record (one carrying `wrapped_seed`)
+    /// stored the master seed re-sealed beside its own key; honoring one
+    /// would restore a seed disclosure, so it is refused with
+    /// wallet-rotation guidance rather than a parse error. A record from
+    /// a newer sats is refused because it may carry restrictions this
+    /// build cannot see. Any other unreadable record is unreleased
+    /// development state and is not migrated: the error names the fix —
+    /// delete the file and grant again.
     ///
     /// The record's own `network` is checked against the requested one,
-    /// like every sibling loader. A v1 grant sealed its seed under an AAD
-    /// naming the network, so a grant copied across networks failed to
-    /// unseal and was inert; a v2 grant carries no seal to bind it, so the
-    /// check is what keeps a signet grant from authorizing a mainnet
-    /// signature when its file is dropped into another network's directory.
+    /// like every sibling loader: a grant carries no seal binding it to a
+    /// network, so this check is what keeps a signet grant from
+    /// authorizing a mainnet signature when its file is dropped into
+    /// another network's directory.
     pub fn load_grant(&self, network: &str, agent: &str) -> Result<Option<Grant>> {
         let agent = agent_component(agent)?;
         let path = self.grants_dir(network).join(format!("{agent}.json"));
@@ -359,8 +298,14 @@ impl Store {
         if is_legacy_grant(&value) {
             bail!("{}", legacy_grant_message(agent, &path));
         }
-        let grant: Grant = serde_json::from_value(value)
-            .with_context(|| format!("corrupt grant {}", path.display()))?;
+        let grant: Grant = serde_json::from_value(value).with_context(|| {
+            format!(
+                "grant for {agent:?} is not a readable current-format grant ({}) — \
+                 pre-release development state is not migrated; recreate it: \
+                 sats agent revoke {agent} && sats agent grant {agent} --budget <sats>",
+                path.display()
+            )
+        })?;
         // Fail closed on records from the future: a newer sats may have
         // written restrictive fields this build cannot see, and ignoring
         // them would widen the agent's authority, never narrow it.
@@ -384,77 +329,8 @@ impl Store {
         Ok(Some(grant))
     }
 
-    /// Whether the raw on-disk record still spells the removed
-    /// autonomous mode: an explicit legacy `"auto"`, or no `mode` field
-    /// at all (v2 records, whose absence meant auto to the binaries that
-    /// wrote them). v1 and unreadable records answer false — their own
-    /// load paths refuse them with better messages.
-    fn grant_file_carries_legacy_autonomy(&self, network: &str, agent: &str) -> Result<bool> {
-        let agent = agent_component(agent)?;
-        let path = self.grants_dir(network).join(format!("{agent}.json"));
-        if !path.exists() {
-            return Ok(false);
-        }
-        let bytes = fs::read(&path)?;
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            return Ok(false);
-        };
-        if is_legacy_grant(&value) {
-            return Ok(false);
-        }
-        Ok(match value.get("mode") {
-            None => true,
-            Some(mode) => mode == "auto",
-        })
-    }
-
-    /// Load a grant and, when its durable record still spells the
-    /// removed autonomous mode, rewrite it as `ask` so a later downgrade
-    /// cannot read autonomy back out of the file. In-memory coercion
-    /// already makes `auto` unenforceable by this build; this makes the
-    /// disk agree, and journals the tightening as a `mode_changed` event
-    /// so the audit log shows when it happened.
-    ///
-    /// Takes the per-network grant lock for the rewrite — callers must
-    /// not already hold it (the lock does not nest within a process).
-    /// Pure read surfaces (`check_request`, `requests --watch`) keep
-    /// using [`Store::load_grant`], which coerces without writing.
-    pub fn normalize_grant_autonomy(&self, network: &str, agent: &str) -> Result<Option<Grant>> {
-        if !self.grant_file_carries_legacy_autonomy(network, agent)? {
-            return self.load_grant(network, agent);
-        }
-        let _lock = self.lock_grants(network)?;
-        // Re-check under the lock: a concurrent replacement or revoke wins.
-        if !self.grant_file_carries_legacy_autonomy(network, agent)? {
-            return self.load_grant(network, agent);
-        }
-        let Some(mut grant) = self.load_grant(network, agent)? else {
-            return Ok(None);
-        };
-        grant.format_version = sats_core::authz::GRANT_FORMAT_VERSION;
-        self.save_grant(network, &grant)?;
-        if let Err(err) = self.append_event(
-            network,
-            &AgentEvent {
-                format_version: sats_core::event::EVENT_FORMAT_VERSION,
-                at: unix_now(),
-                network: network.to_string(),
-                agent: grant.agent.clone(),
-                request_id: sats_core::event::CONTROL_EVENT_ID.into(),
-                intent_digest: sats_core::event::CONTROL_EVENT_ID.into(),
-                kind: sats_core::event::EventKind::ModeChanged {
-                    from: "auto".into(),
-                    to: grant.mode.as_str().into(),
-                    widened: false,
-                },
-            },
-        ) {
-            eprintln!("⚠ event log append failed: {err:#}");
-        }
-        Ok(Some(grant))
-    }
-
-    /// Agent names whose grant files are still in the v1 format, so read
+    /// Agent names whose grant files are still in the pre-daemon
+    /// wrapped-seed format, so read
     /// surfaces can report them instead of silently showing no grant.
     pub fn legacy_grants(&self, network: &str) -> Result<Vec<String>> {
         let dir = self.grants_dir(network);
@@ -520,13 +396,21 @@ impl Store {
             let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
                 continue;
             };
-            // Legacy records are reported by `legacy_grants`, never
-            // treated as authority here.
+            // Wrapped-seed records are reported by `legacy_grants`, never
+            // treated as authority here. Anything else unreadable — or
+            // from a newer sats — is skipped with a warning; `load_grant`
+            // names the fix when the grant is actually used.
             if is_legacy_grant(&value) {
                 continue;
             }
-            let Ok(grant) = serde_json::from_value::<Grant>(value) else {
-                continue;
+            let grant = match serde_json::from_value::<Grant>(value) {
+                Ok(grant) if grant.format_version <= sats_core::authz::GRANT_FORMAT_VERSION => {
+                    grant
+                }
+                _ => {
+                    eprintln!("⚠ skipping unreadable grant {}", path.display());
+                    continue;
+                }
             };
             if grant.is_expired(now_unix) {
                 continue;
@@ -838,11 +722,12 @@ fn is_legacy_grant(value: &serde_json::Value) -> bool {
     value.get("wrapped_seed").is_some() || value.get("grant_key").is_some()
 }
 
-/// What a human must do about a v1 grant. It names the commands rather
-/// than describing them, because the fix is two lines of shell.
+/// What a human must do about a pre-daemon wrapped-seed grant. It names
+/// the commands rather than describing them, because the fix is two
+/// lines of shell.
 pub fn legacy_grant_message(agent: &str, path: &Path) -> String {
     format!(
-        "grant for {agent:?} uses the v1 format, which stored recoverable signing \
+        "grant for {agent:?} is a pre-daemon record that stored recoverable signing \
          material in the grant file itself. It cannot be used for signing.\n\n\
          Re-issue it:\n\n    \
          sats agent revoke {agent}\n    \
@@ -936,10 +821,10 @@ fn set_secret_perms(_file: &fs::File, _secret: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use sats_core::bitcoin::{
-        Amount, OutPoint, Psbt, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+        Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
         absolute::LockTime, transaction::Version,
     };
-    use sats_core::plan::{PreparedSpend, TransactionRecord};
+    use sats_core::plan::TransactionRecord;
     use tempfile::TempDir;
 
     use super::*;
@@ -961,19 +846,6 @@ mod tests {
         }
     }
 
-    fn record(source_id: Option<String>) -> TransactionRecord {
-        TransactionRecord::from_transaction(
-            "signet".into(),
-            "tb1ptest".into(),
-            1_000,
-            100,
-            42,
-            0,
-            source_id,
-            &test_transaction(),
-        )
-    }
-
     fn record_with(value_sat: u64, created_at: u64) -> TransactionRecord {
         let mut tx = test_transaction();
         tx.output[0].value = Amount::from_sat(value_sat);
@@ -984,7 +856,6 @@ mod tests {
             100,
             created_at,
             0,
-            None,
             &tx,
         )
     }
@@ -998,24 +869,20 @@ mod tests {
             budget_sat: 50_000,
             spent_sat: 0,
             max_tx_sat: None,
-            max_fee_sat: None,
+            max_fee_sat: 1_000,
             created_at: 0,
             expires_at: u64::MAX,
             tx_count: 0,
             token_id: token.token_id,
             token_hash: token.token_hash,
             mode: Default::default(),
-            ask_max_tx_sat: None,
             allowed_recipients: None,
-            suspended: None,
-            strikes: Vec::new(),
         }
     }
 
-    /// A grant authorizes only the network it names. The v1 seal bound the
-    /// seed to the network by AAD, so a copied grant was inert; a v2 grant
-    /// carries no seal, so `load_grant` is what keeps a signet grant
-    /// dropped into the mainnet directory from authorizing mainnet signing.
+    /// A grant authorizes only the network it names: it carries no seal
+    /// binding it, so `load_grant` is what keeps a signet grant dropped
+    /// into the mainnet directory from authorizing mainnet signing.
     #[test]
     fn load_grant_refuses_a_grant_from_another_network() {
         let dir = TempDir::new().unwrap();
@@ -1040,157 +907,57 @@ mod tests {
         assert!(store.load_grant("mainnet", "claude").is_err());
     }
 
-    /// Version discipline both ways: a v2 record (no v3 fields) loads
-    /// with default semantics, and a record from the future is refused —
-    /// it may carry restrictions this build cannot see, and ignoring
-    /// them would widen authority.
+    /// Pre-release state discipline: unreleased development records —
+    /// the removed `auto` mode, a record without a mode — fail to load
+    /// with the recreate hint, and a record from the future is refused
+    /// because it may carry restrictions this build cannot see.
     #[test]
-    fn load_grant_reads_v2_and_refuses_newer_versions() {
+    fn load_grant_refuses_unreleased_and_newer_records() {
         let dir = TempDir::new().unwrap();
         let store = Store::open(Some(dir.path())).unwrap();
         store.save_grant("signet", &grant("signet")).unwrap();
         let path = store.grants_dir("signet").join("claude.json");
+        let pristine = fs::read(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&pristine).unwrap();
 
-        // Strip the file down to its v2 shape.
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        let object = value.as_object_mut().unwrap();
-        object.insert("format_version".into(), serde_json::json!(2));
-        object.remove("mode");
-        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-        let loaded = store.load_grant("signet", "claude").unwrap().unwrap();
-        assert_eq!(loaded.format_version, 2);
-        assert_eq!(
-            loaded.mode,
-            sats_core::authz::GrantMode::Ask,
-            "the absent v2 mode tightens to ask — autonomy was removed"
+        // The removed auto mode is not migrated; it fails with the fix.
+        let mut with_auto = value.clone();
+        with_auto["mode"] = serde_json::json!("auto");
+        fs::write(&path, serde_json::to_vec_pretty(&with_auto).unwrap()).unwrap();
+        let message = format!("{:#}", store.load_grant("signet", "claude").unwrap_err());
+        assert!(
+            message.contains("not migrated; recreate it"),
+            "auto grant must name the fix, got: {message}"
         );
-        assert_eq!(loaded.ask_max_tx_sat, None);
-        assert!(loaded.suspended.is_none());
+
+        // A record without a mode is unreleased state, same refusal.
+        let mut without_mode = value.clone();
+        without_mode.as_object_mut().unwrap().remove("mode");
+        fs::write(&path, serde_json::to_vec_pretty(&without_mode).unwrap()).unwrap();
+        let message = format!("{:#}", store.load_grant("signet", "claude").unwrap_err());
+        assert!(
+            message.contains("not migrated; recreate it"),
+            "mode-less grant must name the fix, got: {message}"
+        );
 
         // The future is refused, not partially honored.
-        value.as_object_mut().unwrap().insert(
+        let mut newer = value.clone();
+        newer.as_object_mut().unwrap().insert(
             "format_version".into(),
             serde_json::json!(sats_core::authz::GRANT_FORMAT_VERSION + 1),
         );
-        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-        let err = store.load_grant("signet", "claude").unwrap_err();
-        let message = format!("{err:#}");
+        fs::write(&path, serde_json::to_vec_pretty(&newer).unwrap()).unwrap();
+        let message = format!("{:#}", store.load_grant("signet", "claude").unwrap_err());
         assert!(
             message.contains("newer sats"),
             "future grant must be refused, got: {message}"
         );
-    }
 
-    fn grant_file_json(store: &Store, network: &str) -> serde_json::Value {
-        let path = store.grants_dir(network).join("claude.json");
-        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap()
-    }
-
-    fn migration_events(store: &Store, network: &str) -> usize {
-        let log = store.events_dir(network).join("log.jsonl");
-        if !log.exists() {
-            return 0;
-        }
-        fs::read_to_string(&log)
-            .unwrap()
-            .lines()
-            .filter(|line| line.contains("\"mode_changed\"") && line.contains("\"auto\""))
-            .count()
-    }
-
-    /// A durable record still spelling the removed `auto` mode is
-    /// rewritten as `ask` on first normalization — so a later downgrade
-    /// cannot read autonomy back out of the file — and the tightening is
-    /// journaled exactly once.
-    #[test]
-    fn normalize_rewrites_legacy_auto_once() {
-        let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
-        store.save_grant("signet", &grant("signet")).unwrap();
-        let path = store.grants_dir("signet").join("claude.json");
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        value["mode"] = serde_json::json!("auto");
-        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-
-        let normalized = store
-            .normalize_grant_autonomy("signet", "claude")
-            .unwrap()
-            .unwrap();
-        assert_eq!(normalized.mode, sats_core::authz::GrantMode::Ask);
-        let on_disk = grant_file_json(&store, "signet");
-        assert_eq!(on_disk["mode"], "ask");
-        assert_eq!(
-            on_disk["format_version"],
-            sats_core::authz::GRANT_FORMAT_VERSION
-        );
-        assert!(
-            !fs::read_to_string(&path).unwrap().contains("auto"),
-            "the legacy spelling must not survive on disk"
-        );
-        assert_eq!(migration_events(&store, "signet"), 1);
-
-        // Idempotent: a second normalization neither rewrites nor
-        // journals again.
-        store
-            .normalize_grant_autonomy("signet", "claude")
-            .unwrap()
-            .unwrap();
-        assert_eq!(migration_events(&store, "signet"), 1);
-    }
-
-    /// A v2 record (no `mode` field — its absence meant auto to the
-    /// binaries that wrote it) is normalized to an explicit v3 `ask`.
-    #[test]
-    fn normalize_rewrites_v2_records_as_v3_ask() {
-        let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
-        store.save_grant("signet", &grant("signet")).unwrap();
-        let path = store.grants_dir("signet").join("claude.json");
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        let object = value.as_object_mut().unwrap();
-        object.insert("format_version".into(), serde_json::json!(2));
-        object.remove("mode");
-        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-
-        let normalized = store
-            .normalize_grant_autonomy("signet", "claude")
-            .unwrap()
-            .unwrap();
-        assert_eq!(normalized.mode, sats_core::authz::GrantMode::Ask);
-        let on_disk = grant_file_json(&store, "signet");
-        assert_eq!(on_disk["mode"], "ask");
-        assert_eq!(
-            on_disk["format_version"],
-            sats_core::authz::GRANT_FORMAT_VERSION,
-            "the rewrite lands the current format"
-        );
-        assert_eq!(migration_events(&store, "signet"), 1);
-    }
-
-    /// Current records pass through untouched, and a missing grant is
-    /// simply absent — normalization never invents state.
-    #[test]
-    fn normalize_leaves_current_records_untouched() {
-        let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
-        assert!(
-            store
-                .normalize_grant_autonomy("signet", "claude")
-                .unwrap()
-                .is_none()
-        );
-        store.save_grant("signet", &grant("signet")).unwrap();
-        let path = store.grants_dir("signet").join("claude.json");
-        let before = fs::read(&path).unwrap();
-        store
-            .normalize_grant_autonomy("signet", "claude")
-            .unwrap()
-            .unwrap();
-        assert_eq!(fs::read(&path).unwrap(), before, "no gratuitous rewrite");
-        assert_eq!(migration_events(&store, "signet"), 0);
+        // The current format is v1 and loads cleanly.
+        fs::write(&path, &pristine).unwrap();
+        let loaded = store.load_grant("signet", "claude").unwrap().unwrap();
+        assert_eq!(loaded.format_version, 1);
+        assert_eq!(loaded.mode, sats_core::authz::GrantMode::Ask);
     }
 
     /// The audit view survives the future: a line whose kind this build
@@ -1371,7 +1138,7 @@ mod tests {
     fn finalized_transactions_are_private_and_resolvable() {
         let dir = TempDir::new().unwrap();
         let store = Store::open(Some(dir.path())).unwrap();
-        let record = record(Some("session-id".into()));
+        let record = record_with(1_000, 42);
 
         store.save_transaction("signet", &record).unwrap();
         let path = store
@@ -1380,8 +1147,16 @@ mod tests {
         let json = fs::read_to_string(&path).unwrap();
         assert!(json.contains("tx_hex"));
         assert!(!json.contains("psbt"));
+        // Resolvable by full txid and by unique prefix.
         assert_eq!(
-            store.load_transaction("signet", "session-id").unwrap().txid,
+            store.load_transaction("signet", &record.txid).unwrap().txid,
+            record.txid
+        );
+        assert_eq!(
+            store
+                .load_transaction("signet", &record.txid[..8])
+                .unwrap()
+                .txid,
             record.txid
         );
         #[cfg(unix)]
@@ -1389,71 +1164,6 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(
                 fs::metadata(path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
-    }
-
-    #[test]
-    fn explicit_psbt_sessions_are_private_and_legacy_plans_still_load() {
-        let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
-        let tx = test_transaction();
-        let psbt = Psbt::from_unsigned_tx(tx).unwrap();
-        let prepared =
-            PreparedSpend::new("signet".into(), "tb1ptest".into(), 1_000, 100, 42, 0, psbt);
-        let session = prepared.session();
-
-        // Sessions are read-only legacy state: fabricate one on disk the
-        // way an older release would have written it.
-        let session_path = store
-            .psbt_sessions_dir("signet")
-            .join(format!("{}.json", session.id));
-        write_atomic(
-            &session_path,
-            &serde_json::to_vec_pretty(&session).unwrap(),
-            true,
-        )
-        .unwrap();
-        assert_eq!(
-            store.load_psbt_session("signet", &session.id).unwrap().id,
-            session.id
-        );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(&session_path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
-
-        let legacy_path = store.legacy_plans_dir("signet").join("legacy.json");
-        let legacy = serde_json::json!({
-            "id": "legacy",
-            "network": "signet",
-            "recipient": "tb1ptest",
-            "amount_sat": 1000,
-            "fee_sat": 100,
-            "created_at": 42,
-            "status": "unsigned",
-            "psbt": session.psbt,
-            "excluded_utxos": 0,
-        });
-        write_atomic(&legacy_path, &serde_json::to_vec(&legacy).unwrap(), false).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&legacy_path, fs::Permissions::from_mode(0o644)).unwrap();
-        }
-        let loaded = store.load_legacy_plan("signet", "legacy").unwrap();
-        assert_eq!(loaded.id, "legacy");
-        assert_eq!(loaded.into_prepared().unwrap().id, session.id);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(legacy_path).unwrap().permissions().mode() & 0o777,
                 0o600
             );
         }
