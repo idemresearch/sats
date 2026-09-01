@@ -4,7 +4,11 @@
 agent over Model Context Protocol stdio. The server does not grant authority
 by itself, and it cannot sign: it is a shim that prepares and broadcasts
 transactions, carrying a bearer token that names the grant it acts under.
-Signatures come from `satsd` (see [CLI](cli.md#the-signing-daemon)).
+Signatures come from `satsd` (see [CLI](cli.md#the-signing-daemon)) — and
+only after a one-time human approval of exactly that payment: the normal
+result of a novel `send` is the recorded ask `ask_required`, not a
+transaction. The agent observes, prepares, and proposes; the human
+authorizes money movement.
 
 ## Connect an agent
 
@@ -161,7 +165,7 @@ Returns this server identity's current authority:
   "active": true,
   "agent": "claude",
   "network": "signet",
-  "mode": "auto",
+  "mode": "ask",
   "budget_sat": 50000,
   "spent_sat": 4781,
   "remaining_sat": 45219,
@@ -172,12 +176,14 @@ Returns this server identity's current authority:
 }
 ```
 
+`mode` is `ask` or `observe`; there is no autonomous mode, and this is a
+schema change from earlier releases whose grants could report `auto`.
 When the grant has been revoked or expired, `active` is false, limit and
 accounting fields are omitted, and `message` tells the agent to ask its human
 for a new grant. Grants with restrictions carry them here too:
 `ask_max_tx_sat` (the hard ceiling) and `allowed_recipients` (the standing
 allowlist — absent means unrestricted, an empty list means every recipient
-asks).
+is flagged `recipient_not_allowed`).
 
 ### `check_request`
 
@@ -247,7 +253,21 @@ Parameters:
 the returned `request_id` is the server-assigned record id (`k-<key>` for
 keyed requests) a human can review with `sats agent requests`.
 
-Successful result:
+The normal result of a novel send — the request being filed for the
+human's review, not a failure:
+
+```json
+{
+  "status": "denied",
+  "reason": "ask_required",
+  "approvable": true,
+  "message": "human authorization required: every agent send needs a one-time human approval — a human can approve exactly this request once with: sats agent approve k-invoice-7012",
+  "request_id": "k-invoice-7012"
+}
+```
+
+The result of the identical retry after the human approves — the only way
+an agent-originated send is ever signed, so it carries `via_approval`:
 
 ```json
 {
@@ -257,18 +277,7 @@ Successful result:
   "fee_sat": 281,
   "total_sat": 4781,
   "remaining_budget_sat": 45219,
-  "request_id": "k-invoice-7012"
-}
-```
-
-Policy denial:
-
-```json
-{
-  "status": "denied",
-  "reason": "over_max_tx",
-  "approvable": true,
-  "message": "human authorization required: requested 20,000 sat; max tx 10,000 sat; a human can approve exactly this request once with: sats agent approve k-invoice-7012",
+  "via_approval": true,
   "request_id": "k-invoice-7012"
 }
 ```
@@ -277,7 +286,9 @@ Every denied result carries `approvable`: `true` means a human can
 authorize exactly this request once with `sats agent approve` and the
 message names the command; `false` means the refusal is part of the hard
 envelope — no approval exists for it, no hint is offered, and only the
-human changing the grant lifts it.
+human changing the grant lifts it. A denial above the per-transaction cap
+reports the specific `over_max_tx` (still approvable) instead of the
+routine `ask_required`, so the human's queue distinguishes the two.
 
 Operational failure:
 
@@ -363,16 +374,16 @@ Supported reason codes are:
 | Reason | Approvable | Meaning |
 |---|---|---|
 | `expired` | no | The grant's expiry has been reached |
-| `over_max_tx` | yes | Recipient amount exceeds the automatic per-transaction cap |
+| `over_max_tx` | yes | Recipient amount exceeds the per-transaction cap: an exceptional ask rather than a routine one |
 | `over_max_fee` | yes | Planned fee exceeds the fee cap |
 | `over_budget` | yes | Amount plus fee exceeds remaining budget |
 | `revoked` | no | The grant file no longer exists |
 | `approval_fee_exceeded` | yes | The prepared fee exceeds a one-time approval's ceiling |
 | `amount_overflow` | no | Amount plus fee overflows |
-| `ask_required` | yes | The grant is in ask mode: every send needs a one-time approval |
+| `ask_required` | yes | The terminal verdict for a valid in-envelope send: every agent send needs a one-time human approval |
 | `over_ask_max` | no | Amount exceeds the hard ceiling; changing the grant is the only escalation |
 | `observe_only` | no | The grant is observe-only |
-| `suspended` | no | Autonomy is suspended (STOP) until a human resumes the grant |
+| `suspended` | no | The grant carries the STOP state; no shipped path sets it today, and re-issuing the grant is what clears it |
 | `recipient_not_allowed` | yes | The recipient is outside the grant's standing allowlist |
 
 An agent should relay the denial — including its `request_id` — to its
@@ -424,8 +435,12 @@ The shim normalizes the recipient, then the daemon executes:
    intent digest (network, agent, recipient, amount — the fee is excluded);
 2. resolve the request id: replay a recorded keyed outcome, reject a
    conflicting key reuse, or claim a durable request record for execution;
-3. reload the grant so revocation is current;
-4. precheck expiry, amount cap, and obviously exhausted budget.
+3. reload the grant so revocation is current (a durable record still
+   spelling the removed `auto` mode is rewritten as `ask` here);
+4. precheck the full ladder on the amount alone. A novel proposal stops
+   here, before any network access: the terminal ask (or the specific cap
+   refusal) is recorded for the human's queue and returned. Only a send
+   whose one-time approval is armed proceeds.
 
 The shim then runs shared safe preparation to sync, protect UTXOs, and build
 the PSBT, and hands it back. The daemon:
@@ -434,9 +449,11 @@ the PSBT, and hands it back. The daemon:
    descriptors, and refuses if they disagree with the request it claimed —
    nothing the shim reports about the transaction is trusted;
 6. re-reads the grant under its lock, re-checks the token, and authorizes
-   the derived amount plus fee;
+   the derived amount plus fee — consuming the one-time approval, the only
+   authority that can allow an agent spend;
 7. reserves and persists budget;
-8. signs with the seed held in its memory;
+8. signs with the seed held in its memory — the signer is constructed only
+   after the reservation, so no denied or unapproved request can reach it;
 9. privately saves raw finalized transaction hex — attributed to the agent,
    request, and intent digest — before returning. A signed transaction never
    crosses the socket.

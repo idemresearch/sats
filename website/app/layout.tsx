@@ -11,7 +11,7 @@ export const metadata: Metadata = {
     template: "%s · sats",
   },
   description:
-    "A tiny on-chain Bitcoin wallet for humans and agents. Keys stay local and agent spending stays inside human-set limits.",
+    "A tiny on-chain Bitcoin wallet for humans and agents. AI asks, you approve, keys stay yours: every agent payment waits for your one-time approval.",
   alternates: {
     canonical: "./",
   },

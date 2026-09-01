@@ -15,6 +15,7 @@ linked for the area you are changing.
 
 Primary references:
 
+- [Direction](docs/direction.md): the invariant and stable design decisions.
 - [Architecture](docs/architecture.md): module ownership and request flows.
 - [Security](docs/security.md): key, grant, signing, and provider invariants.
 - [CLI](docs/cli.md): current user-facing commands and configuration.
@@ -39,7 +40,10 @@ PSBT sessions are read-only legacy state from older releases. Once signed,
 durable state contains private raw transaction hex rather than a signed
 PSBT. The persisted BDK wallet is watch-only. Human and agent sends share
 validation, sync, protection, fee estimation, and preparation. Agent sends
-add deterministic authorization before a signature is produced.
+add deterministic authorization and a one-time human approval before a
+signature is produced: no agent-originated spend may reach the signer
+without explicit, one-time human authorization bound to that action.
+There is no autonomous agent spend mode. See `docs/direction.md`.
 
 Signet is the default. Mainnet must remain an explicit choice.
 
@@ -114,9 +118,20 @@ and rendering belong to callers.
 - Operational conditions carry a typed `error_code`; policy refusals carry a
   denial `reason`. Never conflate them — a locked wallet is not a denial a
   human can approve.
-- Preserve check order: expiry, amount cap, fee cap, remaining budget.
+- A send never allows on the grant alone: the ladder terminates every
+  in-envelope proposal in the approvable `ask_required`, and the only
+  allow a spend can reach rides a digest-bound one-time approval. Never
+  reintroduce an autonomous path to the signer.
+- Preserve check order: the hard envelope (expiry, suspension, observe,
+  intent authority, overflow, hard ceiling) before the ask band
+  (recipient rule, amount cap, fee cap, budget, terminal ask). An
+  approvable reason must never mask a hard one.
+- Legacy `auto` records read as `ask` and are rewritten as `ask` by the
+  stores on first use; never honor them as autonomous.
 - Budget includes amount plus fee.
-- Reserve and persist budget before signing.
+- Reserve and persist budget before signing, and construct the signer only
+  after the reservation succeeds (`send::authorize` takes it as a factory
+  for exactly this reason).
 - Refund only when signing failed and no signature exists.
 - Never refund a signed transaction after a broadcast failure.
 - Re-read the grant on every send so revocation takes effect immediately.

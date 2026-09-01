@@ -14,9 +14,9 @@ const humanCommands = [
 
 const agentCommands = [
   "sats agent grant claude \\",
-  "  --budget 50k --for 24h \\",
-  "  --max-tx 10k --max-fee 1000",
-  "sats agent serve claude",
+  "  --budget 50k --for 24h",
+  "sats agent requests --watch",
+  "sats agent approve k-invoice-1",
 ];
 
 export default function Home() {
@@ -36,7 +36,9 @@ export default function Home() {
 
         <p className="hero-copy">
           A small, native wallet that lives in your terminal. Spend directly,
-          or give an AI agent a budget it cannot exceed.
+          or let an AI agent ask: it prepares payments inside a budget you
+          set, and every send waits for your approval. AI asks. You approve.
+          Keys stay yours.
         </p>
 
         <div className="hero-actions">
@@ -114,11 +116,12 @@ export default function Home() {
 
           <article>
             <div className="operator-number">02</div>
-            <h3>An agent, inside a budget.</h3>
+            <h3>An agent that asks.</h3>
             <p>
-              MCP exposes only balance, receive, grant status, and send. The
-              human sets expiry, transaction, fee, and total-budget limits
-              before unattended signing begins.
+              MCP exposes a small read-and-request surface; only send moves
+              money, and it cannot cause a signature. Every agent payment
+              lands in your review queue, and one password-gated approval
+              executes exactly that payment, once.
             </p>
             <CommandBlock commands={agentCommands} />
             <Link className="text-link" href="/docs/mcp">
@@ -136,8 +139,9 @@ export default function Home() {
           </div>
           <p>
             Agent policy is deterministic and checked before a signature is
-            produced. A request outside the grant gets a stable refusal—not a
-            retry path.
+            produced. A valid proposal becomes an ask you approve exactly
+            once; a request outside the grant gets a stable refusal. Nothing
+            signs unattended.
           </p>
         </div>
 

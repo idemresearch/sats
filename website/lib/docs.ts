@@ -9,6 +9,7 @@ const PUBLIC_DOC_SLUGS = [
   "providers",
   "security",
   "architecture",
+  "direction",
 ] as const;
 
 const PUBLIC_DOCS_INDEX = [
@@ -29,6 +30,7 @@ const PUBLIC_DOCS_INDEX = [
   "## Under the hood",
   "",
   "- [Architecture](architecture.md): the portable core and shared human/agent transaction path.",
+  "- [Product & security direction](direction.md): the invariant every surface serves — agents propose, humans authorize.",
   "",
   "Source code and maintainer guides live in the [GitHub repository](https://github.com/jonatns/sats).",
 ].join("\n");

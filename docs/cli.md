@@ -78,9 +78,9 @@ hold the explicit advanced workflows.
 | `sats daemon unlock` | Unseal the wallet into the daemon so agent sends can be signed |
 | `sats daemon lock` | Drop the seed from the daemon's memory, without stopping it |
 | `sats daemon stop` | Stop the daemon |
-| `sats agent grant <name>` | Create bounded unattended signing authority |
+| `sats agent grant <name>` | Create bounded authority to propose sends (never to sign) |
 | `sats agent revoke <name>` | Delete an agent grant immediately |
-| `sats agent mode <name> <mode>` | Switch auto/ask/observe; widening needs the password |
+| `sats agent mode <name> <mode>` | Switch ask/observe; widening needs the password |
 | `sats agent allow <name> <addr>` | Add an allowlist recipient (password required) |
 | `sats agent disallow <name> <addr>` | Remove an allowlist recipient (no password) |
 | `sats agent list` | List non-expired grants and remaining budgets |
@@ -268,9 +268,9 @@ Human commands never use the daemon. `sats send`, `sats psbt sign`, and
 
 ```sh
 sats agent grant <name> --budget <SATS> [--for <DURATION>] \
-  [--mode auto|ask|observe] [--to <ADDRESS>]... \
+  [--mode ask|observe] [--to <ADDRESS>]... \
   [--max-tx <SATS>] [--ask-max-tx <SATS>] [--max-fee <SATS> | --no-max-fee]
-sats agent mode <name> <auto|ask|observe>
+sats agent mode <name> <ask|observe>
 sats agent allow <name> <ADDRESS>
 sats agent disallow <name> <ADDRESS>
 ```
@@ -288,45 +288,55 @@ creation requires the wallet password, which authorizes the grant and is not
 otherwise used: the grant file holds a budget and a token hash, never key
 material.
 
-`--mode` sets how much standing autonomy the grant carries. `auto` (the
-default) lets sends inside the caps execute without you. `ask` proposes
-everything: every send — however small — is the approvable denial
+`--mode` sets how much standing authority the grant carries — and no mode
+lets a send execute without you. `ask` (the default) proposes everything:
+every send — however small — terminates in the approvable denial
 `ask_required`, executed only through `sats agent approve`, one request
 at a time. `observe` is read-only: balance, addresses, grant status, and
 request polling keep working, but no send can be authorized and no
 approval can lift `observe_only`. Revocation remains the off switch.
 
-`sats agent mode` switches a live grant between them, mid-session, and
-carries the attenuation rule mechanically: tightening authority
-(`auto→ask→observe`) never asks for the password — reducing what an agent
-may do stays cheap — while widening requires it, exactly like issuing the
-grant did. Every transition lands in the event log with its direction.
+The autonomous `auto` mode of earlier releases was removed: an
+agent-originated spend can never reach the signer without a one-time
+human approval. Typing `--mode auto` is refused with that reason, a
+grant file still spelling it is enforced as `ask` and rewritten as `ask`
+the first time anything uses it, and the tightening is journaled as a
+`mode_changed` event.
+
+`sats agent mode` switches a live grant between the modes, mid-session,
+and carries the attenuation rule mechanically: tightening authority
+(`ask→observe`) never asks for the password — reducing what an agent may
+do stays cheap — while widening (`observe→ask`) requires it, exactly like
+issuing the grant did. Every transition lands in the event log with its
+direction.
 
 Repeatable `--to` gives the grant a standing recipient allowlist. Each
 address is parsed and network-checked at the boundary and stored in the
 same normalized spelling the intent digest hashes. With a finite list,
-sends to listed recipients are automatic within the caps; any other
-recipient is the approvable denial `recipient_not_allowed`, and the
-one-time approval it invites authorizes exactly that recipient and
-amount, once — it never widens the standing list, and neither does
-payment history: an agent cannot launder an address into "known" by
-paying it. Without `--to` every recipient is allowed, as before.
+sends to listed recipients are routine asks (`ask_required`); any other
+recipient is flagged with the approvable denial `recipient_not_allowed`,
+and the one-time approval it invites authorizes exactly that
+recipient and amount, once — it never widens the standing list, and
+neither does payment history: an agent cannot launder an address into
+"known" by paying it. Without `--to` every recipient is a routine ask.
 `sats agent allow` adds an entry (widening — password required);
 `sats agent disallow` removes one (no password), and emptying the list
 means every recipient asks. A grant without an allowlist refuses
 `disallow` outright: a list cannot express "everything except one
 address" — re-issue the grant with `--to` to restrict it.
 
-The two amount caps split sends into three bands. Up to `--max-tx` a send
-is automatic. Above it, the send is denied but the denial is approvable:
-`sats agent approve` authorizes exactly that request, once. Above
-`--ask-max-tx` — the hard ceiling — the denial is `over_ask_max` and is
-never approvable: no hint is offered, `sats agent approve` refuses to arm
-one, and the only escalation is changing the grant itself. The ceiling is
-the pre-commitment you make while calm, so that later pressure — an agent
+The two amount caps split proposals into bands — every band still asks.
+Up to `--max-tx` a send is a routine ask (`ask_required`). Above it, the
+denial is the specific `over_max_tx`, so the review queue tells a routine
+proposal from an exceptional one; both are approvable, and `sats agent
+approve` authorizes exactly one request, once. Above `--ask-max-tx` — the
+hard ceiling — the denial is `over_ask_max` and is never approvable: no
+hint is offered, `sats agent approve` refuses to arm one, and the only
+escalation is changing the grant itself. The ceiling is the
+pre-commitment you make while calm, so that later pressure — an agent
 asking nicely fifty times — has nothing to push on. When both caps are
 given, `--ask-max-tx` must be at least `--max-tx`; without `--ask-max-tx`,
-every cap denial stays approvable, as before.
+every cap denial stays approvable.
 
 Creating a grant prints a bearer token **once**. It is not stored — only its
 SHA-256 is — so there is no way to recover it later; re-issue the grant to
@@ -396,15 +406,21 @@ sats agent deny <id>
 
 `approve` turns one denied request into a single-use exception bound to
 exactly the intent the denial recorded — same agent, recipient, and
-amount. It shows the full recipient and amounts, then requires the wallet
-password: the prompt is the authorization, as with grant creation. The
-approval carries a fee ceiling — `--max-fee`, defaulting to twice the fee
-the denial recorded when one exists — and a lifetime (`--for`, default
-`1h`). The agent's next matching send consumes it; a consumed approval
-never authorizes a second signature, and approvals never survive grant
-revocation or expiry. `deny` dismisses the request and revokes an
-unconsumed approval without a password: reducing authority stays cheap.
-Both accept a request id or unique prefix and support `--json`.
+amount. It shows the full recipient, the amounts, and the grant's
+remaining budget (warning when the approval would overdraw it), then
+requires the wallet password: the prompt is the authorization, as with
+grant creation. The approval carries a fee ceiling — `--max-fee`,
+defaulting to twice the fee the denial recorded when one exists, and
+otherwise to the grant's own fee cap (most asks are recorded at the
+offline precheck, before any fee estimate), so the routine
+`sats agent approve <id>` needs no flag; only a grant deliberately
+issued `--no-max-fee` demands an explicit ceiling — and a lifetime
+(`--for`, default `1h`). The agent's next matching send consumes it; a
+consumed approval never authorizes a second signature, and approvals
+never survive grant revocation or expiry. `deny` dismisses the request
+and revokes an unconsumed approval without a password: reducing
+authority stays cheap. Both accept a request id or unique prefix and
+support `--json`.
 
 Approval requires an existing grant whose current hard restrictions
 permit the exception. `approve` checks both the recorded denial and the

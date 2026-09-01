@@ -1,9 +1,11 @@
 # Architecture
 
 sats is a native Bitcoin wallet with a portable core. The CLI and MCP server
-share wallet state and transaction preparation, while agent sends add a
-bounded authorization step before signing — made in a separate process that
-holds the only copy of the key.
+share wallet state and transaction preparation, while agent sends add
+deterministic authorization and a one-time human approval before signing —
+enforced in a separate process that holds the only copy of the key. No
+agent-originated spend reaches the signer unapproved; the direction this
+implements is in [Direction](direction.md).
 
 ## System shape
 
@@ -22,7 +24,8 @@ flowchart TD
 A human send unlocks the seed for the duration of one command and never
 involves the daemon. An agent send cannot sign at all: the served process
 prepares a PSBT and asks satsd, which derives what the transaction does,
-decides, signs, and persists.
+decides, signs, and persists — and satsd signs only when a human has
+approved exactly that payment, once, through the CLI's review queue.
 
 `crates/sats-core` owns deterministic wallet and authorization behavior.
 `crates/sats` owns environment effects: command parsing, terminal rendering,
@@ -38,7 +41,7 @@ own.
 
 | Module | Responsibility |
 |---|---|
-| `authz` | Grant model, spend request, deterministic allow/deny decision, reservation and refund |
+| `authz` | Grant model, spend request, the deterministic verdict ladder (every send terminates in ask or deny), one-time approvals, reservation and refund |
 | `token` | Agent capability tokens: mint, hash, constant-time verify |
 | `verify` | Recomputing a PSBT's payments and fee from the wallet's own descriptors |
 | `engine` | In-memory PSBT preparation and conservative UTXO exclusion |
@@ -169,7 +172,31 @@ sats writes private raw transaction hex before any broadcast attempt. A
 broadcast failure therefore leaves a pending transaction that can be retried
 without retaining the signed PSBT.
 
-## Agent send
+## Agent send: the approval loop
+
+Every agent send is two passes around one loop — the ask, then the
+approved retry. The grant alone never authorizes a spend; the ladder
+terminates every in-envelope proposal in the approvable `ask_required`,
+so a novel send stops at the precheck, before any network access, as a
+durable request for the human's queue:
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant M as MCP shim
+    participant D as satsd
+    participant H as Human (CLI)
+    A->>M: send address, amount, request_id
+    M->>D: begin_send(token, recipient, amount)
+    D-->>M: denied ask_required + request id (recorded)
+    M-->>A: relay the ask to the human
+    H->>H: sats agent requests --watch shows the ask
+    H->>H: sats agent approve <id> (password-gated, digest-bound)
+    A->>M: check_request until approval_ready, then retry identically
+```
+
+The identical retry finds the armed approval at the precheck and proceeds
+to preparation and signing:
 
 ```mermaid
 sequenceDiagram
@@ -178,33 +205,40 @@ sequenceDiagram
     participant D as satsd
     participant P as Providers
     participant S as Store
-    A->>M: send address, amount, request_id
+    A->>M: send (same address, amount, request_id)
     M->>D: begin_send(token, recipient, amount)
-    D->>S: claim request, reload grant, precheck
-    D-->>M: proceed, or a terminal outcome
+    D->>S: claim request, reload grant, precheck with approval
+    D-->>M: proceed
     M->>P: sync, guards, fee estimate, build PSBT
     M->>D: authorize(token, psbt)
     D->>D: derive amount and fee from the PSBT
-    D->>S: reserve and persist budget
+    D->>S: consume the approval, reserve and persist budget
     D->>D: sign and finalize
     D->>S: save attributed transaction
-    D-->>M: signed, or denied
+    D-->>M: signed
     M->>P: broadcast
     M->>D: finish(broadcast result)
     D->>S: record outcome and causal events
-    M-->>A: sent, denied, or error
+    M-->>A: sent (via_approval)
 ```
 
 A send spans one connection: the claim taken by `begin_send` is released
 when the connection closes, so a caller that dies mid-send strands nothing.
+The request lifecycle is durable throughout: pending means denied and not
+dismissed; `Sent` and signed-`Failed` outcomes replay verbatim on a keyed
+retry; denials are side-effect free, so a retry re-evaluates.
 
-The amount-only precheck rejects an obviously impossible request before
-network access. Final authorization uses the fee the daemon derived, never
-one the caller reported. Budget is persisted before signing; it is refunded
-only if signing fails before a signature exists. The finalized transaction is
-persisted by the process that signed it, before the result is returned — a
-signed transaction never crosses the socket. Broadcast failure leaves both
-the transaction record and the budget reservation intact.
+Final authorization uses the fee the daemon derived, never one the caller
+reported, and the one-time approval — digest-bound to network, agent,
+recipient, and amount, under its own fee ceiling — is the only authority
+that can allow the reservation. The approval is consumed before the
+budget draw, budget is persisted before signing, and the signer is
+constructed only after the reservation succeeds, so no denied or
+unapproved request can ever reach it. Budget is refunded only if signing
+fails before a signature exists. The finalized transaction is persisted
+by the process that signed it, before the result is returned — a signed
+transaction never crosses the socket. Broadcast failure leaves both the
+transaction record and the budget reservation intact.
 
 Every agent send is a durable request record: a keyed retry replays a
 signed outcome instead of paying twice, and each state transition —
