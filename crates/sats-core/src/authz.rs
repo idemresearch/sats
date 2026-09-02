@@ -18,6 +18,16 @@ use serde::{Deserialize, Serialize};
 use crate::fmt::format_sats;
 use crate::token;
 
+/// A fresh grant identity: 128 random bits, hex. Non-secret, unique per
+/// grant instance, and what every request created under the grant is
+/// bound to. Distinct from `token_id`, which is a display prefix of the
+/// bearer token's hash.
+pub fn new_grant_id() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| format!("no entropy source: {e}"))?;
+    Ok(hex::encode(bytes))
+}
+
 /// Current on-disk grant shape — the first released schema.
 ///
 /// Records from a newer sats are refused by `Store::load_grant`: they
@@ -85,6 +95,11 @@ impl std::str::FromStr for GrantMode {
 pub struct Grant {
     #[serde(default = "grant_format_version")]
     pub format_version: u32,
+    /// This grant instance's identity: 128 random bits, minted at
+    /// creation. A request records the `grant_id` it was created under
+    /// and executes only under that instance; a re-issued grant has a
+    /// new one.
+    pub grant_id: String,
     pub agent: String,
     /// Network name, so a grant file copied across networks is inert.
     pub network: String,
@@ -121,6 +136,50 @@ pub struct Grant {
     /// `Some(vec![])` means none may be.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_recipients: Option<Vec<String>>,
+    /// The request-scoped draw ledger: one entry per request whose
+    /// budget draw stands. `spent_sat` and `tx_count` are its totals and
+    /// are only ever changed through [`Grant::reserve_send`] and
+    /// [`Grant::refund`], in the same write as the ledger, so recovery
+    /// can tell exactly which request drew and refund it exactly once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reservations: Vec<Reservation>,
+}
+
+/// One request's budget draw, keyed by the server request id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reservation {
+    pub request_id: String,
+    pub amount_sat: u64,
+    pub fee_sat: u64,
+}
+
+impl Reservation {
+    pub fn spend(&self) -> SpendRequest {
+        SpendRequest {
+            amount_sat: self.amount_sat,
+            fee_sat: self.fee_sat,
+        }
+    }
+}
+
+/// How [`Grant::reserve_send`] resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reserved {
+    /// The draw was recorded now.
+    Drawn,
+    /// The same request already holds an identical draw: nothing was
+    /// drawn again. The idempotent answer for a retried commit.
+    AlreadyReserved,
+}
+
+/// Why [`Grant::reserve_send`] refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReserveError {
+    /// A grant boundary.
+    Denied(DenyReason),
+    /// The request already holds a draw for a different amount or fee.
+    /// Fails closed: a reservation is never silently replaced.
+    Mismatch { reserved: SpendRequest },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,36 +367,75 @@ impl Grant {
         now_unix >= self.expires_at
     }
 
-    /// Draw a human-authorized spend down from the budget.
+    /// The standing draw for a request, if any.
+    pub fn reservation(&self, request_id: &str) -> Option<&Reservation> {
+        self.reservations
+            .iter()
+            .find(|entry| entry.request_id == request_id)
+    }
+
+    /// Draw a human-authorized spend down from the budget, once per
+    /// request.
     ///
     /// The caller asserts the human authorization; this re-runs the full
     /// ladder — recipient rule included, with the real fee — so the draw
     /// can never exceed the grant: authorization executes a valid
-    /// proposal inside the grant, never past it. Callers must persist
-    /// the grant before signing.
+    /// proposal inside the grant, never past it. The draw is keyed by
+    /// the request id: a repeated call with the same request and the
+    /// identical spend is `AlreadyReserved` and draws nothing again
+    /// (the ladder is still re-checked, against the budget as it stood
+    /// before that draw); a different spend for the same request fails
+    /// closed. Callers must persist the grant before signing.
     pub fn reserve_send(
         &mut self,
+        request_id: &str,
         recipient: &str,
         req: &SpendRequest,
         now_unix: u64,
-    ) -> Result<(), DenyReason> {
+    ) -> Result<Reserved, ReserveError> {
+        if let Some(existing) = self.reservation(request_id) {
+            let reserved = existing.spend();
+            if reserved != *req {
+                return Err(ReserveError::Mismatch { reserved });
+            }
+            // Re-check every boundary as if this draw were not yet
+            // counted, so an expired or tightened grant still refuses.
+            let mut without = self.clone();
+            without.refund(request_id);
+            return match evaluate_send(&without, recipient, req, now_unix) {
+                Decision::Ask => Ok(Reserved::AlreadyReserved),
+                Decision::Deny(reason) => Err(ReserveError::Denied(reason)),
+            };
+        }
         match evaluate_send(self, recipient, req, now_unix) {
             Decision::Ask => {}
-            Decision::Deny(reason) => return Err(reason),
+            Decision::Deny(reason) => return Err(ReserveError::Denied(reason)),
         }
         self.spent_sat = self.spent_sat.saturating_add(req.total_sat());
         self.tx_count = self.tx_count.saturating_add(1);
-        Ok(())
+        self.reservations.push(Reservation {
+            request_id: request_id.to_string(),
+            amount_sat: req.amount_sat,
+            fee_sat: req.fee_sat,
+        });
+        Ok(Reserved::Drawn)
     }
 
-    /// Return a reservation whose signing did not produce a durable
-    /// signature. Never refund after a signed transaction exists — it is
-    /// spendable regardless of whether the broadcast succeeded. Both
-    /// subtractions saturate, so a refund can never credit more than
-    /// what stands reserved.
-    pub fn refund(&mut self, req: &SpendRequest) {
-        self.spent_sat = self.spent_sat.saturating_sub(req.total_sat());
+    /// Return one request's reservation, exactly once. `None` means the
+    /// request holds no draw — already refunded, or never drawn — and
+    /// nothing changes. Never refund once the signer may have run: a
+    /// signature is spendable regardless of whether the broadcast
+    /// succeeded. Both subtractions saturate.
+    pub fn refund(&mut self, request_id: &str) -> Option<SpendRequest> {
+        let index = self
+            .reservations
+            .iter()
+            .position(|entry| entry.request_id == request_id)?;
+        let entry = self.reservations.remove(index);
+        let spend = entry.spend();
+        self.spent_sat = self.spent_sat.saturating_sub(spend.total_sat());
         self.tx_count = self.tx_count.saturating_sub(1);
+        Some(spend)
     }
 }
 
@@ -411,6 +509,7 @@ mod tests {
         let token = token::generate().unwrap();
         Grant {
             format_version: GRANT_FORMAT_VERSION,
+            grant_id: new_grant_id().unwrap(),
             agent: "test".into(),
             network: "signet".into(),
             budget_sat: budget,
@@ -424,11 +523,17 @@ mod tests {
             token_hash: token.token_hash,
             mode: GrantMode::Ask,
             allowed_recipients: None,
+            reservations: Vec::new(),
         }
     }
 
     const NOW: u64 = 1_500;
     const RECIPIENT: &str = "tb1ptestrecipient";
+    const REQ: &str = "r-0123456789abcdef";
+
+    fn reserve(g: &mut Grant, r: &SpendRequest, now: u64) -> Result<Reserved, ReserveError> {
+        g.reserve_send(REQ, RECIPIENT, r, now)
+    }
 
     fn req(amount: u64, fee: u64) -> SpendRequest {
         SpendRequest {
@@ -556,44 +661,85 @@ mod tests {
     #[test]
     fn reserve_draws_down_and_recheck_denies() {
         let mut g = grant(10_000, 0, None, None);
-        g.reserve_send(RECIPIENT, &req(6_000, 100), NOW).unwrap();
+        assert_eq!(reserve(&mut g, &req(6_000, 100), NOW), Ok(Reserved::Drawn));
         assert_eq!(g.spent_sat, 6_100);
         assert_eq!(g.tx_count, 1);
-        // A second spend that no longer fits reports the budget: the
+        assert_eq!(g.reservation(REQ).unwrap().spend(), req(6_000, 100));
+        // A second request that no longer fits reports the budget: the
         // specific boundary runs before the terminal ask.
         let err = g
-            .reserve_send(RECIPIENT, &req(4_000, 100), NOW)
+            .reserve_send("r-other", RECIPIENT, &req(4_000, 100), NOW)
             .unwrap_err();
         assert_eq!(
             err,
-            DenyReason::OverBudget {
+            ReserveError::Denied(DenyReason::OverBudget {
                 requested_sat: 4_100,
                 remaining_sat: 3_900
-            }
+            })
         );
         assert_eq!(g.spent_sat, 6_100, "failed reserve must not draw down");
+        assert_eq!(g.reservations.len(), 1);
     }
 
+    /// The ledger makes the draw idempotent per request: a retry with
+    /// the identical spend draws nothing again, a different spend for the
+    /// same request fails closed, and a refund credits exactly once.
     #[test]
-    fn refund_restores_reservation() {
+    fn reserve_and_refund_are_request_scoped_and_idempotent() {
         let mut g = grant(10_000, 0, None, None);
         let r = req(6_000, 100);
-        g.reserve_send(RECIPIENT, &r, NOW).unwrap();
-        g.refund(&r);
+        assert_eq!(reserve(&mut g, &r, NOW), Ok(Reserved::Drawn));
+        assert_eq!(reserve(&mut g, &r, NOW), Ok(Reserved::AlreadyReserved));
+        assert_eq!(g.spent_sat, 6_100, "no second draw");
+        assert_eq!(g.tx_count, 1);
+        assert_eq!(g.reservations.len(), 1);
+        assert_eq!(
+            reserve(&mut g, &req(6_000, 200), NOW),
+            Err(ReserveError::Mismatch { reserved: r })
+        );
+        assert_eq!(g.spent_sat, 6_100);
+        // The idempotent path still re-checks the grant's boundaries.
+        assert!(matches!(
+            reserve(&mut g, &r, 2_000),
+            Err(ReserveError::Denied(DenyReason::Expired { .. }))
+        ));
+        // Refund exactly once; a repeat credits nothing.
+        assert_eq!(g.refund(REQ), Some(r));
         assert_eq!(g.spent_sat, 0);
         assert_eq!(g.tx_count, 0);
+        assert!(g.reservations.is_empty());
+        assert_eq!(g.refund(REQ), None);
+        assert_eq!(g.spent_sat, 0);
+        assert_eq!(g.tx_count, 0);
+        // Never a refund for a request that never drew.
+        assert_eq!(g.refund("r-never"), None);
         // The restored budget accepts a fresh reservation of the whole
         // amount.
-        g.reserve_send(RECIPIENT, &req(9_900, 100), NOW).unwrap();
+        assert_eq!(reserve(&mut g, &req(9_900, 100), NOW), Ok(Reserved::Drawn));
         assert_eq!(g.spent_sat, 10_000);
     }
 
     #[test]
-    fn refund_saturates_at_zero() {
-        let mut g = grant(10_000, 100, None, None);
-        g.refund(&req(5_000, 5_000));
-        assert_eq!(g.spent_sat, 0);
-        assert_eq!(g.tx_count, 0);
+    fn ledger_round_trips_and_stays_off_the_wire_when_empty() {
+        let mut g = grant(10_000, 0, None, None);
+        let quiet = serde_json::to_value(&g).unwrap();
+        assert!(quiet.get("reservations").is_none());
+        assert!(quiet["grant_id"].as_str().unwrap().len() == 32);
+        reserve(&mut g, &req(1_000, 10), NOW).unwrap();
+        let json = serde_json::to_value(&g).unwrap();
+        assert_eq!(json["reservations"][0]["request_id"], REQ);
+        assert_eq!(json["reservations"][0]["amount_sat"], 1_000);
+        let back: Grant = serde_json::from_value(json).unwrap();
+        assert_eq!(back.reservations, g.reservations);
+        assert_eq!(back.grant_id, g.grant_id);
+    }
+
+    /// Pre-release contract: a grant without an identity does not parse.
+    #[test]
+    fn grant_without_identity_does_not_parse() {
+        let mut json = serde_json::to_value(grant(10_000, 0, None, None)).unwrap();
+        json.as_object_mut().unwrap().remove("grant_id");
+        assert!(serde_json::from_value::<Grant>(json).is_err());
     }
 
     #[test]
@@ -610,7 +756,7 @@ mod tests {
                 fee_sat: u64::MAX,
             })
         );
-        assert!(g.reserve_send(RECIPIENT, &r, NOW).is_err());
+        assert!(reserve(&mut g, &r, NOW).is_err());
         assert_eq!(g.spent_sat, 0, "denied reserve must not draw down");
         assert_eq!(g.tx_count, 0);
         // The largest representable total is not overflow — it reaches
@@ -636,7 +782,7 @@ mod tests {
     fn tx_count_saturates_at_max() {
         let mut g = grant(10_000, 0, None, None);
         g.tx_count = u64::MAX;
-        g.reserve_send(RECIPIENT, &req(1_000, 100), NOW).unwrap();
+        reserve(&mut g, &req(1_000, 100), NOW).unwrap();
         assert_eq!(g.tx_count, u64::MAX);
     }
 
@@ -759,11 +905,11 @@ mod tests {
         // The budget is a grant boundary: human authorization does not
         // lift it, and a denied reserve draws nothing.
         assert!(matches!(
-            g.reserve_send(RECIPIENT, &req(5_000, 100), NOW),
-            Err(DenyReason::OverBudget { .. })
+            reserve(&mut g, &req(5_000, 100), NOW),
+            Err(ReserveError::Denied(DenyReason::OverBudget { .. }))
         ));
         assert_eq!(g.spent_sat, 0, "denied reserve must not draw down");
-        g.reserve_send(RECIPIENT, &req(800, 100), NOW).unwrap();
+        reserve(&mut g, &req(800, 100), NOW).unwrap();
         assert_eq!(g.spent_sat, 900);
         assert_eq!(g.remaining_sat(), 100);
     }
@@ -773,7 +919,7 @@ mod tests {
         let mut g = grant(50_000, 0, None, None);
         g.mode = GrantMode::Observe;
         assert_eq!(decide(&g, 1, 1), Decision::Deny(DenyReason::ObserveOnly));
-        assert!(g.reserve_send(RECIPIENT, &req(1, 1), NOW).is_err());
+        assert!(reserve(&mut g, &req(1, 1), NOW).is_err());
         assert_eq!(g.spent_sat, 0);
     }
 
@@ -835,7 +981,7 @@ mod tests {
             decide(&g, 1_000, 10),
             Decision::Deny(DenyReason::RecipientNotAllowed { .. })
         ));
-        assert!(g.reserve_send(RECIPIENT, &req(1_000, 10), NOW).is_err());
+        assert!(reserve(&mut g, &req(1_000, 10), NOW).is_err());
         assert_eq!(g.spent_sat, 0);
     }
 
@@ -956,7 +1102,7 @@ mod tests {
         for (mut g, r, now) in cases {
             let spent_before = g.spent_sat;
             let tx_before = g.tx_count;
-            let result = g.reserve_send(RECIPIENT, &r, now);
+            let result = reserve(&mut g, &r, now);
             assert!(result.is_err(), "expected a denial for {r:?} at {now}");
             assert_eq!(g.spent_sat, spent_before, "denied send drew budget");
             assert_eq!(g.tx_count, tx_before, "denied send counted a tx");

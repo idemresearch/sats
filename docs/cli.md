@@ -285,7 +285,7 @@ sats agent requests            # pending: requests awaiting your decision
 sats agent requests --all      # every recorded request, newest first
 sats agent requests --watch    # stay running; print each new pending request once
 sats agent log                 # the causal event chain, oldest first
-sats agent log --request k-big-1
+sats agent log --request r-2e7d41c0a95b6f13
 ```
 
 `requests` shows each request's id, agent, recipient, amount, status, and
@@ -335,24 +335,30 @@ remaining budget — with `--json`, on stderr, so the review always reaches
 you while stdout stays the machine-readable result. It then asks for
 confirmation (`--yes` skips the prompt, not the password) and for the
 wallet password: the prompt is the authorization, and the key it unseals
-exists only for this one execution. Under the grant lock it reserves the
-budget and records the request as `signing` *before* the signer is
-invoked, then signs, saves the finalized transaction, and broadcasts.
+exists only for this one execution. Under the grant lock it draws the
+budget on the grant's ledger under the request's id and records the
+request as `signing` *before* the signer is invoked, then signs, saves
+the finalized transaction, and broadcasts.
 
 A request executes only under the grant that created it. A request
 outside that grant's current boundaries — an amount above the cap, a fee
 above the fee cap, a recipient off the allowlist — or whose grant has
 been revoked, expired, or re-issued, is refused before the password and
 recorded as `denied`; the only escalation is a new request under a new
-grant. If the signer reports that no signature was produced, the
-reservation is refunded, the request is `failed`, and you may approve it
-again. Once the signer has been invoked, any other failure — the signed
-transaction could not be finalized or saved — leaves the request
-`unresolved`: a signature may exist, so the reservation stands and sats
-will not sign it again; check `sats status`, then dismiss it. If broadcast
-fails after signing, the request is `broadcast_pending`: the signed
-transaction is saved, the reservation is final, the request is never
-signed again, and `sats tx broadcast <txid>` retries it. `dismiss`
+grant. If execution stops before the signer is invoked — the audit log
+cannot be written, the signer cannot be constructed — the draw is
+returned, the request is `failed`, and you may approve it again. Once
+the signer has been invoked, any failure — an error from the signer, an
+unfinalized result, a signed transaction that could not be finalized or
+saved — leaves the request `unresolved`: a signature may exist, so the
+draw stands and sats will not sign it again; check `sats status`, then
+dismiss it. If broadcast fails after signing, the request is
+`broadcast_pending`: the signed transaction is saved, the draw is final,
+the request is never signed again, and `sats tx broadcast <txid>`
+retries it. A draw left by an approve that died before `signing`
+reached disk is returned by the next listing, approve, or dismiss of
+that request; a draw whose request did reach `signing` is never
+returned. `dismiss`
 declines a pending, failed, or unresolved request without a password:
 reducing authority stays cheap, and dismissing an unresolved request
 never refunds. Both accept a request id or unique prefix and support

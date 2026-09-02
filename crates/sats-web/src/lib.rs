@@ -26,7 +26,9 @@ use bdk_wallet::bitcoin::{
 use bdk_wallet::chain::{BlockId, ConfirmationBlockTime, TxUpdate};
 use bdk_wallet::{KeychainKind, Update, Wallet};
 use bip39::Mnemonic;
-use sats_core::authz::{Decision, GRANT_FORMAT_VERSION, Grant, SpendRequest, evaluate_send};
+use sats_core::authz::{
+    Decision, GRANT_FORMAT_VERSION, Grant, ReserveError, SpendRequest, evaluate_send, new_grant_id,
+};
 use sats_core::fmt::format_sats;
 use sats_core::intent::SendIntent;
 use sats_core::plan::{PreparedSpend, TransactionRecord};
@@ -429,9 +431,12 @@ impl Sim {
             token_hash: issued.token_hash.clone(),
             mode: Default::default(),
             allowed_recipients: None,
+            grant_id: new_grant_id()?,
+            reservations: Vec::new(),
         };
         let out = json!({
             "agent": grant.agent,
+            "grant_id": grant.grant_id,
             "token_id": grant.token_id,
             "budget_sat": grant.budget_sat,
             "max_tx_sat": grant.max_tx_sat,
@@ -524,17 +529,21 @@ impl Sim {
                 at: now,
             },
         };
+        // The native shape: `r-` plus 16 hex characters, global.
         let bytes = random_bytes32()?;
         let id = format!(
-            "r-{:02x}{:02x}{:02x}{:02x}",
-            bytes[0], bytes[1], bytes[2], bytes[3]
+            "r-{}",
+            bytes[..8]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
         );
         let record = AgentRequest {
             format_version: REQUEST_FORMAT_VERSION,
             id: id.clone(),
             network: NETWORK_NAME.into(),
             agent: agent.into(),
-            grant_token_id: grant.token_id.clone(),
+            grant_id: grant.grant_id.clone(),
             client_request_id: None,
             recipient: normalized,
             amount_sat,
@@ -594,7 +603,7 @@ impl Sim {
         let grant = self
             .grants
             .get(&agent)
-            .filter(|grant| grant.token_id == record.grant_token_id)
+            .filter(|grant| grant.grant_id == record.grant_id)
             .ok_or_else(|| format!("no active grant for {agent:?}"))?;
         // Precheck against the current grant before planning.
         if let Decision::Deny(reason) = evaluate_send(
@@ -620,12 +629,23 @@ impl Sim {
         // Reserve with the real fee before signing; a refusal here is a
         // grant boundary the fee crossed.
         let grant = self.grants.get_mut(&agent).expect("checked above");
-        if let Err(reason) = grant.reserve_send(&recipient, &spend, now) {
-            self.record_denied(id, reason.clone(), now);
-            return Err(format!(
-                "denied {id} — {} (outside the grant; only changing the grant lifts it)",
-                reason.code()
-            ));
+        // A request that never reached the signer holds no draw here:
+        // an in-memory playground has no crash window to recover.
+        grant.refund(id);
+        match grant.reserve_send(id, &recipient, &spend, now) {
+            Ok(_) => {}
+            Err(ReserveError::Denied(reason)) => {
+                self.record_denied(id, reason.clone(), now);
+                return Err(format!(
+                    "denied {id} — {} (outside the grant; only changing the grant lifts it)",
+                    reason.code()
+                ));
+            }
+            Err(ReserveError::Mismatch { .. }) => {
+                return Err(format!(
+                    "request {id} already holds a different reservation"
+                ));
+            }
         }
         if let Some(record) = self.requests.get_mut(id) {
             record.state = RequestState::Signing {
@@ -659,15 +679,14 @@ impl Sim {
                 .to_string())
             }
             Err(e) => {
-                // No signature exists: refund, and leave the request
-                // re-approvable.
-                if let Some(grant) = self.grants.get_mut(&agent) {
-                    grant.refund(&spend);
-                }
+                // The signer was invoked: its word is not trusted to mean
+                // "no signature". The draw stands and the request is never
+                // signed again — the native rule, in miniature.
                 if let Some(record) = self.requests.get_mut(id) {
-                    record.state = RequestState::Failed {
-                        message: e.clone(),
+                    record.state = RequestState::Unresolved {
                         at: now,
+                        message: e.clone(),
+                        txid: None,
                     };
                     record.updated_at = now;
                 }

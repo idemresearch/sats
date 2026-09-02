@@ -91,10 +91,16 @@ issue one.
 Files a request to send bitcoin.
 
 Parameters: `address`, `amount_sat`, and an optional `request_id`
-(1–64 characters of `A-Za-z0-9_-`). With a `request_id`, a repeated call
-with the identical address and amount returns the existing request instead
-of filing a second one; reusing the key for a different send is a typed
-error. Without one, every call files a new request with a random id.
+(1–64 characters of `A-Za-z0-9_-`). The `request_id` you pass is a
+client idempotency key; the `request_id` the result returns is the
+server's request id — `r-` plus 16 hex characters, globally unique
+across agents — and is the handle the human approves or dismisses by.
+With a key, a repeated call with the identical address and amount
+returns the existing request instead of filing a second one; reusing the
+key for a different send is a typed error. The key is scoped to the
+grant it was filed under: after a revoke and re-issue, the same key
+files a new request rather than returning the old grant's. Without a
+key, every call files a new request with a random id.
 
 The grant's full verdict ladder runs at filing, with the fee unknown. A
 proposal inside every boundary is recorded as `pending_approval` and
@@ -103,10 +109,10 @@ returned as a successful result:
 ```json
 {
   "status": "pending_approval",
-  "request_id": "k-invoice-7012",
+  "request_id": "r-8c1f0a2b9d3e4f57",
   "recipient": "tb1p...",
   "amount_sat": 4500,
-  "message": "filed for human review — the human approves with: sats agent approve k-invoice-7012; poll check_request to observe the result, and do not file it again"
+  "message": "filed for human review — the human approves with: sats agent approve r-8c1f0a2b9d3e4f57; poll check_request to observe the result, and do not file it again"
 }
 ```
 
@@ -116,7 +122,7 @@ recorded as `denied`, with a `reason`:
 ```json
 {
   "status": "denied",
-  "request_id": "k-big-1",
+  "request_id": "r-2e7d41c0a95b6f13",
   "reason": "over_max_tx",
   "recipient": "tb1p...",
   "amount_sat": 20000,
@@ -131,10 +137,12 @@ escalation is the human changing the grant.
 
 Returns the state of one of this agent's own requests, by the `request_id`
 a `request_send` result returned or the bare key that was passed to it.
-It reads the durable record only: no chain access, no side effects. The
-result has the same shape as `request_send`; a `sent` request carries its
-`txid` and `fee_sat`. An unknown or malformed id is `status: "not_found"`,
-and another agent's requests are never visible.
+A key resolves under the grant on file, exactly as `request_send`
+resolves it, so a key from before a re-issue names nothing; the returned
+id always works. It reads the durable record only: no chain access, no
+side effects. The result has the same shape as `request_send`; a `sent`
+request carries its `txid` and `fee_sat`. An unknown or malformed id is
+`status: "not_found"`, and another agent's requests are never visible.
 
 ## Request states
 
@@ -146,8 +154,8 @@ and another agent's requests are never visible.
 | `signing` | The human authorized it; sats is signing and broadcasting | Observe |
 | `sent` | Broadcast; carries `txid` | Done |
 | `broadcast_pending` | Signed and persisted; the broadcast failed. The human retries it | Nothing |
-| `unresolved` | The signer was invoked and the outcome is not durable; a signature may exist. The human resolves it | Nothing; do not file it again |
-| `failed` | Execution stopped before any signature; the human may authorize again | Observe |
+| `unresolved` | The signer was invoked and did not produce a durable, broadcastable result; a signature may exist. The human resolves it | Nothing; do not file it again |
+| `failed` | Execution stopped before the signer was invoked; the human may authorize again | Observe |
 
 `error` is not a request state: it is a typed operational condition on the
 call itself, with an `error_code` and no record written.
@@ -194,18 +202,21 @@ does not rely on the agent relaying its own status) and runs
    recipient, amount, fee, and total;
 4. takes the wallet password — the authorization — and, under the grant
    lock, checks that the grant on file is the one that created the
-   request, reserves the budget, and persists the request as `signing`
-   before the signer is invoked;
+   request, draws the budget on the grant's ledger under the request's
+   id, and persists the request as `signing` before the signer is
+   invoked;
 5. signs, persists the finalized transaction, and broadcasts.
 
-A signer that reports no signature refunds the reservation and leaves the
-request `failed`, which the human may authorize again. Once the signer
-has been invoked, any other failure leaves the request `unresolved`: a
-signature may exist, nothing is refunded, and sats never signs it again.
-A broadcast failure after signing is `broadcast_pending`: the reservation
-is final, the request is never signed again, and `sats tx broadcast
-<txid>` settles it to `sent`. `sats agent dismiss <id>` declines a
-pending request.
+A failure before the signer is invoked — the audit log cannot be
+written, the signer cannot be constructed — returns the draw and leaves
+the request `failed`, which the human may authorize again. Once the
+signer has been invoked, nothing it reports is trusted to mean "no
+signature": an error, an unfinalized result, or a failure to finalize or
+save the transaction leaves the request `unresolved`, with the draw kept
+and the request never signed again. A broadcast failure after signing is
+`broadcast_pending`: the draw is final, the request is never signed
+again, and `sats tx broadcast <txid>` settles it to `sent`. `sats agent
+dismiss <id>` declines a pending request.
 
 Provider HTTP requests time out after 30 seconds each; those limits apply
 to the human's approve command, not to the served process, which never
@@ -218,12 +229,14 @@ sats agent list
 sats agent revoke claude
 ```
 
-Every request records the grant instance that created it and executes
-only under that instance. Revocation takes effect on the next call
-without restarting the MCP client, and a pending request whose grant was
-revoked or re-issued is `denied` with reason `revoked` when a human tries
-to approve it — a new grant for the same agent never inherits old
-requests. A transaction signed before revocation remains valid.
+Every request records the `grant_id` of the grant instance that
+created it and executes only under that instance. Revocation takes
+effect on the next call without restarting the MCP client, and a pending
+request whose grant was revoked or re-issued is `denied` with reason
+`revoked` when a human tries to approve it — a new grant for the same
+agent never inherits old requests, and a client key reused under the new
+grant files a new request. A transaction signed before revocation
+remains valid.
 
 Expired grants cannot start a new MCP server and are removed when discovered
 by grant-listing and startup paths. Re-issuing a grant mints a new token, so

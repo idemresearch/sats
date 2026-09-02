@@ -76,9 +76,11 @@ pub fn run(
         }
     }
 
-    // The password prompt IS the human authorization, and the key it
-    // unseals lives only in the signer factory below, constructed after
-    // the reservation is durable.
+    // The password prompt IS the human authorization. The mnemonic it
+    // unseals is held by this process from here until the signer is
+    // dropped: captured by the factory closure, which the executor
+    // invokes only after the reservation is durable, and zeroized with
+    // the signer. Nothing derived from it is written anywhere.
     let mnemonic = keys::unlock(store)?;
     let request_id = staged.request.id.clone();
     let outcome = execute::commit(store, network, services, *staged, move || {

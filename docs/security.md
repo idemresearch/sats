@@ -58,9 +58,9 @@ between executions. `sats agent approve` is the human-authorized
 execution path, and it runs in the human's own process:
 
 1. the request is claimed (a per-request lock); the grant on file must
-   be the instance that created the request (its `token_id` is recorded
-   at filing, under the grant lock), and it is re-checked with the fee
-   unknown;
+   be the instance that created the request (its `grant_id` — 128
+   random bits, never reused by a re-issue — is recorded at filing,
+   under the grant lock), and it is re-checked with the fee unknown;
 2. the transaction is prepared on current chain state through the same
    pipeline as a human send, with no dust or guard bypass;
 3. what the prepared PSBT actually pays is derived from the wallet's own
@@ -69,26 +69,47 @@ execution path, and it runs in the human's own process:
 5. the human sees recipient, amount, fee, total, and remaining budget, and
    enters the wallet password — the authorization, and the only moment
    key material is unsealed;
-6. under the grant lock the budget is reserved and persisted, then the
-   request is persisted as `signing` — before the signer is invoked, so
-   `signing` on disk is the irreversible boundary;
+6. under the grant lock the budget is drawn on the grant's reservation
+   ledger under the request's id and persisted, then the request is
+   persisted as `signing` — before the signer is invoked, so `signing`
+   on disk means the signer may have run;
 7. the signer is constructed only now, signs, and the finalized
    transaction is persisted before broadcast;
 8. broadcast settles the request to `sent`, or to `broadcast_pending` if
    the provider refused.
 
-The irreversible boundary is the signer invocation, not a successful
-write afterwards. Before the signer runs, a failure refunds the
-reservation and the request is `failed` (re-approvable). Once the signer
-has been invoked, only its own report that no signature was produced
-permits a refund; any other failure — the signed transaction could not be
-finalized or saved — leaves the request `unresolved`: a signature may
-exist, so nothing is refunded and sats never signs it again. A human
-resolves it (checking `sats status`, then dismissing). `broadcast_pending`
-and `sent` mean a signed transaction is persisted: the reservation is
-never refunded, the signer is never invoked again for that request, and
-only rebroadcasting the saved transaction (`sats tx broadcast <txid>`)
-settles it.
+The irreversible boundary is the invocation of `Signer::sign`, not a
+successful write afterwards. Before it — the audit append, the signer's
+construction — a failure returns the draw and the request is `failed`
+(re-approvable), because the executing process knows no signature
+exists. From the invocation on, nothing the signer reports is trusted
+to mean "no signature": a signer may sign, or leak a signature, and then
+return an error. An error, an unfinalized result, or a failure to
+finalize or save the transaction leaves the request `unresolved`: a
+signature may exist, so nothing is refunded and sats never signs it
+again. A human resolves it (checking `sats status`, then dismissing).
+`broadcast_pending` and `sent` mean a signed transaction is persisted:
+the draw is never returned, the signer is never invoked again for that
+request, and only rebroadcasting the saved transaction (`sats tx
+broadcast <txid>`) settles it.
+
+The budget draw is a ledger entry on the grant, keyed by the request
+id, updated in the same atomic write as the grant's totals. One request
+holds at most one draw; the same request with the same amount and fee
+draws nothing again, and a different amount or fee for a request that
+already holds a draw fails closed. A draw is returned exactly once, and
+only when the durable record proves the signer was never invoked for
+the request's current attempt: the record is `pending_approval`,
+`failed`, or `denied`, which `signing` and every later state follow. A
+draw held by a `signing`, `unresolved`, `sent`, `broadcast_pending`, or
+`dismissed` request, or by a request that cannot be read, is never
+returned. Recovery from any crash is therefore a function of the two
+records: before the draw is persisted, nothing exists; after the draw
+and before `signing`, the draw is an orphan and the next listing,
+approve, or dismiss returns it; after `signing`, the request is
+`unresolved` and the draw stays; after `failed` and before the refund,
+the draw is an orphan and is returned once. A request that signed
+keeps its entry, so the ledger is also the grant's spend history.
 
 An interrupted execution is reconciled from that boundary, never
 guessed: a request left `signing` by a dead process becomes
@@ -255,11 +276,16 @@ Every agent request is a durable record under
 `request_id`, carrying the canonical intent digest (network, agent,
 normalized recipient, amount — never the fee) and its state:
 `pending_approval`, `denied`, `dismissed`, `signing`, `unresolved`,
-`sent`, `broadcast_pending`, or `failed` — and the `token_id` of the
-grant instance that created it. Filing the same key with the same
-intent returns the existing record without writing; reusing a key for a
-different intent is a typed error that mutates nothing. The agent never
-executes and never retries to make a payment happen: it observes.
+`sent`, `broadcast_pending`, or `failed` — and the `grant_id` of the
+grant instance that created it. The record's id is global — `r-` plus
+16 hex characters — and is what humans approve and dismiss by. A keyed
+filing derives its id from the grant id, the agent, and the client key,
+so the same key from two agents, or from the same agent under a
+re-issued grant, names two requests; a keyless filing gets a random id.
+Filing the same key with the same intent returns the existing record
+without writing; reusing a key for a different intent is a typed error
+that mutates nothing. The agent never executes and never retries to
+make a payment happen: it observes.
 
 Only authenticated callers write: a filing for an agent with no grant on
 file — a name that never had one, or one already revoked — is refused

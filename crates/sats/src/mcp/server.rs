@@ -33,10 +33,10 @@ pub const TOKEN_ENV: &str = "SATS_AGENT_TOKEN";
 
 #[derive(Deserialize, JsonSchema)]
 pub struct CheckRequestParams {
-    /// The request_id a request_send result returned (k-<key> or
-    /// r-<hex>), or the bare request_id key that was passed to it. An
-    /// existing stored id takes precedence when it also names another
-    /// request's bare key.
+    /// The request_id a request_send result returned (r-<16 hex>), or
+    /// the bare request_id key that was passed to it, resolved under
+    /// the current grant. A stored id takes precedence when it also
+    /// spells another request's bare key.
     pub request_id: String,
 }
 
@@ -499,28 +499,34 @@ impl SatsMcp {
 ///
 /// Lookup is scoped to this agent's own directory, so another agent's
 /// record can never be exposed, and a malformed id is answered as a
-/// typed not-found before anything touches the disk. Nothing here
-/// mutates: no claim, no event, no reconciliation.
+/// typed not-found before anything touches the disk. A bare client key
+/// resolves the way `request_send` resolves it — under the grant on
+/// file — so a key reused after a re-issue names the new request, never
+/// the old grant's. Nothing here mutates: no claim, no event, no
+/// reconciliation.
 fn check_request_record(
     store: &Store,
     net_name: &'static str,
     agent: &str,
     raw_id: &str,
 ) -> RequestView {
-    // Canonical ids remain unambiguous. If none exists, try the bare key,
-    // even when that key itself begins with k- or r-. Validate each form
-    // separately: keys can be 64 bytes, so their stored ids can be 66.
-    let canonical = raw_id
-        .strip_prefix("k-")
-        .or_else(|| raw_id.strip_prefix("r-"))
-        .filter(|key| request::valid_request_key(key))
-        .map(|_| raw_id);
-    let keyed = request::valid_request_key(raw_id).then(|| format!("k-{raw_id}"));
-    if canonical.is_none() && keyed.is_none() {
+    // Server ids are unambiguous and tried first. If none exists, try
+    // the bare key, even when the key itself has the shape of an id.
+    let canonical = request::is_request_id(raw_id).then_some(raw_id);
+    let key = request::valid_request_key(raw_id).then_some(raw_id);
+    if canonical.is_none() && key.is_none() {
         return RequestView::not_found(format!(
             "malformed request id {raw_id:?} — pass the request_id a request_send result returned"
         ));
     }
+    let keyed = match key {
+        Some(key) => match store.load_grant(net_name, agent) {
+            Ok(Some(grant)) => Some(request::keyed_request_id(&grant.grant_id, agent, key)),
+            Ok(None) => None,
+            Err(e) => return RequestView::not_found(format!("cannot read grant: {e:#}")),
+        },
+        None => None,
+    };
     for id in canonical.into_iter().chain(keyed.as_deref()) {
         match store.load_agent_request(net_name, agent, id) {
             Ok(Some(record)) => return RequestView::of(&record),

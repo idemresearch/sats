@@ -4,14 +4,22 @@
 //! requests. This module is the reusable layer every surface calls:
 //! [`create`] for the agent side (MCP today), [`dismiss`] and
 //! [`execute`] for the human-authorized side (the CLI today; any trusted
-//! approval surface tomorrow), and [`reconcile`] for interrupted
-//! executions. Commands and tools are thin adapters over it.
+//! approval surface tomorrow), and [`reconcile`] / [`reconcile_grant`]
+//! for interrupted executions. Commands and tools are thin adapters
+//! over it.
 //!
 //! Every read-then-write of grant or request state happens under the
 //! grant lock, so grant issuance and revocation, request creation,
 //! authorization, outcomes, and budget decisions serialize as one
-//! history. A request is bound to the grant instance (`token_id`) that
+//! history. A request is bound to the grant instance (`grant_id`) that
 //! created it and never executes under another.
+//!
+//! Request ids are global: `r-` plus 16 hex characters. A keyed filing
+//! derives its id from the grant, the agent, and the client key, so the
+//! same key resolves to the same record within one grant and to a fresh
+//! record under a re-issued grant; a keyless filing gets a random id.
+//! The client key is only the agent's idempotency handle — the id is
+//! what humans review, approve, and dismiss.
 
 pub mod execute;
 
@@ -21,6 +29,7 @@ use anyhow::{Context, Result, bail};
 use sats_core::authz::{
     AGENT_NAME_RULE, Decision, DenyReason, Grant, SpendRequest, evaluate_send, valid_agent_name,
 };
+use sats_core::bitcoin::hashes::{Hash, sha256};
 use sats_core::bitcoin::{Address, Network};
 use sats_core::event::{AgentEvent, EVENT_FORMAT_VERSION, EventKind};
 use sats_core::intent::SendIntent;
@@ -38,6 +47,40 @@ pub fn valid_request_key(key: &str) -> bool {
         && key
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Whether `id` has the shape of a server request id: `r-` plus 16
+/// lowercase hex characters.
+pub fn is_request_id(id: &str) -> bool {
+    id.len() == 18
+        && id.starts_with("r-")
+        && id.as_bytes()[2..]
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+}
+
+/// The server request id a keyed filing resolves to: 64 bits of
+/// SHA-256 over the grant id, the agent, and the client key. The grant
+/// id is in the preimage so a key reused after a revoke and re-issue
+/// names a new request — a new grant never inherits old requests — and
+/// two agents with the same key never share an id.
+pub fn keyed_request_id(grant_id: &str, agent: &str, key: &str) -> String {
+    let mut preimage = Vec::with_capacity(64);
+    preimage.extend_from_slice(b"sats-request-v1\0");
+    preimage.extend_from_slice(grant_id.as_bytes());
+    preimage.push(0);
+    preimage.extend_from_slice(agent.as_bytes());
+    preimage.push(0);
+    preimage.extend_from_slice(key.as_bytes());
+    let digest = sha256::Hash::hash(&preimage);
+    format!("r-{}", hex::encode(&digest.as_byte_array()[..8]))
+}
+
+fn random_request_id() -> Result<String> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes)
+        .map_err(|err| anyhow::anyhow!("cannot generate request id: {err}"))?;
+    Ok(format!("r-{}", hex::encode(bytes)))
 }
 
 /// What an agent asks for. The token authenticates the agent against
@@ -117,7 +160,7 @@ impl From<anyhow::Error> for CreateError {
 /// The grant is read, the token checked, and the record written under
 /// the grant lock, so a revoke or re-issue cannot interleave: a request
 /// is created under exactly one grant instance and records its
-/// `token_id`. The grant's ladder runs at creation with the fee unknown
+/// `grant_id`. The grant's ladder runs at creation with the fee unknown
 /// (zero): a proposal inside every boundary is recorded as
 /// `pending_approval`; a hard boundary is recorded as `denied`. The
 /// audit line is appended *before* the record is written, so no request
@@ -171,19 +214,37 @@ pub fn create(
     }
     .digest();
 
-    // A repeated key answers from the record: same intent, same request.
-    if let Some(key) = params.client_request_id {
-        let id = format!("k-{key}");
-        if let Some(existing) = store.load_agent_request(net_name, params.agent, &id)? {
-            if existing.intent_digest != digest {
-                journal_soft(store, net_name, &existing, EventKind::Conflicted);
-                return Err(CreateError::Conflict {
-                    request_id: existing.id,
-                });
+    // A repeated key answers from the record: same grant, same intent,
+    // same request. The id already commits to the grant, so a record
+    // under another grant id at this path is a collision, answered as a
+    // conflict rather than as someone else's request.
+    let id = match params.client_request_id {
+        Some(key) => {
+            let id = keyed_request_id(&grant.grant_id, params.agent, key);
+            if let Some(existing) = store.load_agent_request(net_name, params.agent, &id)? {
+                if existing.grant_id != grant.grant_id || existing.intent_digest != digest {
+                    journal_soft(store, net_name, &existing, EventKind::Conflicted);
+                    return Err(CreateError::Conflict {
+                        request_id: existing.id,
+                    });
+                }
+                return Ok(existing);
             }
-            return Ok(existing);
+            id
         }
-    }
+        None => {
+            // Keyless requests get a random id; collisions retry.
+            loop {
+                let candidate = random_request_id()?;
+                if store
+                    .load_agent_request(net_name, params.agent, &candidate)?
+                    .is_none()
+                {
+                    break candidate;
+                }
+            }
+        }
+    };
 
     // The verdict at creation: fee unknown, so amount alone. The full
     // ladder runs — recipient rule included — so a refusal any later
@@ -204,37 +265,19 @@ pub fn create(
             at: now,
         },
     };
-    let fresh_record = |id: String| AgentRequest {
+    let record = AgentRequest {
         format_version: REQUEST_FORMAT_VERSION,
         id,
         network: net_name.to_string(),
         agent: params.agent.to_string(),
-        grant_token_id: grant.token_id.clone(),
+        grant_id: grant.grant_id.clone(),
         client_request_id: params.client_request_id.map(str::to_string),
         recipient: recipient.clone(),
         amount_sat: params.amount_sat,
-        intent_digest: digest.clone(),
+        intent_digest: digest,
         created_at: now,
         updated_at: now,
-        state: state.clone(),
-    };
-    let record = match params.client_request_id {
-        Some(key) => fresh_record(format!("k-{key}")),
-        None => {
-            // Keyless requests get a random id; collisions retry.
-            loop {
-                let mut bytes = [0u8; 4];
-                getrandom::fill(&mut bytes)
-                    .map_err(|err| anyhow::anyhow!("cannot generate request id: {err}"))?;
-                let candidate = fresh_record(format!("r-{}", hex::encode(bytes)));
-                if store
-                    .load_agent_request(net_name, params.agent, &candidate.id)?
-                    .is_none()
-                {
-                    break candidate;
-                }
-            }
-        }
+        state,
     };
 
     // Audit first, record second: an unwritable audit log refuses the
@@ -246,7 +289,7 @@ pub fn create(
         net_name,
         &record,
         EventKind::RequestReceived {
-            recipient: recipient.clone(),
+            recipient,
             amount_sat: params.amount_sat,
         },
     )
@@ -270,8 +313,10 @@ pub fn create(
 }
 
 /// A human dismisses a request. Reducing authority needs no password —
-/// the same posture as `sats agent revoke`. Dismissing an `unresolved`
-/// request closes it without a refund: a signature may exist.
+/// the same posture as `sats agent revoke`. A request that provably
+/// never reached the signer gives back any draw it still holds;
+/// dismissing an `unresolved` request closes it without a refund, since
+/// a signature may exist.
 pub fn dismiss(store: &Store, network: Network, id_or_prefix: &str) -> Result<AgentRequest> {
     let net_name = network_name(network);
     let request = store.find_agent_request(net_name, id_or_prefix)?;
@@ -287,6 +332,15 @@ pub fn dismiss(store: &Store, network: Network, id_or_prefix: &str) -> Result<Ag
                 fresh.id,
                 describe_settled(&fresh)
             );
+        }
+        // Refund before the state change: a crash between the two leaves
+        // a pending request without a draw, which is consistent, rather
+        // than a dismissed request whose draw can no longer be proven
+        // unspent.
+        if never_reached_signer(&fresh.state)
+            && let Some(mut grant) = store.load_grant(net_name, &fresh.agent)?
+        {
+            release_orphan(store, net_name, &mut grant, &fresh)?;
         }
         fresh.state = RequestState::Dismissed { at: now };
         fresh.updated_at = now;
@@ -305,14 +359,96 @@ pub(crate) fn bound_grant(
     request: &AgentRequest,
 ) -> Result<Result<Grant, DenyReason>> {
     Ok(match store.load_grant(net_name, &request.agent)? {
-        Some(grant) if grant.token_id == request.grant_token_id => Ok(grant),
+        Some(grant) if grant.grant_id == request.grant_id => Ok(grant),
         _ => Err(DenyReason::Revoked),
     })
 }
 
+/// Whether the durable record proves the signer was never invoked for
+/// the request's current attempt. `signing` is persisted before the
+/// signer is invoked and every later state follows it, so a record in
+/// any of these states has not crossed the boundary since its last
+/// transition: a draw it still holds is an orphan of an interrupted
+/// execution and can be returned.
+pub(crate) fn never_reached_signer(state: &RequestState) -> bool {
+    matches!(
+        state,
+        RequestState::PendingApproval | RequestState::Failed { .. } | RequestState::Denied { .. }
+    )
+}
+
+/// Return the draw a request holds on its grant, exactly once, and
+/// persist the grant. The caller holds the grant lock and has
+/// established, from the durable record, that the request never reached
+/// the signer. `Ok(false)` means the request held no draw.
+pub(crate) fn release_orphan(
+    store: &Store,
+    net_name: &str,
+    grant: &mut Grant,
+    request: &AgentRequest,
+) -> Result<bool> {
+    let Some(spend) = grant.refund(&request.id) else {
+        return Ok(false);
+    };
+    store.save_grant(net_name, grant)?;
+    journal_soft(
+        store,
+        net_name,
+        request,
+        EventKind::Refunded {
+            total_sat: spend.total_sat(),
+        },
+    );
+    Ok(true)
+}
+
+/// Settle the reservation ledger of one agent's grant against its
+/// request records.
+///
+/// A draw whose request provably never reached the signer — the record
+/// is `pending_approval`, `failed`, or `denied` — was left by an
+/// execution that died between persisting the reservation and
+/// persisting `signing`, or between persisting `failed` and persisting
+/// the refund. It is returned, once. Every other draw stays: `signing`,
+/// `unresolved`, `sent`, `broadcast_pending`, `dismissed`, and a request
+/// that cannot be read are all cases where a signature may exist.
+/// Never refund on doubt.
+pub fn reconcile_grant(store: &Store, net_name: &str, agent: &str) -> Result<()> {
+    let _lock = store.lock_grants(net_name)?;
+    let Some(mut grant) = store.load_grant(net_name, agent)? else {
+        return Ok(());
+    };
+    let mut released = Vec::new();
+    for entry in grant.reservations.clone() {
+        let Ok(Some(request)) = store.load_agent_request(net_name, agent, &entry.request_id) else {
+            continue;
+        };
+        if never_reached_signer(&request.state)
+            && let Some(spend) = grant.refund(&entry.request_id)
+        {
+            released.push((request, spend));
+        }
+    }
+    if released.is_empty() {
+        return Ok(());
+    }
+    store.save_grant(net_name, &grant)?;
+    for (request, spend) in released {
+        journal_soft(
+            store,
+            net_name,
+            &request,
+            EventKind::Refunded {
+                total_sat: spend.total_sat(),
+            },
+        );
+    }
+    Ok(())
+}
+
 /// The persisted transaction attributed to exactly this request: same
-/// agent, same request id, same canonical intent. Request ids are scoped
-/// to their agent, so the id alone identifies nothing.
+/// agent, same request id, same canonical intent. The id alone
+/// identifies nothing.
 pub(crate) fn attributed_transaction(
     store: &Store,
     net_name: &str,
@@ -404,14 +540,19 @@ pub fn reconcile(store: &Store, network: Network, request: AgentRequest) -> Resu
     Ok(fresh)
 }
 
-/// Every request for the network, interrupted executions settled first.
+/// Every request for the network, interrupted executions settled first
+/// and every active grant's reservation ledger reconciled.
 pub fn list_reconciled(store: &Store, network: Network) -> Result<Vec<AgentRequest>> {
     let net_name = network_name(network);
-    store
+    let requests = store
         .list_agent_requests(net_name)?
         .into_iter()
         .map(|request| reconcile(store, network, request))
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    for grant in store.active_grants(net_name, unix_now())? {
+        reconcile_grant(store, net_name, &grant.agent)?;
+    }
+    Ok(requests)
 }
 
 /// Settle a `broadcast_pending` request once its transaction has been
@@ -513,5 +654,35 @@ pub(crate) fn journal(
 pub(crate) fn journal_soft(store: &Store, net_name: &str, request: &AgentRequest, kind: EventKind) {
     if let Err(err) = journal(store, net_name, request, kind) {
         eprintln!("⚠ event log append failed: {err:#}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyed_ids_are_global_and_grant_scoped() {
+        let a = keyed_request_id("g1", "alice", "invoice-1");
+        assert!(is_request_id(&a), "{a}");
+        assert_eq!(a, keyed_request_id("g1", "alice", "invoice-1"));
+        assert_ne!(a, keyed_request_id("g1", "bob", "invoice-1"));
+        assert_ne!(a, keyed_request_id("g2", "alice", "invoice-1"));
+        assert_ne!(a, keyed_request_id("g1", "alice", "invoice-2"));
+        // No separator ambiguity: shifting bytes across fields differs.
+        assert_ne!(
+            keyed_request_id("g1", "ab", "c"),
+            keyed_request_id("g1", "a", "bc")
+        );
+    }
+
+    #[test]
+    fn request_id_shape() {
+        assert!(is_request_id("r-0123456789abcdef"));
+        assert!(!is_request_id("r-0123456789ABCDEF"));
+        assert!(!is_request_id("r-0123456789abcde"));
+        assert!(!is_request_id("k-0123456789abcdef"));
+        assert!(!is_request_id("invoice-1"));
+        assert!(is_request_id(&random_request_id().unwrap()));
     }
 }

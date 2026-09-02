@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use sats_core::authz::{GRANT_FORMAT_VERSION, Grant};
+use sats_core::authz::{GRANT_FORMAT_VERSION, Grant, new_grant_id};
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
 use sats_core::token;
@@ -123,6 +123,10 @@ pub fn run(
         token_hash: issued.token_hash.clone(),
         mode,
         allowed_recipients,
+        // The identity every request filed under this grant binds to:
+        // 128 random bits, never reused by a re-issue.
+        grant_id: new_grant_id().map_err(|e| anyhow::anyhow!(e))?,
+        reservations: Vec::new(),
     };
     // Under the grant lock so an in-flight agent send cannot interleave
     // its budget write with this replacement.
@@ -145,6 +149,7 @@ pub fn run(
                 "max_fee_sat": grant.max_fee_sat,
                 "expires_at": grant.expires_at,
                 "replaced": replacing,
+                "grant_id": grant.grant_id,
                 "token_id": grant.token_id,
                 "token": &*issued.secret,
             })

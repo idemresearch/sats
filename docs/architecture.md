@@ -198,20 +198,24 @@ sequenceDiagram
 The grant is re-read under the lock before the reservation, so revocation
 or a tightened boundary between the review and the password still
 refuses, and a request executes only under the grant instance that
-created it. The reservation and the `signing` record are persisted before
-the signer is constructed, so no denied or unauthorized request can reach
-it. Budget is refunded only before the signer is invoked, or when the
-signer itself reports that no signature was produced. Any other failure
-after the signer ran leaves `unresolved`: never refunded, never signed
-again. Once the transaction record exists the reservation is final, the
-request is never signed again, and a failed broadcast leaves
-`broadcast_pending` for `sats tx broadcast` to settle.
+created it. The reservation — a ledger entry on the grant keyed by the
+request id — and the `signing` record are persisted before the signer
+is constructed, so no denied or unauthorized request can reach it.
+Budget is returned only before `Signer::sign` is invoked; nothing the
+signer reports afterwards is trusted to mean "no signature", so any
+failure from the invocation on leaves `unresolved`: never refunded,
+never signed again. Once the transaction record exists the reservation
+is final, the request is never signed again, and a failed broadcast
+leaves `broadcast_pending` for `sats tx broadcast` to settle.
 
 A `signing` record left by a dead process is reconciled by the next
 listing or approve from the durable truth: a transaction attributed to
 the request (`origin` agent, request id, and intent digest all match)
 means `broadcast_pending` or `sent`; none means `unresolved`, with
-nothing refunded.
+nothing refunded. The ledger is reconciled the same way: a draw whose
+request is `pending_approval`, `failed`, or `denied` was orphaned by a
+crash before `signing` or before the refund reached disk and is
+returned once; every other draw stays.
 
 Every transition — received, denied, approved, dismissed, reserved,
 signed, broadcast, refunded, failed — appends to the per-network event

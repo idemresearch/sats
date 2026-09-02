@@ -37,16 +37,20 @@ const fn request_format_version() -> u32 {
 pub struct AgentRequest {
     #[serde(default = "request_format_version")]
     pub format_version: u32,
-    /// Record id and filename stem: `k-<client key>` for keyed requests,
-    /// `r-<8 hex>` for keyless ones.
+    /// The server request id: `r-` plus 16 hex characters, globally
+    /// unique across agents. Derived deterministically from the grant,
+    /// the agent, and the client key for keyed requests (so a repeated
+    /// filing resolves to the same record); random for keyless ones.
+    /// This is the id humans review and approve; the client key is
+    /// only the agent's idempotency handle.
     pub id: String,
     pub network: String,
     pub agent: String,
-    /// `token_id` of the grant instance that created this request. A
+    /// `grant_id` of the grant instance that created this request. A
     /// request executes only under that exact grant: revoking or
     /// re-issuing the grant makes every request filed under it
     /// non-executable.
-    pub grant_token_id: String,
+    pub grant_id: String,
     /// The idempotency key exactly as the client supplied it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<String>,
@@ -206,7 +210,7 @@ mod tests {
             id: "k-job-1".into(),
             network: "signet".into(),
             agent: "claude".into(),
-            grant_token_id: "t1".into(),
+            grant_id: "g1".into(),
             client_request_id: Some("job-1".into()),
             recipient: "tb1pexample".into(),
             amount_sat: 25_000,
@@ -233,7 +237,7 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["status"], "denied");
         assert_eq!(json["deny"]["reason"], "over_max_tx");
-        assert_eq!(json["grant_token_id"], "t1");
+        assert_eq!(json["grant_id"], "g1");
         assert!(json.get("state").is_none(), "the state is flattened");
         let back: AgentRequest = serde_json::from_value(json).unwrap();
         assert_eq!(back.id, "k-job-1");
@@ -349,7 +353,7 @@ mod tests {
         // Files without the field default to the current version.
         let json = serde_json::json!({
             "id": "r-abc", "network": "signet", "agent": "a",
-            "grant_token_id": "t1",
+            "grant_id": "g1",
             "recipient": "tb1p", "amount_sat": 1,
             "intent_digest": "d", "created_at": 0, "updated_at": 0,
             "status": "pending_approval",

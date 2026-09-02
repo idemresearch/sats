@@ -559,8 +559,22 @@ impl Store {
             .into_iter()
             .filter(|request| request.id.starts_with(id_or_prefix))
             .collect();
-        if let Some(exact) = matches.iter().position(|r| r.id == id_or_prefix) {
-            return Ok(matches.remove(exact));
+        // An exact id wins over longer ids it prefixes, but it must be
+        // unique: request ids are global, so two records carrying the
+        // same exact id is corruption, never a choice to make silently.
+        let exact: Vec<usize> = matches
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.id == id_or_prefix)
+            .map(|(i, _)| i)
+            .collect();
+        match exact.as_slice() {
+            [one] => return Ok(matches.remove(*one)),
+            [] => {}
+            _ => bail!(
+                "request id {id_or_prefix} is ambiguous: more than one record carries it — \
+                 pass the agent's own record, not the id"
+            ),
         }
         match matches.len() {
             0 => bail!("no agent request {id_or_prefix}"),
@@ -663,8 +677,8 @@ fn agent_component(agent: &str) -> Result<&str> {
     Ok(agent)
 }
 
-/// Gate a request id before it becomes a path component. Daemon-minted
-/// ids (`k-<key>`, `r-<hex>`) always pass; this is the backstop for any
+/// Gate a request id before it becomes a path component. sats-minted
+/// ids (`r-` plus 16 hex) always pass; this is the backstop for any
 /// future caller handing an id straight from a wire.
 fn request_id_component(id: &str) -> Result<&str> {
     let ok = !id.is_empty()
@@ -809,6 +823,8 @@ mod tests {
             token_hash: token.token_hash,
             mode: Default::default(),
             allowed_recipients: None,
+            grant_id: sats_core::authz::new_grant_id().unwrap(),
+            reservations: Vec::new(),
         }
     }
 
@@ -951,7 +967,7 @@ mod tests {
             id: id.into(),
             network: "signet".into(),
             agent: "claude".into(),
-            grant_token_id: "t1".into(),
+            grant_id: "g1".into(),
             client_request_id: None,
             recipient: "tb1ptest".into(),
             amount_sat: 1_000,
@@ -960,6 +976,40 @@ mod tests {
             updated_at: 42,
             state: sats_core::request::RequestState::PendingApproval,
         }
+    }
+
+    /// Two records with the same exact id — possible only across agents,
+    /// since ids are global — are never resolved by picking the first.
+    #[test]
+    fn find_agent_request_refuses_duplicate_exact_ids() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let mut alice = agent_request("r-0123456789abcdef");
+        alice.agent = "alice".into();
+        let mut bob = agent_request("r-0123456789abcdef");
+        bob.agent = "bob".into();
+        store
+            .create_agent_request("signet", &alice)
+            .unwrap()
+            .unwrap();
+        store.create_agent_request("signet", &bob).unwrap().unwrap();
+        let err = store
+            .find_agent_request("signet", "r-0123456789abcdef")
+            .unwrap_err();
+        assert!(err.to_string().contains("ambiguous"), "{err:#}");
+        let err = store.find_agent_request("signet", "r-0123").unwrap_err();
+        assert!(err.to_string().contains("ambiguous"), "{err:#}");
+        // A unique prefix still resolves.
+        let mut carol = agent_request("r-fedcba9876543210");
+        carol.agent = "carol".into();
+        store
+            .create_agent_request("signet", &carol)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.find_agent_request("signet", "r-fed").unwrap().id,
+            "r-fedcba9876543210"
+        );
     }
 
     #[test]

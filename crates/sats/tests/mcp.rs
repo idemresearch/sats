@@ -55,6 +55,19 @@ fn sats_json(dir: &TempDir, args: &[&str]) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).expect("json stdout")
 }
 
+/// The server request id a `request_send` result carries: `r-` plus 16
+/// hex characters, the only handle a human approves or dismisses by.
+fn id_of(view: &serde_json::Value) -> String {
+    let id = view["request_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no request_id in {view}"))
+        .to_string();
+    assert_eq!(id.len(), 18, "{id}");
+    assert!(id.starts_with("r-"), "{id}");
+    assert!(id[2..].bytes().all(|b| b.is_ascii_hexdigit()), "{id}");
+    id
+}
+
 /// The human authorizes and executes one request: `sats agent approve`
 /// with the password from the environment, as a script would.
 fn approve(dir: &TempDir, id: &str) -> serde_json::Value {
@@ -294,12 +307,12 @@ fn mcp_serves_five_tools_and_enforces_the_grant() {
     let denied = mcp.request_send(4, 20_000, "big");
     assert_eq!(denied["status"], "denied", "got: {denied}");
     assert_eq!(denied["reason"], "over_max_tx");
-    assert_eq!(denied["request_id"], "k-big");
+    let big = id_of(&denied);
     let message = denied["message"].as_str().unwrap();
     assert!(message.contains("outside the grant"), "got: {message}");
     assert!(message.contains("20,000"), "got: {message}");
     assert!(message.contains("10,000"), "got: {message}");
-    assert_eq!(request_record(&dir, "claude", "k-big")["status"], "denied");
+    assert_eq!(request_record(&dir, "claude", &big)["status"], "denied");
     assert_eq!(event_kinds(&dir), ["request_received", "denied"]);
 
     // A keyless request is denied the same way and gets a random id.
@@ -345,14 +358,14 @@ fn request_send_files_pending_and_approve_executes() {
 
     let filed = mcp.request_send(2, 4_500, "invoice-1");
     assert_eq!(filed["status"], "pending_approval", "got: {filed}");
-    assert_eq!(filed["request_id"], "k-invoice-1");
+    let id = id_of(&filed);
     assert_eq!(filed["recipient"], ADDRESS);
     assert_eq!(filed["amount_sat"], 4_500);
     assert!(
         filed["message"]
             .as_str()
             .unwrap()
-            .contains("sats agent approve k-invoice-1")
+            .contains(&format!("sats agent approve {id}"))
     );
     assert!(filed.get("txid").is_none());
     assert_eq!(event_kinds(&dir), ["request_received"]);
@@ -368,13 +381,13 @@ fn request_send_files_pending_and_approve_executes() {
     // Observing is free: the record and the log are untouched.
     let record_path = dir
         .path()
-        .join("signet/agent-requests/claude/k-invoice-1.json");
+        .join(format!("signet/agent-requests/claude/{id}.json"));
     let record_before = std::fs::read(&record_path).unwrap();
     let events_before = std::fs::read(dir.path().join("signet/events/log.jsonl")).unwrap();
-    for (id, key) in [(3, "invoice-1"), (4, "k-invoice-1"), (5, "invoice-1")] {
-        let view = mcp.check_request(id, key);
+    for (call, handle) in [(3, "invoice-1"), (4, id.as_str()), (5, "invoice-1")] {
+        let view = mcp.check_request(call, handle);
         assert_eq!(view["status"], "pending_approval", "got: {view}");
-        assert_eq!(view["request_id"], "k-invoice-1");
+        assert_eq!(view["request_id"], id);
     }
     assert_eq!(std::fs::read(&record_path).unwrap(), record_before);
     assert_eq!(
@@ -385,9 +398,9 @@ fn request_send_files_pending_and_approve_executes() {
     // The human's queue shows it, and the human approves.
     let queue = sats_json(&dir, &["--json", "agent", "requests"]);
     assert_eq!(queue.as_array().unwrap().len(), 1);
-    assert_eq!(queue[0]["id"], "k-invoice-1");
+    assert_eq!(queue[0]["id"], id);
     assert_eq!(queue[0]["status"], "pending_approval");
-    let approved = approve(&dir, "k-invoice-1");
+    let approved = approve(&dir, &id);
     assert_eq!(approved["status"], "sent", "got: {approved}");
     let txid = approved["txid"].as_str().unwrap().to_string();
     assert_eq!(approved["amount_sat"], 4_500);
@@ -406,7 +419,7 @@ fn request_send_files_pending_and_approve_executes() {
     assert_eq!(record["status"], "broadcast");
     assert_eq!(record["origin"]["surface"], "agent");
     assert_eq!(record["origin"]["agent"], "claude");
-    assert_eq!(record["origin"]["request_id"], "k-invoice-1");
+    assert_eq!(record["origin"]["request_id"], id);
     assert_eq!(spent_sat(&dir), 4_500 + fee);
     assert!(
         std::fs::read_to_string(fx.mockdata.join("broadcasts.log"))
@@ -423,10 +436,7 @@ fn request_send_files_pending_and_approve_executes() {
             "broadcast"
         ]
     );
-    let log = sats_json(
-        &dir,
-        &["--json", "agent", "log", "--request", "k-invoice-1"],
-    );
+    let log = sats_json(&dir, &["--json", "agent", "log", "--request", &id]);
     assert_eq!(log.as_array().unwrap().len(), 5);
 
     // Filing the same key again returns the settled request; it does
@@ -438,7 +448,7 @@ fn request_send_files_pending_and_approve_executes() {
     assert_eq!(spent_sat(&dir), 4_500 + fee);
 
     // And a settled request cannot be approved again.
-    let output = sats_output(&dir, &["agent", "approve", "k-invoice-1", "--yes"]);
+    let output = sats_output(&dir, &["agent", "approve", &id, "--yes"]);
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("already sent"),
@@ -456,17 +466,18 @@ fn request_send_is_idempotent_and_conflicts_on_key_reuse() {
 
     let first = mcp.request_send(2, 1_000, "job-1");
     assert_eq!(first["status"], "pending_approval");
+    let id = id_of(&first);
     let again = mcp.request_send(3, 1_000, "job-1");
     assert_eq!(again["status"], "pending_approval");
-    assert_eq!(again["request_id"], "k-job-1");
+    assert_eq!(again["request_id"], id);
     assert_eq!(event_kinds(&dir), ["request_received"], "no second filing");
 
     let conflict = mcp.request_send(4, 2_000, "job-1");
     assert_eq!(conflict["status"], "error", "got: {conflict}");
     assert_eq!(conflict["error_code"], "request_id_conflict");
-    assert_eq!(conflict["request_id"], "k-job-1");
+    assert_eq!(conflict["request_id"], id);
     assert_eq!(
-        request_record(&dir, "claude", "k-job-1")["amount_sat"],
+        request_record(&dir, "claude", &id)["amount_sat"],
         1_000,
         "the record keeps its intent"
     );
@@ -483,8 +494,7 @@ fn request_send_is_idempotent_and_conflicts_on_key_reuse() {
         "request_send",
         serde_json::json!({ "address": ADDRESS, "amount_sat": 1_000 }),
     );
-    assert!(a["request_id"].as_str().unwrap().starts_with("r-"));
-    assert_ne!(a["request_id"], b["request_id"]);
+    assert_ne!(id_of(&a), id_of(&b));
     let queue = sats_json(&dir, &["--json", "agent", "requests"]);
     assert_eq!(queue.as_array().unwrap().len(), 3);
 
@@ -505,17 +515,18 @@ fn dismissed_and_denied_requests_observe_as_terminal() {
 
     let filed = mcp.request_send(2, 1_000, "later");
     assert_eq!(filed["status"], "pending_approval");
-    let dismissed = sats_json(&dir, &["--json", "agent", "dismiss", "k-later"]);
+    let later = id_of(&filed);
+    let dismissed = sats_json(&dir, &["--json", "agent", "dismiss", &later]);
     assert_eq!(dismissed["status"], "dismissed");
     let view = mcp.check_request(3, "later");
     assert_eq!(view["status"], "dismissed", "got: {view}");
     assert!(view["message"].as_str().unwrap().contains("dismissed"));
     assert_eq!(event_kinds(&dir), ["request_received", "dismissed"]);
     // Dismissed is terminal for the human too.
-    let output = sats_output(&dir, &["agent", "approve", "k-later", "--yes"]);
+    let output = sats_output(&dir, &["agent", "approve", &later, "--yes"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("already dismissed"));
-    let output = sats_output(&dir, &["agent", "dismiss", "k-later"]);
+    let output = sats_output(&dir, &["agent", "dismiss", &later]);
     assert!(!output.status.success());
 
     // A recipient off the allowlist is a hard boundary.
@@ -526,7 +537,7 @@ fn dismissed_and_denied_requests_observe_as_terminal() {
     );
     assert_eq!(off["status"], "denied", "got: {off}");
     assert_eq!(off["reason"], "recipient_not_allowed");
-    let output = sats_output(&dir, &["agent", "approve", "k-stranger", "--yes"]);
+    let output = sats_output(&dir, &["agent", "approve", &id_of(&off), "--yes"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("recipient_not_allowed"));
 
@@ -540,10 +551,18 @@ fn dismissed_and_denied_requests_observe_as_terminal() {
     let balance = watcher.call_tool(3, "get_balance", serde_json::json!({}));
     assert_eq!(balance["balance_sat"], 100_000, "reading still works");
 
-    // Another agent cannot see this agent's records through the tool.
-    let cross = watcher.check_request(4, "k-later");
+    // Another agent cannot see this agent's records through the tool,
+    // by the id or by the key.
+    let cross = watcher.check_request(4, &later);
     assert_eq!(cross["status"], "not_found", "got: {cross}");
-    let malformed = mcp.check_request(5, "../../etc");
+    let cross = watcher.check_request(5, "later");
+    assert_eq!(cross["status"], "not_found", "got: {cross}");
+    // The same key from another agent is another request.
+    let peek = watcher.request_send(6, 1_000, "later");
+    assert_eq!(peek["status"], "denied", "observe-only: {peek}");
+    assert_ne!(id_of(&peek), later);
+    assert_eq!(mcp.check_request(6, "later")["status"], "dismissed");
+    let malformed = mcp.check_request(7, "../../etc");
     assert_eq!(malformed["status"], "not_found");
     assert!(malformed["message"].as_str().unwrap().contains("malformed"));
 }
@@ -556,6 +575,21 @@ fn revocation_takes_effect_mid_session() {
     handshake(&mut mcp);
     let filed = mcp.request_send(2, 1_000, "before");
     assert_eq!(filed["status"], "pending_approval");
+    let before = id_of(&filed);
+    let requests_dir = dir.path().join("signet/agent-requests/claude");
+    let records = || {
+        std::fs::read_dir(&requests_dir)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|x| x == "json")
+            })
+            .count()
+    };
+    let records_before = records();
 
     run_sats(&dir, &["agent", "revoke", "claude"]);
 
@@ -563,36 +597,47 @@ fn revocation_takes_effect_mid_session() {
     let refused = mcp.request_send(3, 1_000, "after");
     assert_eq!(refused["status"], "error", "got: {refused}");
     assert_eq!(refused["error_code"], "no_grant");
-    assert!(
-        !dir.path()
-            .join("signet/agent-requests/claude/k-after.json")
-            .exists()
-    );
-    // Reading the grant reports it gone; observing the old request works.
+    assert_eq!(records(), records_before);
+    // Reading the grant reports it gone; observing the old request by
+    // its id works. Its key cannot be resolved without a grant.
     let grant = mcp.call_tool(4, "get_grant", serde_json::json!({}));
     assert_eq!(grant["active"], false);
-    assert_eq!(mcp.check_request(5, "before")["status"], "pending_approval");
+    assert_eq!(mcp.check_request(5, &before)["status"], "pending_approval");
     // The pending request cannot execute without its grant: it is bound
     // to the revoked instance and becomes denied.
-    let output = sats_output(&dir, &["agent", "approve", "k-before", "--yes"]);
+    let output = sats_output(&dir, &["agent", "approve", &before, "--yes"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("revoked"));
-    assert_eq!(mcp.check_request(6, "before")["status"], "denied");
-    assert_eq!(mcp.check_request(7, "before")["reason"], "revoked");
+    assert_eq!(mcp.check_request(6, "before")["status"], "not_found");
+    assert_eq!(mcp.check_request(7, &before)["status"], "denied");
+    assert_eq!(mcp.check_request(8, &before)["reason"], "revoked");
     assert_eq!(event_kinds(&dir), ["request_received", "denied"]);
 
     // A re-issued grant for the same agent never executes the old request.
     let fresh = grant_token(&dir, "claude", &["--budget", "50000"]);
-    let output = sats_output(&dir, &["agent", "approve", "k-before", "--yes"]);
+    let output = sats_output(&dir, &["agent", "approve", &before, "--yes"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("denied revoked"));
     assert_eq!(spent_sat(&dir), 0);
     let mut fresh_mcp = McpSession::start(&dir, "claude", &fresh);
     handshake(&mut fresh_mcp);
+    // The old request is not the new grant's: its key resolves to
+    // nothing under the new grant, and reusing it files a new request
+    // with a new id rather than returning the old record.
+    assert_eq!(fresh_mcp.check_request(2, "before")["status"], "not_found");
+    assert_eq!(fresh_mcp.check_request(3, &before)["status"], "denied");
+    let refiled = fresh_mcp.request_send(4, 1_000, "before");
+    assert_eq!(refiled["status"], "pending_approval", "got: {refiled}");
+    assert_ne!(id_of(&refiled), before);
     assert_eq!(
-        fresh_mcp.request_send(2, 1_000, "after")["status"],
+        fresh_mcp.check_request(5, "before")["request_id"],
+        id_of(&refiled)
+    );
+    assert_eq!(
+        fresh_mcp.request_send(6, 1_000, "after")["status"],
         "pending_approval"
     );
+    assert_eq!(records(), records_before + 2);
 }
 
 /// A signature that could not be broadcast is a distinct state: the
@@ -604,13 +649,12 @@ fn broadcast_failure_observes_as_broadcast_pending_until_rebroadcast() {
     let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
-    assert_eq!(
-        mcp.request_send(2, 1_000, "flaky")["status"],
-        "pending_approval"
-    );
+    let filed = mcp.request_send(2, 1_000, "flaky");
+    assert_eq!(filed["status"], "pending_approval");
+    let flaky = id_of(&filed);
 
     std::fs::write(fx.mockdata.join("broadcast-fail"), "provider down").unwrap();
-    let approved = approve(&dir, "k-flaky");
+    let approved = approve(&dir, &flaky);
     assert_eq!(approved["status"], "broadcast_pending", "got: {approved}");
     let txid = approved["txid"].as_str().unwrap().to_string();
     assert!(
@@ -638,7 +682,7 @@ fn broadcast_failure_observes_as_broadcast_pending_until_rebroadcast() {
     );
 
     // Approving again never produces a second signature.
-    let output = sats_output(&dir, &["agent", "approve", "k-flaky", "--yes"]);
+    let output = sats_output(&dir, &["agent", "approve", &flaky, "--yes"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("sats tx broadcast"));
     assert_eq!(
@@ -653,7 +697,7 @@ fn broadcast_failure_observes_as_broadcast_pending_until_rebroadcast() {
     run_sats(&dir, &["tx", "broadcast", &txid]);
     assert_eq!(mcp.check_request(4, "flaky")["status"], "sent");
     assert_eq!(spent_sat(&dir), spent, "no second draw");
-    assert_eq!(request_record(&dir, "claude", "k-flaky")["status"], "sent");
+    assert_eq!(request_record(&dir, "claude", &flaky)["status"], "sent");
     assert_eq!(event_kinds(&dir).last().unwrap(), "broadcast");
 }
 
@@ -800,17 +844,16 @@ fn assert_sync_timeout(driver: &str) {
     let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
-    assert_eq!(
-        mcp.request_send(2, 1_000, "timeout")["status"],
-        "pending_approval"
-    );
+    let filed = mcp.request_send(2, 1_000, "timeout");
+    assert_eq!(filed["status"], "pending_approval");
+    let id = id_of(&filed);
     drop(mcp);
 
     let http = common::HttpServer::start(|_| None);
     let url = format!("{}/PRIVATE_PATH_KEY", http.url);
     with_http_provider(&dir, driver, &url, "chain.sync");
     let started = std::time::Instant::now();
-    let output = sats_output(&dir, &["agent", "approve", "k-timeout", "--yes"]);
+    let output = sats_output(&dir, &["agent", "approve", &id, "--yes"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("stale state"), "got: {stderr}");
@@ -821,7 +864,7 @@ fn assert_sync_timeout(driver: &str) {
     assert_eq!(http.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(event_kinds(&dir), ["request_received"]);
     assert_eq!(
-        request_record(&dir, "claude", "k-timeout")["status"],
+        request_record(&dir, "claude", &id)["status"],
         "pending_approval"
     );
     assert_eq!(spent_sat(&dir), 0);
@@ -843,10 +886,9 @@ fn esplora_retryable_get_is_limited_to_two_retries() {
     let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
-    assert_eq!(
-        mcp.request_send(2, 1_000, "fees")["status"],
-        "pending_approval"
-    );
+    let filed = mcp.request_send(2, 1_000, "fees");
+    assert_eq!(filed["status"], "pending_approval");
+    let id = id_of(&filed);
     drop(mcp);
 
     let http = common::HttpServer::start(|request| {
@@ -854,11 +896,11 @@ fn esplora_retryable_get_is_limited_to_two_retries() {
         Some((503, "unavailable".into()))
     });
     with_http_provider(&dir, "esplora", &http.url, "chain.fees");
-    let output = sats_output(&dir, &["agent", "approve", "k-fees", "--yes"]);
+    let output = sats_output(&dir, &["agent", "approve", &id, "--yes"]);
     assert!(!output.status.success());
     assert_eq!(http.requests.load(std::sync::atomic::Ordering::SeqCst), 3);
     assert_eq!(
-        request_record(&dir, "claude", "k-fees")["status"],
+        request_record(&dir, "claude", &id)["status"],
         "pending_approval"
     );
     assert_eq!(spent_sat(&dir), 0);
@@ -870,17 +912,16 @@ fn broadcast_timeout_keeps_signed_transaction_and_reserved_budget() {
     let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
-    assert_eq!(
-        mcp.request_send(2, 1_000, "broadcast-timeout")["status"],
-        "pending_approval"
-    );
+    let filed = mcp.request_send(2, 1_000, "broadcast-timeout");
+    assert_eq!(filed["status"], "pending_approval");
+    let id = id_of(&filed);
 
     let http = common::HttpServer::start(|request| {
         assert!(request.starts_with("POST /tx "));
         None
     });
     with_http_provider(&dir, "esplora", &http.url, "chain.broadcast");
-    let approved = approve(&dir, "k-broadcast-timeout");
+    let approved = approve(&dir, &id);
     assert_eq!(approved["status"], "broadcast_pending", "got: {approved}");
     let txid = approved["txid"].as_str().unwrap();
     let record = read_json(&dir.path().join(format!("signet/transactions/{txid}.json")));

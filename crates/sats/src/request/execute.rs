@@ -12,13 +12,19 @@
 //!   only after the reservation is durable), persist the transaction
 //!   before broadcasting, then settle to `sent` or `broadcast_pending`.
 //!
-//! The irreversible boundary is the signer invocation, not a successful
-//! write afterwards. Before the signer is invoked, a failure refunds the
-//! reservation and leaves the request re-approvable. Once the signer has
-//! been invoked, only its own error report — "no signature was produced"
-//! — permits a refund; any other failure, and any crash after `signing`
-//! reached disk, leaves the request `unresolved`: never refunded and
+//! The irreversible boundary is the invocation of `Signer::sign`. Before
+//! it — the audit append, the signer's construction — a failure refunds
+//! the reservation and leaves the request `failed`, re-approvable,
+//! because this process knows no signature exists. From the invocation
+//! on, nothing the signer reports is trusted to mean "no signature": an
+//! error, an unfinalized result, a finalization or persistence failure,
+//! and a crash all leave the request `unresolved` — never refunded and
 //! never signed again by sats. A human resolves it.
+//!
+//! Budget is drawn once per request, on a ledger keyed by the request
+//! id, so an interrupted execution is settled from durable state: a
+//! draw whose request never reached `signing` is an orphan and is
+//! returned (once); a draw whose request did is kept.
 //!
 //! A request executes only under the grant instance that created it.
 //! This module is the only path by which an agent-originated request
@@ -26,7 +32,9 @@
 //! obtained the human's authorization.
 
 use anyhow::{Context, Result, bail};
-use sats_core::authz::{Decision, DenyReason, Grant, SpendRequest, evaluate_send};
+use sats_core::authz::{
+    Decision, DenyReason, Grant, ReserveError, Reserved, SpendRequest, evaluate_send,
+};
 use sats_core::bitcoin::Network;
 use sats_core::event::EventKind;
 use sats_core::plan::{PreparedSpend, TxOrigin};
@@ -37,7 +45,10 @@ use sats_core::verify;
 use crate::commands::prepare;
 use crate::config::network_name;
 use crate::provider::Services;
-use crate::request::{bound_grant, describe_settled, journal, journal_soft, reconcile};
+use crate::request::{
+    bound_grant, describe_settled, journal, journal_soft, reconcile, reconcile_grant,
+    release_orphan,
+};
 use crate::store::{RequestClaim, Store, now_checked, unix_now};
 use crate::walletd::{self, WalletCtx};
 
@@ -88,7 +99,7 @@ pub enum Outcome {
         txid: Option<String>,
         message: String,
     },
-    /// Stopped before any signature could exist; refunded.
+    /// Stopped before the signer was invoked; refunded.
     Failed { message: String },
     /// The grant refused it at the final re-check; nothing drawn.
     Denied(DenyReason),
@@ -97,7 +108,9 @@ pub enum Outcome {
 /// Claim, prepare, verify, and re-check a request with its real fee.
 ///
 /// The request must be `pending_approval` or `failed`; an interrupted
-/// `signing` record is reconciled first. The grant on file must be the
+/// `signing` record is reconciled first, and the grant's reservation
+/// ledger is settled so an orphaned draw from an earlier attempt is
+/// returned before the budget is checked. The grant on file must be the
 /// instance that created the request. Preparation runs on the human's
 /// side of the boundary with no safety bypasses. Operational failures
 /// (sync, guards, fee estimation) leave the request untouched so the
@@ -127,6 +140,7 @@ pub fn stage(
                 request.id
             )
         })?;
+    reconcile_grant(store, net_name, &request.agent)?;
     let now = now_checked()?;
     // The grant that created the request, or nothing: a revoked or
     // re-issued grant makes every request filed under it non-executable.
@@ -220,6 +234,21 @@ pub fn commit(
     staged: Staged,
     make_signer: impl FnOnce() -> Result<Box<dyn Signer>>,
 ) -> Result<Outcome> {
+    commit_inner(store, network, services, staged, make_signer, &|_| Ok(()))
+}
+
+/// [`commit`] with a crash seam. `crash` is consulted at each named
+/// point between two durable writes; an error from it aborts exactly as
+/// a dead process would, with nothing written afterwards. Production
+/// passes a hook that never fires; the crash-window tests fire it.
+fn commit_inner(
+    store: &Store,
+    network: Network,
+    services: &Services,
+    staged: Staged,
+    make_signer: impl FnOnce() -> Result<Box<dyn Signer>>,
+    crash: &dyn Fn(&str) -> Result<()>,
+) -> Result<Outcome> {
     let net_name = network_name(network);
     let Staged {
         mut request,
@@ -255,42 +284,66 @@ pub fn commit(
                 return Ok(Outcome::Denied(reason));
             }
         };
-        if let Err(reason) = grant.reserve_send(&request.recipient, &spend, now) {
-            let denied = record_denied_locked(store, net_name, request, reason.clone(), now)?;
-            drop(grant_lock);
-            journal_denied(store, net_name, &denied, reason.clone());
-            return Ok(Outcome::Denied(reason));
+        // The record is approvable, so it never reached the signer since
+        // its last transition: a draw it still holds is an orphan of an
+        // interrupted attempt. Return it before drawing again, so one
+        // request never holds two draws and a retry with a different fee
+        // is never refused as a mismatch.
+        release_orphan(store, net_name, &mut grant, &request)?;
+        match grant.reserve_send(&request.id, &request.recipient, &spend, now) {
+            Ok(Reserved::Drawn) => {}
+            Ok(Reserved::AlreadyReserved) => {
+                bail!(
+                    "request {} already holds a reservation after its draw was released — \
+                     refusing to sign",
+                    request.id
+                )
+            }
+            Err(ReserveError::Mismatch { reserved }) => {
+                bail!(
+                    "request {} holds a reservation for {} sat + {} sat fee that does not match \
+                     this transaction ({} sat + {} sat fee) — refusing to sign",
+                    request.id,
+                    reserved.amount_sat,
+                    reserved.fee_sat,
+                    spend.amount_sat,
+                    spend.fee_sat
+                )
+            }
+            Err(ReserveError::Denied(reason)) => {
+                let denied = record_denied_locked(store, net_name, request, reason.clone(), now)?;
+                drop(grant_lock);
+                journal_denied(store, net_name, &denied, reason.clone());
+                return Ok(Outcome::Denied(reason));
+            }
         }
+        crash("reserved")?;
 
         // Reserve and persist BEFORE signing: once a signature exists the
         // money must be considered spent. Grant first, then the request:
         // a `signing` record on disk always means its draw is on the grant.
         store.save_grant(net_name, &grant)?;
+        crash("grant-saved")?;
         request.state = RequestState::Signing {
             approved_at: now,
             fee_sat: spend.fee_sat,
         };
         request.updated_at = now;
         store.save_agent_request(net_name, &request)?;
+        crash("signing-saved")?;
         journal_soft(store, net_name, &request, EventKind::Approved);
 
         // Everything from here to the signer invocation is still on the
         // near side of the boundary: this process knows the signer has
         // not run, so a failure refunds. On disk the request already says
         // `signing`, which is what a crash in this window must look like.
+        // `failed` is written before the refund, so a crash between the
+        // two leaves a draw the ledger can still prove unspent.
         let before_signer =
             |request: &mut AgentRequest, grant: &mut Grant, message: String| -> Result<Outcome> {
-                grant.refund(&spend);
                 record_failed_locked(store, net_name, request, &message, now)?;
-                store.save_grant(net_name, grant)?;
-                journal_soft(
-                    store,
-                    net_name,
-                    request,
-                    EventKind::Refunded {
-                        total_sat: spend.total_sat(),
-                    },
-                );
+                crash("failed-saved")?;
+                release_orphan(store, net_name, grant, request)?;
                 Ok(Outcome::Failed { message })
             };
         if let Err(err) = journal(
@@ -314,17 +367,13 @@ pub fn commit(
             }
         };
 
-        // The signer is invoked. From here, only its own report that no
-        // signature was produced permits a refund.
+        // ---- the irreversible boundary ----
+        // The signer is invoked. Nothing it reports afterwards is trusted
+        // to mean "no signature": a signer may have signed, or leaked a
+        // signature, before returning an error.
         let mut psbt = prepared.psbt().clone();
         let unsigned_txid = psbt.unsigned_tx.compute_txid().to_string();
-        let finalized = match signer.sign(&mut psbt) {
-            Ok(finalized) => finalized,
-            Err(err) => {
-                let message = format!("signing failed: {err}");
-                return before_signer(&mut request, &mut grant, message);
-            }
-        };
+        let signed = signer.sign(&mut psbt);
         drop(signer);
         let unresolved = |request: &mut AgentRequest, message: String| -> Result<Outcome> {
             // A signature may exist. The reservation stands and this
@@ -341,6 +390,14 @@ pub fn commit(
                 txid: Some(unsigned_txid.clone()),
                 message,
             })
+        };
+        let finalized = match signed {
+            Ok(finalized) => finalized,
+            Err(err) => {
+                let message =
+                    format!("signer failed after it was invoked: {err} — a signature may exist");
+                return unresolved(&mut request, message);
+            }
         };
         if !finalized {
             let message =
@@ -498,9 +555,9 @@ fn record_denied_locked(
     Ok(request)
 }
 
-/// The no-signature stop: written before the grant refund, so a crash
-/// between the two leaves a `failed` request whose reservation a
-/// reconciliation can still see on the grant.
+/// The pre-invocation stop: written before the grant refund, so a crash
+/// between the two leaves a `failed` request whose draw the ledger
+/// still proves unspent.
 fn record_failed_locked(
     store: &Store,
     net_name: &str,
@@ -560,7 +617,7 @@ mod tests {
     use bdk_wallet::bitcoin::{Amount, BlockHash, Psbt};
     use bdk_wallet::chain::{BlockId, ConfirmationBlockTime};
     use bdk_wallet::test_utils::{insert_checkpoint, receive_output};
-    use sats_core::authz::{GRANT_FORMAT_VERSION, GrantMode};
+    use sats_core::authz::{GRANT_FORMAT_VERSION, GrantMode, new_grant_id};
     use sats_core::error::SignerError;
     use sats_core::plan::TransactionStatus;
     use sats_core::signer::LocalSigner;
@@ -568,7 +625,10 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
-    use crate::request::{CreateError, CreateParams, create, dismiss, list_reconciled};
+    use crate::request::{
+        CreateError, CreateParams, create, dismiss, is_request_id, keyed_request_id,
+        list_reconciled,
+    };
     use crate::store::EventLine;
 
     const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -641,23 +701,7 @@ mod tests {
         /// Persist a signet grant for `agent` and hand back its token.
         fn grant_for(&self, agent: &str, budget_sat: u64, max_fee_sat: u64) -> String {
             let minted = token::generate().unwrap();
-            let now = unix_now();
-            let grant = Grant {
-                format_version: GRANT_FORMAT_VERSION,
-                agent: agent.into(),
-                network: "signet".into(),
-                budget_sat,
-                spent_sat: 0,
-                max_tx_sat: None,
-                max_fee_sat,
-                created_at: now,
-                expires_at: now + 3_600,
-                tx_count: 0,
-                token_id: minted.token_id.clone(),
-                token_hash: minted.token_hash.clone(),
-                mode: GrantMode::Ask,
-                allowed_recipients: None,
-            };
+            let grant = fresh_grant(agent, budget_sat, max_fee_sat, &minted);
             let _lock = self.store.lock_grants("signet").unwrap();
             self.store.save_grant("signet", &grant).unwrap();
             minted.secret.to_string()
@@ -723,8 +767,59 @@ mod tests {
                 .collect()
         }
 
+        fn count_events(&self, kind: &str) -> usize {
+            self.events().iter().filter(|k| k.as_str() == kind).count()
+        }
+
         fn transactions(&self) -> usize {
             self.store.list_transactions("signet").unwrap().len()
+        }
+
+        /// The ledger agrees with the aggregates and with history: every
+        /// draw on the grant belongs to a request that reached the
+        /// signer, and the totals are exactly the sum of those draws.
+        fn assert_ledger_consistent(&self) {
+            let grant = self.grant_state();
+            let mut total = 0;
+            for entry in &grant.reservations {
+                let request = self.request(&entry.request_id);
+                assert!(
+                    !crate::request::never_reached_signer(&request.state),
+                    "orphan draw on {} ({})",
+                    entry.request_id,
+                    request.status()
+                );
+                total += entry.spend().total_sat();
+            }
+            assert_eq!(grant.spent_sat, total, "spent_sat is the sum of the ledger");
+            assert_eq!(grant.tx_count as usize, grant.reservations.len());
+        }
+    }
+
+    fn fresh_grant(
+        agent: &str,
+        budget_sat: u64,
+        max_fee_sat: u64,
+        minted: &token::NewToken,
+    ) -> Grant {
+        let now = unix_now();
+        Grant {
+            format_version: GRANT_FORMAT_VERSION,
+            agent: agent.into(),
+            network: "signet".into(),
+            budget_sat,
+            spent_sat: 0,
+            max_tx_sat: None,
+            max_fee_sat,
+            created_at: now,
+            expires_at: now + 3_600,
+            tx_count: 0,
+            token_id: minted.token_id.clone(),
+            token_hash: minted.token_hash.clone(),
+            mode: GrantMode::Ask,
+            allowed_recipients: None,
+            grant_id: new_grant_id().unwrap(),
+            reservations: Vec::new(),
         }
     }
 
@@ -734,8 +829,11 @@ mod tests {
     enum Fault {
         #[default]
         None,
-        /// The signer reports an error: no signature was produced.
+        /// The signer reports an error without touching the PSBT.
         Error,
+        /// The malicious case: the signer signs the PSBT, then reports an
+        /// error anyway. A signature exists despite the error.
+        SignThenError,
         /// The signer signs but leaves the PSBT unfinalized.
         Unfinalized,
         /// The signer signs, then the PSBT no longer matches the prepared
@@ -795,6 +893,11 @@ mod tests {
             match self.fault {
                 Fault::None => self.inner.sign(psbt),
                 Fault::Error => Err(SignerError::Unfinalized),
+                Fault::SignThenError => {
+                    let finalized = self.inner.sign(psbt)?;
+                    assert!(finalized, "the malicious signer really signed");
+                    Err(SignerError::Unfinalized)
+                }
                 Fault::Unfinalized => {
                     self.inner.sign(psbt)?;
                     Ok(false)
@@ -810,29 +913,68 @@ mod tests {
     }
 
     fn approve(fx: &Fixture, id: &str, probe: &SignerProbe) -> Result<Outcome> {
+        approve_crashing_at(fx, id, probe, "never")
+    }
+
+    /// Approve, with the commit dying at the named point.
+    fn approve_crashing_at(
+        fx: &Fixture,
+        id: &str,
+        probe: &SignerProbe,
+        point: &str,
+    ) -> Result<Outcome> {
+        approve_with(fx, id, probe.factory(), point)
+    }
+
+    fn approve_with(
+        fx: &Fixture,
+        id: &str,
+        make_signer: impl FnOnce() -> Result<Box<dyn Signer>>,
+        point: &str,
+    ) -> Result<Outcome> {
         let services = fx.services();
         match stage(&fx.store, Network::Signet, &services, id)? {
-            Stage::Ready(staged) => commit(
+            Stage::Ready(staged) => commit_inner(
                 &fx.store,
                 Network::Signet,
                 &services,
                 *staged,
-                probe.factory(),
+                make_signer,
+                &|label| {
+                    if label == point {
+                        bail!("simulated crash at {label}")
+                    }
+                    Ok(())
+                },
             ),
             Stage::Denied(_, reason) => Ok(Outcome::Denied(reason)),
         }
     }
 
-    // ---- creation ------------------------------------------------------
+    fn sent(outcome: Outcome) -> (String, u64) {
+        match outcome {
+            Outcome::Sent { txid, fee_sat, .. } => (txid, fee_sat),
+            other => panic!("expected sent, got {other:?}"),
+        }
+    }
+
+    // ---- creation and identity -----------------------------------------
 
     #[test]
     fn create_records_a_pending_request_bound_to_its_grant() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 1_000);
         let first = fx.create(&token, "job-1", 10_000);
-        assert_eq!(first.id, "k-job-1");
+        let grant = fx.grant_state();
+        assert!(is_request_id(&first.id), "{}", first.id);
+        assert_eq!(
+            first.id,
+            keyed_request_id(&grant.grant_id, "claude", "job-1")
+        );
+        assert_eq!(first.client_request_id.as_deref(), Some("job-1"));
         assert_eq!(first.state, RequestState::PendingApproval);
-        assert_eq!(first.grant_token_id, fx.grant_state().token_id);
+        assert_eq!(first.grant_id, grant.grant_id);
+        assert_eq!(grant.grant_id.len(), 32);
         assert_eq!(fx.events(), vec!["request_received"]);
         // Same key, same intent: the same record, no new event.
         let again = fx.create(&token, "job-1", 10_000);
@@ -840,8 +982,83 @@ mod tests {
         assert_eq!(fx.events(), vec!["request_received"]);
         // Same key, different intent: a conflict, nothing written.
         let conflict = fx.create_as("claude", &token, "job-1", 20_000).unwrap_err();
-        assert!(matches!(conflict, CreateError::Conflict { .. }));
-        assert_eq!(fx.request("k-job-1").amount_sat, 10_000);
+        let CreateError::Conflict { request_id } = conflict else {
+            panic!("expected conflict, got {conflict:?}");
+        };
+        assert_eq!(request_id, first.id);
+        assert_eq!(fx.request(&first.id).amount_sat, 10_000);
+    }
+
+    /// The same client key from two agents names two requests; the id a
+    /// filing returns selects exactly one of them, and the shared prefix
+    /// every id carries is refused as ambiguous rather than resolved to
+    /// whichever record came first.
+    #[test]
+    fn same_client_key_across_agents_yields_distinct_global_ids() {
+        let fx = Fixture::new(&[100_000, 100_000]);
+        let alice = fx.grant_for("alice", 50_000, 5_000);
+        let bob = fx.grant_for("bob", 50_000, 5_000);
+        let a = fx.create_as("alice", &alice, "pay", 10_000).unwrap();
+        let b = fx.create_as("bob", &bob, "pay", 10_000).unwrap();
+        assert_ne!(a.id, b.id);
+        assert!(is_request_id(&a.id) && is_request_id(&b.id));
+        assert_eq!(
+            fx.store.find_agent_request("signet", &a.id).unwrap().agent,
+            "alice"
+        );
+        assert_eq!(
+            fx.store.find_agent_request("signet", &b.id).unwrap().agent,
+            "bob"
+        );
+        let err = fx.store.find_agent_request("signet", "r-").unwrap_err();
+        assert!(err.to_string().contains("ambiguous"), "{err:#}");
+
+        // Dismissing by bob's id touches bob's record only.
+        dismiss(&fx.store, Network::Signet, &b.id).unwrap();
+        assert_eq!(fx.request_of("bob", &b.id).status(), "dismissed");
+        assert_eq!(fx.request_of("alice", &a.id).status(), "pending_approval");
+        // Approving by alice's id executes alice's record only.
+        let probe = SignerProbe::default();
+        let (txid, _) = sent(approve(&fx, &a.id, &probe).unwrap());
+        assert_eq!(
+            fx.request_of("alice", &a.id).state.txid(),
+            Some(txid.as_str())
+        );
+        assert_eq!(fx.request_of("bob", &b.id).status(), "dismissed");
+        assert_eq!(probe.counts(), (1, 1));
+    }
+
+    /// A key reused after a revoke and re-issue never resolves to the
+    /// old grant's request: the id commits to the grant, so the second
+    /// filing is a new request under the new grant, and the old one
+    /// stays bound to the grant that is gone.
+    #[test]
+    fn same_client_key_after_reissue_files_a_new_request() {
+        let fx = Fixture::new(&[100_000]);
+        let old = fx.grant(50_000, 5_000);
+        let first = fx.create(&old, "invoice", 10_000);
+        fx.revoke();
+        let fresh = fx.grant(50_000, 5_000);
+        let second = fx.create(&fresh, "invoice", 10_000);
+        assert_ne!(second.id, first.id);
+        assert_eq!(second.state, RequestState::PendingApproval);
+        assert_eq!(second.grant_id, fx.grant_state().grant_id);
+        assert_ne!(first.grant_id, second.grant_id);
+        assert_eq!(fx.events(), vec!["request_received", "request_received"]);
+        // Repeating the key under the new grant still deduplicates there.
+        assert_eq!(fx.create(&fresh, "invoice", 10_000).id, second.id);
+        // The old record is still on file, still bound to the old grant.
+        let probe = SignerProbe::default();
+        assert_eq!(
+            approve(&fx, &first.id, &probe).unwrap(),
+            Outcome::Denied(DenyReason::Revoked)
+        );
+        assert_eq!(probe.counts(), (0, 0));
+        assert!(matches!(
+            approve(&fx, &second.id, &probe).unwrap(),
+            Outcome::Sent { .. }
+        ));
+        assert_eq!(probe.counts(), (1, 1));
     }
 
     #[test]
@@ -852,12 +1069,7 @@ mod tests {
             .create_as("claude", "not-the-token", "job-1", 10_000)
             .unwrap_err();
         assert_eq!(err.code(), "unauthorized");
-        assert!(
-            fx.store
-                .load_agent_request("signet", "claude", "k-job-1")
-                .unwrap()
-                .is_none()
-        );
+        assert!(fx.store.list_agent_requests("signet").unwrap().is_empty());
         assert!(fx.events().is_empty());
     }
 
@@ -873,10 +1085,7 @@ mod tests {
         assert_eq!(err.code(), "store_error");
         assert!(err.message("claude").contains("cannot record request"));
         assert!(
-            fx.store
-                .load_agent_request("signet", "claude", "k-job-1")
-                .unwrap()
-                .is_none(),
+            fx.store.list_agent_requests("signet").unwrap().is_empty(),
             "no record without its audit line"
         );
     }
@@ -897,7 +1106,7 @@ mod tests {
         assert_eq!(fx.events(), vec!["request_received", "denied"]);
         // Approving a denied request is refused before anything runs.
         let probe = SignerProbe::default();
-        let err = approve(&fx, "k-big", &probe).unwrap_err();
+        let err = approve(&fx, &denied.id, &probe).unwrap_err();
         assert!(err.to_string().contains("denied over_budget"), "{err:#}");
         assert_eq!(probe.counts(), (0, 0));
     }
@@ -910,13 +1119,13 @@ mod tests {
     fn revoked_grant_denies_the_pending_request() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
-        fx.create(&token, "pay", 10_000);
+        let id = fx.create(&token, "pay", 10_000).id;
         fx.revoke();
         let probe = SignerProbe::default();
-        let outcome = approve(&fx, "k-pay", &probe).unwrap();
+        let outcome = approve(&fx, &id, &probe).unwrap();
         assert_eq!(outcome, Outcome::Denied(DenyReason::Revoked));
         assert_eq!(probe.counts(), (0, 0));
-        let request = fx.request("k-pay");
+        let request = fx.request(&id);
         assert_eq!(request.state.deny_reason(), Some(&DenyReason::Revoked));
         assert!(!request.is_approvable());
         assert_eq!(fx.events(), vec!["request_received", "denied"]);
@@ -931,15 +1140,15 @@ mod tests {
         let request = fx.create(&old, "pay", 10_000);
         fx.revoke();
         let fresh = fx.grant(50_000, 5_000);
-        assert_ne!(request.grant_token_id, fx.grant_state().token_id);
+        assert_ne!(request.grant_id, fx.grant_state().grant_id);
         let probe = SignerProbe::default();
         assert_eq!(
-            approve(&fx, "k-pay", &probe).unwrap(),
+            approve(&fx, &request.id, &probe).unwrap(),
             Outcome::Denied(DenyReason::Revoked)
         );
         assert_eq!(probe.counts(), (0, 0));
         assert_eq!(fx.grant_state().spent_sat, 0, "the new grant is untouched");
-        assert_eq!(fx.request("k-pay").status(), "denied");
+        assert_eq!(fx.request(&request.id).status(), "denied");
         // The old token cannot file under the new grant either.
         assert_eq!(
             fx.create_as("claude", &old, "pay-2", 10_000)
@@ -948,9 +1157,9 @@ mod tests {
             "unauthorized"
         );
         // A request filed under the new grant executes normally.
-        fx.create(&fresh, "pay-3", 10_000);
+        let id = fx.create(&fresh, "pay-3", 10_000).id;
         assert!(matches!(
-            approve(&fx, "k-pay-3", &probe).unwrap(),
+            approve(&fx, &id, &probe).unwrap(),
             Outcome::Sent { .. }
         ));
         assert_eq!(probe.counts(), (1, 1));
@@ -963,7 +1172,7 @@ mod tests {
     fn concurrent_create_cannot_borrow_authority_across_a_reissue() {
         let fx = Fixture::new(&[100_000]);
         let old = fx.grant(50_000, 5_000);
-        let old_id = fx.grant_state().token_id.clone();
+        let old_id = fx.grant_state().grant_id.clone();
 
         // Hold the grant lock, start the create, then revoke and re-grant
         // while the create is blocked on the lock.
@@ -991,54 +1200,32 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
         fx.store.delete_grant("signet", "claude").unwrap();
         let minted = token::generate().unwrap();
-        let now = unix_now();
         fx.store
-            .save_grant(
-                "signet",
-                &Grant {
-                    format_version: GRANT_FORMAT_VERSION,
-                    agent: "claude".into(),
-                    network: "signet".into(),
-                    budget_sat: 50_000,
-                    spent_sat: 0,
-                    max_tx_sat: None,
-                    max_fee_sat: 5_000,
-                    created_at: now,
-                    expires_at: now + 3_600,
-                    tx_count: 0,
-                    token_id: minted.token_id.clone(),
-                    token_hash: minted.token_hash.clone(),
-                    mode: GrantMode::Ask,
-                    allowed_recipients: None,
-                },
-            )
+            .save_grant("signet", &fresh_grant("claude", 50_000, 5_000, &minted))
             .unwrap();
         drop(lock);
 
         // The create authenticated after the swap: the old token is dead.
         assert_eq!(worker.join().unwrap().unwrap_err(), "unauthorized");
         assert!(
-            fx.store
-                .load_agent_request("signet", "claude", "k-racy")
-                .unwrap()
-                .is_none(),
+            fx.store.list_agent_requests("signet").unwrap().is_empty(),
             "nothing was filed under either grant"
         );
         assert!(fx.events().is_empty());
-        assert_ne!(fx.grant_state().token_id, old_id);
+        assert_ne!(fx.grant_state().grant_id, old_id);
     }
 
     // ---- execution -----------------------------------------------------
 
     /// The whole loop: create → approve → sent, with exactly one signer
-    /// construction and one signature.
+    /// construction and one signature, and one draw on the ledger.
     #[test]
     fn approve_executes_once_and_settles_to_sent() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
-        fx.create(&token, "pay", 10_000);
+        let id = fx.create(&token, "pay", 10_000).id;
         let probe = SignerProbe::default();
-        let outcome = approve(&fx, "k-pay", &probe).unwrap();
+        let outcome = approve(&fx, &id, &probe).unwrap();
         let Outcome::Sent {
             txid,
             amount_sat,
@@ -1053,17 +1240,23 @@ mod tests {
         assert!(fee_sat > 0);
         assert_eq!(remaining_sat, 50_000 - 10_000 - fee_sat);
 
-        let request = fx.request("k-pay");
+        let request = fx.request(&id);
         assert_eq!(request.state.txid(), Some(txid.as_str()));
         assert_eq!(request.status(), "sent");
         let grant = fx.grant_state();
         assert_eq!(grant.spent_sat, 10_000 + fee_sat);
         assert_eq!(grant.tx_count, 1);
+        let entry = grant
+            .reservation(&id)
+            .expect("a sent request keeps its draw");
+        assert_eq!(entry.amount_sat, 10_000);
+        assert_eq!(entry.fee_sat, fee_sat);
+        fx.assert_ledger_consistent();
         let record = fx.store.load_transaction("signet", &txid).unwrap();
         assert_eq!(record.status, TransactionStatus::Broadcast);
         let origin = record.origin.as_ref().unwrap();
         assert_eq!(origin.agent.as_deref(), Some("claude"));
-        assert_eq!(origin.request_id.as_deref(), Some("k-pay"));
+        assert_eq!(origin.request_id.as_deref(), Some(id.as_str()));
         assert_eq!(
             origin.intent_digest.as_deref(),
             Some(request.intent_digest.as_str())
@@ -1085,31 +1278,115 @@ mod tests {
         );
 
         // A settled request cannot be approved or dismissed again: the
-        // signer is never reached twice for one request.
-        let again = approve(&fx, "k-pay", &probe).unwrap_err();
+        // signer is never reached twice for one request, and listing
+        // never touches its draw.
+        let again = approve(&fx, &id, &probe).unwrap_err();
         assert!(again.to_string().contains("already sent"), "{again:#}");
         assert_eq!(probe.counts(), (1, 1));
-        assert!(dismiss(&fx.store, Network::Signet, "k-pay").is_err());
+        assert!(dismiss(&fx.store, Network::Signet, &id).is_err());
+        list_reconciled(&fx.store, Network::Signet).unwrap();
+        assert_eq!(fx.grant_state().spent_sat, 10_000 + fee_sat);
+        assert_eq!(fx.count_events("refunded"), 0);
     }
 
-    /// The signer reports an error: no signature was produced, the
-    /// reservation comes back, and the request is re-approvable.
+    // ---- the signer boundary -------------------------------------------
+
+    /// The signer returns an error. Its word is not trusted: once
+    /// invoked, the request is unresolved, nothing is refunded, and it is
+    /// never signed again.
     #[test]
-    fn signer_error_refunds_and_leaves_the_request_re_approvable() {
+    fn signer_error_after_invocation_is_unresolved_without_refund() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
-        fx.create(&token, "pay", 10_000);
+        let id = fx.create(&token, "pay", 10_000).id;
         let failing = SignerProbe::with(Fault::Error);
-        let outcome = approve(&fx, "k-pay", &failing).unwrap();
-        assert!(matches!(outcome, Outcome::Failed { .. }), "{outcome:?}");
+        let outcome = approve(&fx, &id, &failing).unwrap();
+        let Outcome::Unresolved { txid, message } = outcome else {
+            panic!("expected unresolved, got {outcome:?}");
+        };
+        assert!(txid.is_some());
+        assert!(message.contains("a signature may exist"), "{message}");
         assert_eq!(failing.counts(), (1, 1));
-        let request = fx.request("k-pay");
+        let request = fx.request(&id);
+        assert_eq!(request.status(), "unresolved");
+        assert!(!request.is_approvable());
+        let grant = fx.grant_state();
+        assert!(grant.spent_sat > 10_000, "never refunded");
+        assert_eq!(grant.tx_count, 1);
+        assert!(grant.reservation(&id).is_some());
+        assert_eq!(fx.transactions(), 0);
+        assert_eq!(
+            fx.events(),
+            vec!["request_received", "approved", "reserved", "failed"]
+        );
+        // No second invocation, however the human asks, and no
+        // reconciliation ever returns the draw.
+        let probe = SignerProbe::default();
+        let again = approve(&fx, &id, &probe).unwrap_err();
+        assert!(again.to_string().contains("unresolved"), "{again:#}");
+        assert_eq!(probe.counts(), (0, 0));
+        list_reconciled(&fx.store, Network::Signet).unwrap();
+        assert_eq!(fx.grant_state().spent_sat, grant.spent_sat);
+        assert_eq!(fx.count_events("refunded"), 0);
+        fx.assert_ledger_consistent();
+    }
+
+    /// A signer that signs and then lies about it. The error must not
+    /// buy a refund or a second invocation: the signed transaction it
+    /// produced is spendable.
+    #[test]
+    fn malicious_signer_that_signs_then_errors_gets_no_refund_and_no_retry() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let malicious = SignerProbe::with(Fault::SignThenError);
+        let outcome = approve(&fx, &id, &malicious).unwrap();
+        assert!(matches!(outcome, Outcome::Unresolved { .. }), "{outcome:?}");
+        assert_eq!(malicious.counts(), (1, 1));
+        let request = fx.request(&id);
+        assert_eq!(request.status(), "unresolved");
+        assert!(request.state.may_have_signature());
+        let spent = fx.grant_state().spent_sat;
+        assert!(spent > 10_000, "the draw stands");
+        assert_eq!(fx.transactions(), 0, "nothing durable, and still no refund");
+
+        // Every later path: approve, list, dismiss — zero signer builds,
+        // zero signatures, zero refunds.
+        let probe = SignerProbe::default();
+        assert!(approve(&fx, &id, &probe).is_err());
+        list_reconciled(&fx.store, Network::Signet).unwrap();
+        assert!(approve(&fx, &id, &probe).is_err());
+        assert_eq!(probe.counts(), (0, 0));
+        assert_eq!(fx.grant_state().spent_sat, spent);
+        dismiss(&fx.store, Network::Signet, &id).unwrap();
+        assert_eq!(fx.request(&id).status(), "dismissed");
+        assert_eq!(
+            fx.grant_state().spent_sat,
+            spent,
+            "dismissal never refunds it"
+        );
+        assert!(fx.grant_state().reservation(&id).is_some());
+        assert_eq!(fx.count_events("refunded"), 0);
+        assert_eq!(probe.counts(), (0, 0));
+    }
+
+    /// A signer that cannot be constructed never ran: refund, and the
+    /// retry draws exactly once. (Crash window E: both `failed` and the
+    /// refund are durable.)
+    #[test]
+    fn signer_construction_failure_refunds_and_the_retry_draws_once() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let outcome = approve_with(&fx, &id, || bail!("no signer available"), "never").unwrap();
+        assert!(matches!(outcome, Outcome::Failed { .. }), "{outcome:?}");
+        let request = fx.request(&id);
         assert_eq!(request.status(), "failed");
         assert!(request.is_approvable());
         let grant = fx.grant_state();
-        assert_eq!(grant.spent_sat, 0, "refunded");
+        assert_eq!(grant.spent_sat, 0);
         assert_eq!(grant.tx_count, 0);
-        assert_eq!(fx.transactions(), 0);
+        assert!(grant.reservations.is_empty());
         assert_eq!(
             fx.events(),
             vec![
@@ -1120,33 +1397,19 @@ mod tests {
                 "refunded"
             ]
         );
-        // A second authorization executes normally.
-        let probe = SignerProbe::default();
-        assert!(matches!(
-            approve(&fx, "k-pay", &probe).unwrap(),
-            Outcome::Sent { .. }
-        ));
-        assert_eq!(probe.counts(), (1, 1));
-    }
+        // Listing finds nothing left to return.
+        list_reconciled(&fx.store, Network::Signet).unwrap();
+        assert_eq!(fx.count_events("refunded"), 1);
 
-    /// A signer that cannot be constructed never ran: refund.
-    #[test]
-    fn signer_construction_failure_refunds() {
-        let fx = Fixture::new(&[100_000]);
-        let token = fx.grant(50_000, 5_000);
-        fx.create(&token, "pay", 10_000);
-        let services = fx.services();
-        let Stage::Ready(staged) = stage(&fx.store, Network::Signet, &services, "k-pay").unwrap()
-        else {
-            panic!("expected ready");
-        };
-        let outcome = commit(&fx.store, Network::Signet, &services, *staged, || {
-            bail!("no signer available")
-        })
-        .unwrap();
-        assert!(matches!(outcome, Outcome::Failed { .. }), "{outcome:?}");
-        assert_eq!(fx.request("k-pay").status(), "failed");
-        assert_eq!(fx.grant_state().spent_sat, 0);
+        let probe = SignerProbe::default();
+        let (_, fee_sat) = sent(approve(&fx, &id, &probe).unwrap());
+        assert_eq!(probe.counts(), (1, 1));
+        let grant = fx.grant_state();
+        assert_eq!(grant.spent_sat, 10_000 + fee_sat);
+        assert_eq!(grant.tx_count, 1);
+        assert_eq!(grant.reservations.len(), 1);
+        assert_eq!(fx.count_events("refunded"), 1);
+        fx.assert_ledger_consistent();
     }
 
     /// The signer signed but the transaction could not be finalized:
@@ -1156,15 +1419,15 @@ mod tests {
     fn finalization_failure_after_signing_is_unresolved_without_refund() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
-        fx.create(&token, "pay", 10_000);
+        let id = fx.create(&token, "pay", 10_000).id;
         let probe = SignerProbe::with(Fault::Corrupt);
-        let outcome = approve(&fx, "k-pay", &probe).unwrap();
+        let outcome = approve(&fx, &id, &probe).unwrap();
         let Outcome::Unresolved { txid, .. } = outcome else {
             panic!("expected unresolved, got {outcome:?}");
         };
         assert!(txid.is_some(), "the unsigned txid is known");
         assert_eq!(probe.counts(), (1, 1));
-        let request = fx.request("k-pay");
+        let request = fx.request(&id);
         assert_eq!(request.status(), "unresolved");
         assert!(request.state.may_have_signature());
         assert!(!request.is_approvable());
@@ -1175,15 +1438,20 @@ mod tests {
             vec!["request_received", "approved", "reserved", "failed"]
         );
         // Never a second signature, however the human asks.
-        let again = approve(&fx, "k-pay", &probe).unwrap_err();
+        let again = approve(&fx, &id, &probe).unwrap_err();
         assert!(again.to_string().contains("unresolved"), "{again:#}");
         assert_eq!(probe.counts(), (1, 1));
         list_reconciled(&fx.store, Network::Signet).unwrap();
-        assert_eq!(fx.request("k-pay").status(), "unresolved");
+        assert_eq!(fx.request(&id).status(), "unresolved");
         // The human closes it; the budget stays drawn.
-        dismiss(&fx.store, Network::Signet, "k-pay").unwrap();
-        assert_eq!(fx.request("k-pay").status(), "dismissed");
+        dismiss(&fx.store, Network::Signet, &id).unwrap();
+        assert_eq!(fx.request(&id).status(), "dismissed");
         assert!(fx.grant_state().spent_sat > 10_000);
+        list_reconciled(&fx.store, Network::Signet).unwrap();
+        assert!(
+            fx.grant_state().spent_sat > 10_000,
+            "dismissed keeps its draw"
+        );
     }
 
     /// The signer signed but left the PSBT unfinalized: a partial
@@ -1192,13 +1460,13 @@ mod tests {
     fn unfinalized_signature_is_unresolved_without_refund() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
-        fx.create(&token, "pay", 10_000);
+        let id = fx.create(&token, "pay", 10_000).id;
         let probe = SignerProbe::with(Fault::Unfinalized);
-        let outcome = approve(&fx, "k-pay", &probe).unwrap();
+        let outcome = approve(&fx, &id, &probe).unwrap();
         assert!(matches!(outcome, Outcome::Unresolved { .. }), "{outcome:?}");
-        assert_eq!(fx.request("k-pay").status(), "unresolved");
+        assert_eq!(fx.request(&id).status(), "unresolved");
         assert!(fx.grant_state().spent_sat > 10_000);
-        assert!(approve(&fx, "k-pay", &probe).is_err());
+        assert!(approve(&fx, &id, &probe).is_err());
         assert_eq!(probe.counts(), (1, 1));
     }
 
@@ -1208,20 +1476,20 @@ mod tests {
     fn transaction_persistence_failure_after_signing_is_unresolved() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
-        fx.create(&token, "pay", 10_000);
+        let id = fx.create(&token, "pay", 10_000).id;
         // A file where the transactions directory must be.
         std::fs::write(fx.dir.path().join("signet/transactions"), b"in the way").unwrap();
         let probe = SignerProbe::default();
-        let outcome = approve(&fx, "k-pay", &probe).unwrap();
+        let outcome = approve(&fx, &id, &probe).unwrap();
         let Outcome::Unresolved { txid, message } = outcome else {
             panic!("expected unresolved, got {outcome:?}");
         };
         assert!(message.contains("cannot save"), "{message}");
         assert!(txid.is_some());
         assert_eq!(probe.counts(), (1, 1));
-        assert_eq!(fx.request("k-pay").status(), "unresolved");
+        assert_eq!(fx.request(&id).status(), "unresolved");
         assert!(fx.grant_state().spent_sat > 10_000, "never refunded");
-        assert!(approve(&fx, "k-pay", &probe).is_err());
+        assert!(approve(&fx, &id, &probe).is_err());
         assert_eq!(probe.counts(), (1, 1), "never signs again");
     }
 
@@ -1232,15 +1500,15 @@ mod tests {
     fn broadcast_failure_is_broadcast_pending_and_never_signs_again() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
-        fx.create(&token, "pay", 10_000);
+        let id = fx.create(&token, "pay", 10_000).id;
         std::fs::write(fx.mockdata.join("broadcast-fail"), "provider down").unwrap();
         let probe = SignerProbe::default();
-        let outcome = approve(&fx, "k-pay", &probe).unwrap();
+        let outcome = approve(&fx, &id, &probe).unwrap();
         let Outcome::BroadcastPending { txid, .. } = outcome else {
             panic!("expected broadcast_pending, got {outcome:?}");
         };
         assert_eq!(probe.counts(), (1, 1));
-        let request = fx.request("k-pay");
+        let request = fx.request(&id);
         assert_eq!(request.status(), "broadcast_pending");
         assert!(request.state.has_signature());
         assert!(!request.is_approvable());
@@ -1258,7 +1526,7 @@ mod tests {
                 "broadcast_failed"
             ]
         );
-        let again = approve(&fx, "k-pay", &probe).unwrap_err();
+        let again = approve(&fx, &id, &probe).unwrap_err();
         assert!(
             again.to_string().contains("signed but not broadcast"),
             "{again:#}"
@@ -1272,31 +1540,202 @@ mod tests {
         let mut record = fx.store.load_transaction("signet", &txid).unwrap();
         crate::spend::broadcast_record(&fx.store, &mut ctx, &services, &mut record).unwrap();
         crate::request::settle_broadcast(&fx.store, Network::Signet, &txid).unwrap();
-        assert_eq!(fx.request("k-pay").status(), "sent");
+        assert_eq!(fx.request(&id).status(), "sent");
         assert_eq!(
             fx.grant_state().spent_sat,
             grant.spent_sat,
             "no second draw"
         );
+        fx.assert_ledger_consistent();
     }
 
-    // ---- crash recovery ------------------------------------------------
+    // ---- crash windows around the reservation --------------------------
 
-    /// Crash after `signing` reached disk, no transaction: the signer may
-    /// have run. Recovery makes it `unresolved`, refunds nothing, and
-    /// never signs again — repeatedly.
+    /// Window A: the process dies after deciding to reserve and before
+    /// the grant is written. Nothing is on disk; the retry draws once.
+    #[test]
+    fn crash_before_the_reservation_is_persisted_leaves_nothing_to_recover() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let probe = SignerProbe::default();
+        let err = approve_crashing_at(&fx, &id, &probe, "reserved").unwrap_err();
+        assert!(err.to_string().contains("simulated crash"), "{err:#}");
+        assert_eq!(probe.counts(), (0, 0));
+        let grant = fx.grant_state();
+        assert_eq!(grant.spent_sat, 0);
+        assert!(grant.reservations.is_empty());
+        assert_eq!(fx.request(&id).status(), "pending_approval");
+        assert_eq!(fx.events(), vec!["request_received"]);
+
+        let (_, fee_sat) = sent(approve(&fx, &id, &probe).unwrap());
+        assert_eq!(probe.counts(), (1, 1));
+        assert_eq!(fx.grant_state().spent_sat, 10_000 + fee_sat);
+        assert_eq!(fx.count_events("refunded"), 0);
+        fx.assert_ledger_consistent();
+    }
+
+    /// Window B: the reservation is durable, `signing` is not. The
+    /// record proves the signer was never invoked, so the next listing
+    /// returns the draw — once — and the retry draws once.
+    #[test]
+    fn crash_after_the_reservation_is_refunded_by_reconciliation() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let probe = SignerProbe::default();
+        approve_crashing_at(&fx, &id, &probe, "grant-saved").unwrap_err();
+        assert_eq!(probe.counts(), (0, 0));
+        let grant = fx.grant_state();
+        let orphan = grant.reservation(&id).expect("the draw is on disk");
+        assert_eq!(orphan.amount_sat, 10_000);
+        assert_eq!(grant.spent_sat, orphan.spend().total_sat());
+        assert_eq!(fx.request(&id).status(), "pending_approval");
+
+        list_reconciled(&fx.store, Network::Signet).unwrap();
+        let grant = fx.grant_state();
+        assert_eq!(grant.spent_sat, 0, "returned");
+        assert_eq!(grant.tx_count, 0);
+        assert!(grant.reservations.is_empty());
+        assert_eq!(fx.events(), vec!["request_received", "refunded"]);
+        // Again is a no-op: a refund happens once.
+        list_reconciled(&fx.store, Network::Signet).unwrap();
+        assert_eq!(fx.count_events("refunded"), 1);
+        assert_eq!(fx.grant_state().spent_sat, 0);
+
+        let (_, fee_sat) = sent(approve(&fx, &id, &probe).unwrap());
+        assert_eq!(probe.counts(), (1, 1));
+        let grant = fx.grant_state();
+        assert_eq!(grant.spent_sat, 10_000 + fee_sat);
+        assert_eq!(grant.tx_count, 1);
+        assert_eq!(grant.reservations.len(), 1);
+        assert_eq!(fx.count_events("refunded"), 1);
+        fx.assert_ledger_consistent();
+    }
+
+    /// Window B, retried straight away: the executor itself returns the
+    /// orphan before drawing again, so the accounting is exact without
+    /// a listing in between.
+    #[test]
+    fn crash_after_the_reservation_is_settled_by_the_retry_itself() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let probe = SignerProbe::default();
+        approve_crashing_at(&fx, &id, &probe, "grant-saved").unwrap_err();
+        assert!(fx.grant_state().spent_sat > 10_000);
+
+        let (_, fee_sat) = sent(approve(&fx, &id, &probe).unwrap());
+        assert_eq!(probe.counts(), (1, 1));
+        let grant = fx.grant_state();
+        assert_eq!(grant.spent_sat, 10_000 + fee_sat, "no double draw");
+        assert_eq!(grant.tx_count, 1);
+        assert_eq!(grant.reservations.len(), 1);
+        assert_eq!(fx.count_events("refunded"), 1);
+        assert_eq!(
+            fx.events(),
+            vec![
+                "request_received",
+                "refunded",
+                "approved",
+                "reserved",
+                "signed",
+                "broadcast"
+            ]
+        );
+        fx.assert_ledger_consistent();
+    }
+
+    /// The executor's own release runs under the lock, right before the
+    /// draw: an orphan for a different fee — a stale reservation a retry
+    /// would otherwise trip on as a mismatch — is returned rather than
+    /// refused, and the new draw is the only one.
+    #[test]
+    fn commit_releases_a_stale_draw_before_drawing_again() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let services = fx.services();
+        let Stage::Ready(staged) = stage(&fx.store, Network::Signet, &services, &id).unwrap()
+        else {
+            panic!("expected ready");
+        };
+        // A stale draw for a different fee appears after staging.
+        {
+            let _lock = fx.store.lock_grants("signet").unwrap();
+            let mut grant = fx.grant_state();
+            let stale = SpendRequest {
+                amount_sat: 10_000,
+                fee_sat: staged.spend.fee_sat + 1,
+            };
+            grant
+                .reserve_send(&id, ADDRESS, &stale, unix_now())
+                .unwrap();
+            fx.store.save_grant("signet", &grant).unwrap();
+        }
+        let probe = SignerProbe::default();
+        let outcome = commit(
+            &fx.store,
+            Network::Signet,
+            &services,
+            *staged,
+            probe.factory(),
+        )
+        .unwrap();
+        let (_, fee_sat) = sent(outcome);
+        let grant = fx.grant_state();
+        assert_eq!(grant.spent_sat, 10_000 + fee_sat);
+        assert_eq!(grant.reservations.len(), 1);
+        assert_eq!(grant.reservation(&id).unwrap().fee_sat, fee_sat);
+        assert_eq!(fx.count_events("refunded"), 1);
+        fx.assert_ledger_consistent();
+    }
+
+    /// Window C: reservation and `signing` are durable, then the process
+    /// dies. Even though this crash is before the signer was constructed,
+    /// nothing durable can tell — so the request is unresolved, the draw
+    /// stays, and nothing is signed.
+    #[test]
+    fn crash_after_signing_is_persisted_is_unresolved_never_refunded() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let probe = SignerProbe::default();
+        approve_crashing_at(&fx, &id, &probe, "signing-saved").unwrap_err();
+        assert_eq!(probe.counts(), (0, 0));
+        assert_eq!(fx.request(&id).status(), "signing");
+        let spent = fx.grant_state().spent_sat;
+        assert!(spent > 10_000);
+
+        let settled = list_reconciled(&fx.store, Network::Signet).unwrap();
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].status(), "unresolved");
+        let grant = fx.grant_state();
+        assert_eq!(grant.spent_sat, spent, "never refunded");
+        assert!(grant.reservation(&id).is_some());
+        assert_eq!(fx.events(), vec!["request_received", "failed"]);
+        list_reconciled(&fx.store, Network::Signet).unwrap();
+        assert_eq!(fx.grant_state().spent_sat, spent);
+        assert!(approve(&fx, &id, &probe).is_err());
+        assert_eq!(probe.counts(), (0, 0));
+        fx.assert_ledger_consistent();
+    }
+
+    /// Window C, fabricated the way an old record would look: `signing`
+    /// on disk with its draw on the grant, no transaction.
     #[test]
     fn crash_around_the_signer_is_unresolved_never_refunded_never_resigned() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
         let mut request = fx.create(&token, "pay", 10_000);
-        // Fabricate the crash: the grant drawn, the request signing.
         let mut grant = fx.grant_state();
         let spend = SpendRequest {
             amount_sat: 10_000,
             fee_sat: 300,
         };
-        grant.reserve_send(ADDRESS, &spend, unix_now()).unwrap();
+        grant
+            .reserve_send(&request.id, ADDRESS, &spend, unix_now())
+            .unwrap();
         fx.store.save_grant("signet", &grant).unwrap();
         request.state = RequestState::Signing {
             approved_at: unix_now(),
@@ -1317,8 +1756,147 @@ mod tests {
         assert_eq!(fx.grant_state().spent_sat, 10_300);
         assert_eq!(fx.events().len(), 2);
         let probe = SignerProbe::default();
-        assert!(approve(&fx, "k-pay", &probe).is_err());
+        assert!(approve(&fx, &request.id, &probe).is_err());
         assert_eq!(probe.counts(), (0, 0));
+    }
+
+    /// Window D: `failed` is durable, the refund is not. The record
+    /// proves the signer never ran, so the draw is returned once and the
+    /// retry draws once. Both recovery paths — a listing, or the retry
+    /// itself — give the same accounting.
+    #[test]
+    fn crash_between_failed_and_refund_is_refunded_exactly_once() {
+        for via_listing in [true, false] {
+            let fx = Fixture::new(&[100_000]);
+            let token = fx.grant(50_000, 5_000);
+            let id = fx.create(&token, "pay", 10_000).id;
+            let err = approve_with(&fx, &id, || bail!("no signer available"), "failed-saved")
+                .unwrap_err();
+            assert!(err.to_string().contains("simulated crash"), "{err:#}");
+            let grant = fx.grant_state();
+            assert!(
+                grant.reservation(&id).is_some(),
+                "the draw is still on disk"
+            );
+            assert!(grant.spent_sat > 10_000);
+            let request = fx.request(&id);
+            assert_eq!(request.status(), "failed");
+            assert!(request.is_approvable());
+            assert_eq!(
+                fx.events(),
+                vec!["request_received", "approved", "reserved", "failed"]
+            );
+
+            if via_listing {
+                list_reconciled(&fx.store, Network::Signet).unwrap();
+                let grant = fx.grant_state();
+                assert_eq!(grant.spent_sat, 0);
+                assert_eq!(grant.tx_count, 0);
+                assert!(grant.reservations.is_empty());
+                assert_eq!(fx.count_events("refunded"), 1);
+                list_reconciled(&fx.store, Network::Signet).unwrap();
+                assert_eq!(fx.count_events("refunded"), 1, "no double refund");
+            }
+
+            let probe = SignerProbe::default();
+            let (_, fee_sat) = sent(approve(&fx, &id, &probe).unwrap());
+            assert_eq!(probe.counts(), (1, 1));
+            let grant = fx.grant_state();
+            assert_eq!(
+                grant.spent_sat,
+                10_000 + fee_sat,
+                "via_listing={via_listing}"
+            );
+            assert_eq!(grant.tx_count, 1);
+            assert_eq!(grant.reservations.len(), 1);
+            assert_eq!(fx.count_events("refunded"), 1, "via_listing={via_listing}");
+            fx.assert_ledger_consistent();
+        }
+    }
+
+    /// Reconciliation returns only what it can prove unspent. Draws held
+    /// by requests that are signing, unresolved, dismissed, settled, or
+    /// unreadable all stay.
+    #[test]
+    fn reconciliation_keeps_every_draw_it_cannot_prove_unspent() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let ids: Vec<String> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|key| fx.create(&token, key, 1_000).id)
+            .collect();
+        let now = unix_now();
+        let spend = SpendRequest {
+            amount_sat: 1_000,
+            fee_sat: 100,
+        };
+        let states = [
+            RequestState::Signing {
+                approved_at: now,
+                fee_sat: 100,
+            },
+            RequestState::Unresolved {
+                at: now,
+                message: "?".into(),
+                txid: None,
+            },
+            RequestState::Dismissed { at: now },
+            RequestState::BroadcastPending {
+                txid: "ab".repeat(32),
+                fee_sat: 100,
+                at: now,
+            },
+        ];
+        let mut grant = fx.grant_state();
+        for (id, state) in ids.iter().zip(states) {
+            grant.reserve_send(id, ADDRESS, &spend, now).unwrap();
+            let mut request = fx.request(id);
+            request.state = state;
+            fx.store.save_agent_request("signet", &request).unwrap();
+        }
+        // And one draw whose record is unreadable.
+        grant
+            .reserve_send("r-00000000000000ff", ADDRESS, &spend, now)
+            .unwrap();
+        fx.store.save_grant("signet", &grant).unwrap();
+        let requests_dir = fx.dir.path().join("signet/agent-requests/claude");
+        std::fs::write(requests_dir.join("r-00000000000000ff.json"), b"torn").unwrap();
+
+        crate::request::reconcile_grant(&fx.store, "signet", "claude").unwrap();
+        let after = fx.grant_state();
+        assert_eq!(after.reservations.len(), 5);
+        assert_eq!(after.spent_sat, 5 * 1_100);
+        assert_eq!(after.tx_count, 5);
+        assert_eq!(fx.count_events("refunded"), 0);
+        // A listing settles the signing record to unresolved and still
+        // returns nothing.
+        list_reconciled(&fx.store, Network::Signet).unwrap();
+        assert_eq!(fx.request(&ids[0]).status(), "unresolved");
+        assert_eq!(fx.grant_state().spent_sat, 5 * 1_100);
+        assert_eq!(fx.count_events("refunded"), 0);
+    }
+
+    /// Dismissing a request that provably never reached the signer
+    /// returns its orphaned draw; nothing else does.
+    #[test]
+    fn dismiss_returns_an_orphaned_draw() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let probe = SignerProbe::default();
+        approve_crashing_at(&fx, &id, &probe, "grant-saved").unwrap_err();
+        assert!(fx.grant_state().spent_sat > 10_000);
+        dismiss(&fx.store, Network::Signet, &id).unwrap();
+        assert_eq!(fx.request(&id).status(), "dismissed");
+        let grant = fx.grant_state();
+        assert_eq!(grant.spent_sat, 0);
+        assert!(grant.reservations.is_empty());
+        assert_eq!(
+            fx.events(),
+            vec!["request_received", "refunded", "dismissed"]
+        );
+        list_reconciled(&fx.store, Network::Signet).unwrap();
+        assert_eq!(fx.count_events("refunded"), 1);
     }
 
     /// Crash after the signature was persisted: the request becomes
@@ -1328,19 +1906,18 @@ mod tests {
     fn crash_after_persisted_signature_reconciles_without_refund() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
-        fx.create(&token, "pay", 10_000);
+        let id = fx.create(&token, "pay", 10_000).id;
         // Run a real execution, then rewind the request to `signing`
         // as a crash between persisting the signature and settling would
         // leave it.
         std::fs::write(fx.mockdata.join("broadcast-fail"), "down").unwrap();
         let probe = SignerProbe::default();
-        let Outcome::BroadcastPending { txid, fee_sat, .. } =
-            approve(&fx, "k-pay", &probe).unwrap()
+        let Outcome::BroadcastPending { txid, fee_sat, .. } = approve(&fx, &id, &probe).unwrap()
         else {
             panic!("expected broadcast_pending");
         };
         let spent = fx.grant_state().spent_sat;
-        let mut request = fx.request("k-pay");
+        let mut request = fx.request(&id);
         request.state = RequestState::Signing {
             approved_at: unix_now(),
             fee_sat,
@@ -1355,7 +1932,7 @@ mod tests {
             spent,
             "never refund a signature"
         );
-        let again = approve(&fx, "k-pay", &probe).unwrap_err();
+        let again = approve(&fx, &id, &probe).unwrap_err();
         assert!(again.to_string().contains("signed but not broadcast"));
         assert_eq!(probe.counts(), (1, 1));
 
@@ -1371,28 +1948,21 @@ mod tests {
         let settled = list_reconciled(&fx.store, Network::Signet).unwrap();
         assert_eq!(settled[0].status(), "sent");
         assert_eq!(fx.grant_state().spent_sat, spent);
+        fx.assert_ledger_consistent();
     }
 
-    /// Request ids are agent-scoped: another agent's transaction with the
-    /// same client id must never settle this agent's request.
+    /// A transaction settles only the request it is fully attributed to:
+    /// agent, request id, and intent digest must all match.
     #[test]
     fn reconciliation_matches_the_full_attribution() {
         let fx = Fixture::new(&[100_000, 100_000]);
         let alice = fx.grant_for("alice", 50_000, 5_000);
         let bob = fx.grant_for("bob", 50_000, 5_000);
-        fx.create_as("alice", &alice, "pay", 10_000).unwrap();
-        fx.create_as("bob", &bob, "pay", 10_000).unwrap();
-        // Alice's request executes and leaves a transaction attributed to
-        // (alice, k-pay, alice's digest). Execute her by full id through
-        // the executor's own lookup by making bob's record temporarily
-        // unambiguous: approve alice first via a keyed stage on her id.
+        let alice_request = fx.create_as("alice", &alice, "pay", 10_000).unwrap();
+        let bob_request = fx.create_as("bob", &bob, "pay", 10_000).unwrap();
+        assert_ne!(alice_request.intent_digest, bob_request.intent_digest);
         let probe = SignerProbe::default();
         let services = fx.services();
-        // `find_agent_request` resolves exact ids across agents and
-        // refuses ambiguity, so drive alice's execution directly.
-        let alice_request = fx.request_of("alice", "k-pay");
-        let bob_request = fx.request_of("bob", "k-pay");
-        assert_ne!(alice_request.intent_digest, bob_request.intent_digest);
         // Simulate alice's completed execution: a persisted transaction
         // attributed to her request.
         let mut ctx = walletd::open(&fx.store, Network::Signet).unwrap();
@@ -1406,19 +1976,19 @@ mod tests {
         let mut psbt = prepared.psbt().clone();
         let mut signer = probe.factory()().unwrap();
         assert!(signer.sign(&mut psbt).unwrap());
-        let record = prepared
-            .into_transaction(psbt)
-            .unwrap()
-            .with_origin(TxOrigin {
-                surface: "agent".into(),
-                agent: Some("alice".into()),
-                request_id: Some("k-pay".into()),
-                intent_digest: Some(alice_request.intent_digest.clone()),
-            });
+        let mut record = prepared.into_transaction(psbt).unwrap();
+        // First attributed to bob's request id with alice's digest: two
+        // of three attributes is not attribution.
+        record = record.with_origin(TxOrigin {
+            surface: "agent".into(),
+            agent: Some("bob".into()),
+            request_id: Some(bob_request.id.clone()),
+            intent_digest: Some(alice_request.intent_digest.clone()),
+        });
         fx.store.save_transaction("signet", &record).unwrap();
 
-        // Bob's request was interrupted while signing. Alice's
-        // transaction shares his request id; it must not settle him.
+        // Bob's request was interrupted while signing. The record does
+        // not settle him.
         let mut bob_signing = bob_request.clone();
         bob_signing.state = RequestState::Signing {
             approved_at: unix_now(),
@@ -1426,15 +1996,23 @@ mod tests {
         };
         fx.store.save_agent_request("signet", &bob_signing).unwrap();
         list_reconciled(&fx.store, Network::Signet).unwrap();
-        let bob_after = fx.request_of("bob", "k-pay");
+        let bob_after = fx.request_of("bob", &bob_request.id);
         assert_eq!(
             bob_after.status(),
             "unresolved",
-            "not settled by alice's tx"
+            "not settled by a partial match"
         );
         assert_eq!(bob_after.state.txid(), None);
 
-        // And alice's own interrupted record does settle from it.
+        // Fully attributed to alice, the same record settles her.
+        record = record.with_origin(TxOrigin {
+            surface: "agent".into(),
+            agent: Some("alice".into()),
+            request_id: Some(alice_request.id.clone()),
+            intent_digest: Some(alice_request.intent_digest.clone()),
+        });
+        fx.store.save_transaction("signet", &record).unwrap();
+        // And alice's own interrupted record does settle from hers.
         let mut alice_signing = alice_request.clone();
         alice_signing.state = RequestState::Signing {
             approved_at: unix_now(),
@@ -1444,7 +2022,7 @@ mod tests {
             .save_agent_request("signet", &alice_signing)
             .unwrap();
         list_reconciled(&fx.store, Network::Signet).unwrap();
-        let alice_after = fx.request_of("alice", "k-pay");
+        let alice_after = fx.request_of("alice", &alice_request.id);
         assert_eq!(alice_after.status(), "broadcast_pending");
         assert_eq!(alice_after.state.txid(), Some(record.txid.as_str()));
         // Settling the broadcast is attribution-checked the same way.
@@ -1452,11 +2030,49 @@ mod tests {
         tx.mark_broadcast();
         fx.store.save_transaction("signet", &tx).unwrap();
         crate::request::settle_broadcast(&fx.store, Network::Signet, &record.txid).unwrap();
-        assert_eq!(fx.request_of("alice", "k-pay").status(), "sent");
-        assert_eq!(fx.request_of("bob", "k-pay").status(), "unresolved");
+        assert_eq!(fx.request_of("alice", &alice_request.id).status(), "sent");
+        assert_eq!(fx.request_of("bob", &bob_request.id).status(), "unresolved");
     }
 
     // ---- boundaries at execution --------------------------------------
+
+    /// The grant is re-read under the lock at commit: a boundary
+    /// tightened between the review and the authorization refuses, with
+    /// nothing drawn and no signer constructed.
+    #[test]
+    fn commit_rechecks_the_grant_under_the_lock_before_signing() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let services = fx.services();
+        let Stage::Ready(staged) = stage(&fx.store, Network::Signet, &services, &id).unwrap()
+        else {
+            panic!("expected ready");
+        };
+        {
+            let _lock = fx.store.lock_grants("signet").unwrap();
+            let mut grant = fx.grant_state();
+            grant.mode = GrantMode::Observe;
+            fx.store.save_grant("signet", &grant).unwrap();
+        }
+        let probe = SignerProbe::default();
+        let outcome = commit(
+            &fx.store,
+            Network::Signet,
+            &services,
+            *staged,
+            probe.factory(),
+        )
+        .unwrap();
+        assert_eq!(outcome, Outcome::Denied(DenyReason::ObserveOnly));
+        assert_eq!(probe.counts(), (0, 0));
+        assert_eq!(fx.request(&id).status(), "denied");
+        let grant = fx.grant_state();
+        assert_eq!(grant.spent_sat, 0);
+        assert!(grant.reservations.is_empty());
+        assert_eq!(fx.transactions(), 0);
+        assert_eq!(fx.events(), vec!["request_received", "denied"]);
+    }
 
     /// The real fee can cross a boundary the amount alone did not: the
     /// grant refuses at execution, nothing is drawn, nothing is signed.
@@ -1464,15 +2080,15 @@ mod tests {
     fn real_fee_over_the_cap_is_denied_at_execution() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 1);
-        fx.create(&token, "pay", 10_000);
+        let id = fx.create(&token, "pay", 10_000).id;
         let probe = SignerProbe::default();
-        let outcome = approve(&fx, "k-pay", &probe).unwrap();
+        let outcome = approve(&fx, &id, &probe).unwrap();
         assert!(
             matches!(outcome, Outcome::Denied(DenyReason::OverMaxFee { .. })),
             "{outcome:?}"
         );
         assert_eq!(probe.counts(), (0, 0));
-        let request = fx.request("k-pay");
+        let request = fx.request(&id);
         assert_eq!(request.status(), "denied");
         assert!(!request.is_approvable());
         assert_eq!(fx.grant_state().spent_sat, 0);
@@ -1483,13 +2099,13 @@ mod tests {
     fn dismiss_moves_a_pending_request_and_refuses_settled_ones() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
-        fx.create(&token, "pay", 10_000);
-        let dismissed = dismiss(&fx.store, Network::Signet, "k-pay").unwrap();
+        let id = fx.create(&token, "pay", 10_000).id;
+        let dismissed = dismiss(&fx.store, Network::Signet, &id).unwrap();
         assert_eq!(dismissed.status(), "dismissed");
         assert_eq!(fx.events(), vec!["request_received", "dismissed"]);
-        assert!(dismiss(&fx.store, Network::Signet, "k-pay").is_err());
+        assert!(dismiss(&fx.store, Network::Signet, &id).is_err());
         let probe = SignerProbe::default();
-        assert!(approve(&fx, "k-pay", &probe).is_err());
+        assert!(approve(&fx, &id, &probe).is_err());
         assert_eq!(probe.counts(), (0, 0));
     }
 
@@ -1499,13 +2115,13 @@ mod tests {
     fn sync_failure_leaves_the_request_pending() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
-        fx.create(&token, "pay", 10_000);
+        let id = fx.create(&token, "pay", 10_000).id;
         std::fs::write(fx.mockdata.join("sync-error"), "offline").unwrap();
         let probe = SignerProbe::default();
-        let err = approve(&fx, "k-pay", &probe).unwrap_err();
+        let err = approve(&fx, &id, &probe).unwrap_err();
         assert!(err.to_string().contains("stale state"), "{err:#}");
         assert_eq!(probe.counts(), (0, 0));
-        assert_eq!(fx.request("k-pay").status(), "pending_approval");
+        assert_eq!(fx.request(&id).status(), "pending_approval");
         assert_eq!(fx.grant_state().spent_sat, 0);
         drop(fx.dir);
     }

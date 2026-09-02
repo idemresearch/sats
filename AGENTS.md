@@ -148,17 +148,31 @@ and rendering belong to callers.
 - Persist finalized transaction hex before attempting broadcast, in the
   process that produced the signature. Do not persist a signed PSBT for a
   fully finalized single-sig send.
-- The irreversible boundary is the signer invocation. `signing` is
-  persisted before the signer runs; from then on only the signer's own
-  report that no signature was produced permits a refund (`failed`,
-  re-approvable). Any other failure or crash after `signing` is
-  `unresolved`: never refund, never sign again automatically. `sent` and
-  `broadcast_pending` mean a persisted signature — only rebroadcast. A
-  `signing` record is reconciled from the transaction attributed to it
-  (agent, request id, intent digest), never guessed.
-- A request records the `token_id` of the grant that created it and
-  executes only under that instance; creation holds the grant lock so a
-  revoke or re-issue cannot interleave.
+- The irreversible boundary is the invocation of `Signer::sign`.
+  `signing` is persisted before the signer runs. A refund is permitted
+  only before that invocation (audit append, signer construction), when
+  the executing process knows no signature exists; from the invocation
+  on, nothing the signer reports is trusted to mean "no signature" — an
+  error, an unfinalized result, a finalization or persistence failure,
+  or a crash is `unresolved`: never refund, never sign again
+  automatically. `failed` is re-approvable only because it is provable
+  that `Signer::sign` was never invoked. `sent` and `broadcast_pending`
+  mean a persisted signature — only rebroadcast. A `signing` record is
+  reconciled from the transaction attributed to it (agent, request id,
+  intent digest), never guessed.
+- Budget is drawn on a per-request ledger on the grant, updated in the
+  same atomic write as the totals: one draw per request id, a repeat
+  with the same spend draws nothing, a different spend fails closed, and
+  a refund happens exactly once. A draw is returned only when the
+  durable record proves the signer was never invoked (`pending_approval`,
+  `failed`, `denied`); every other draw stays. Never solve a crash
+  window by accepting a leaked or double-counted budget.
+- Request ids are global (`r-` + 16 hex). A keyed filing derives its id
+  from the grant id, the agent, and the client key; the client key is
+  never the id. A request records the `grant_id` (128 random bits) of
+  the grant that created it and executes only under that instance;
+  creation holds the grant lock so a revoke or re-issue cannot
+  interleave.
 - A grant carries no key material. Never reintroduce a field from which a
   seed can be recovered; only a token hash belongs beside a policy.
 - A bearer token is emitted once, at creation, and never persisted.
