@@ -290,7 +290,7 @@ sats agent log --request k-big-1
 
 `requests` shows each request's id, agent, recipient, amount, status, and
 age; `--json` returns the full records. Listing also settles any request
-a crashed approve left `executing` (see below). A request is in exactly
+a crashed approve left `signing` (see below). A request is in exactly
 one state:
 
 | Status | Meaning |
@@ -298,10 +298,11 @@ one state:
 | `pending_approval` | Inside the grant; awaiting your decision |
 | `denied` | Outside a grant boundary, at filing or at execution; terminal |
 | `dismissed` | You declined it; terminal |
-| `executing` | You authorized it and sats is signing |
+| `signing` | You authorized it, the budget is reserved, and the signer is being invoked |
 | `sent` | Broadcast; carries the txid |
 | `broadcast_pending` | Signed and saved, not broadcast; `sats tx broadcast <txid>` settles it |
-| `failed` | Stopped before any signature; refunded; can be approved again |
+| `unresolved` | The signer was invoked and the outcome could not be made durable: a signature may exist. Never refunded, never signed again; you resolve it |
+| `failed` | Stopped before any signature could exist; refunded; can be approved again |
 
 `log` renders one line per event — received, denied, approved, dismissed,
 reserved, signed, broadcast, refunded, failed — and `--request` accepts
@@ -330,30 +331,39 @@ transaction on current chain state, derives what the prepared transaction
 actually pays from the wallet's own descriptors and refuses if that
 disagrees with the recorded request, re-runs the grant's boundaries with
 the real fee, and shows you the recipient, amount, fee, total, and
-remaining budget. It then asks for confirmation (`--yes` skips the
-prompt, not the password) and for the wallet password: the prompt is the
-authorization, and the key it unseals exists only for this one
-execution. Under the grant lock it reserves the budget and records the
-request as `executing` before any signature exists, then signs, saves the
-finalized transaction, and broadcasts.
+remaining budget — with `--json`, on stderr, so the review always reaches
+you while stdout stays the machine-readable result. It then asks for
+confirmation (`--yes` skips the prompt, not the password) and for the
+wallet password: the prompt is the authorization, and the key it unseals
+exists only for this one execution. Under the grant lock it reserves the
+budget and records the request as `signing` *before* the signer is
+invoked, then signs, saves the finalized transaction, and broadcasts.
 
-A request outside the grant's current boundaries — an amount above the
-cap, a fee above the fee cap, a recipient off the allowlist, a revoked or
-expired grant — is refused before the password and recorded as `denied`;
-the only escalation is changing the grant. If signing fails, nothing was
-signed: the reservation is refunded, the request is `failed`, and you may
-approve it again. If broadcast fails after signing, the request is
-`broadcast_pending`: the signed transaction is saved, the reservation is
-final, the request is never signed again, and `sats tx broadcast <txid>`
-retries it. `dismiss` declines a pending request without a password:
-reducing authority stays cheap. Both accept a request id or unique
-prefix and support `--json`.
+A request executes only under the grant that created it. A request
+outside that grant's current boundaries — an amount above the cap, a fee
+above the fee cap, a recipient off the allowlist — or whose grant has
+been revoked, expired, or re-issued, is refused before the password and
+recorded as `denied`; the only escalation is a new request under a new
+grant. If the signer reports that no signature was produced, the
+reservation is refunded, the request is `failed`, and you may approve it
+again. Once the signer has been invoked, any other failure — the signed
+transaction could not be finalized or saved — leaves the request
+`unresolved`: a signature may exist, so the reservation stands and sats
+will not sign it again; check `sats status`, then dismiss it. If broadcast
+fails after signing, the request is `broadcast_pending`: the signed
+transaction is saved, the reservation is final, the request is never
+signed again, and `sats tx broadcast <txid>` retries it. `dismiss`
+declines a pending, failed, or unresolved request without a password:
+reducing authority stays cheap, and dismissing an unresolved request
+never refunds. Both accept a request id or unique prefix and support
+`--json`.
 
-If an approve is interrupted after reserving budget, the next listing or
-approve reconciles the record: a saved transaction attributed to the
-request means a signature exists and the request becomes
-`broadcast_pending` or `sent`; none means nothing durable was signed, the
-reservation is refunded, and the request becomes `failed`.
+If an approve is interrupted after `signing` was recorded, the next
+listing or approve reconciles the record from the durable truth: a saved
+transaction attributed to the request (same agent, id, and intent) means
+a signature exists and the request becomes `broadcast_pending` or
+`sent`; none means the signer may or may not have run, and the request
+becomes `unresolved` with nothing refunded.
 
 ## Alkanes contract tools
 

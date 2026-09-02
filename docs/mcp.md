@@ -143,9 +143,10 @@ and another agent's requests are never visible.
 | `pending_approval` | Inside the grant; awaiting the human | Relay the id; observe |
 | `denied` | Outside a grant boundary (`reason`); terminal | Report once; stop |
 | `dismissed` | The human declined; terminal | Stop; ask the human before proposing again |
-| `executing` | The human authorized it; sats is signing and broadcasting | Observe |
+| `signing` | The human authorized it; sats is signing and broadcasting | Observe |
 | `sent` | Broadcast; carries `txid` | Done |
 | `broadcast_pending` | Signed and persisted; the broadcast failed. The human retries it | Nothing |
+| `unresolved` | The signer was invoked and the outcome is not durable; a signature may exist. The human resolves it | Nothing; do not file it again |
 | `failed` | Execution stopped before any signature; the human may authorize again | Observe |
 
 `error` is not a request state: it is a typed operational condition on the
@@ -172,6 +173,7 @@ call itself, with an `error_code` and no record written.
 | `over_budget` | Amount plus fee exceeds remaining budget |
 | `amount_overflow` | Amount plus fee overflows |
 | `observe_only` | The grant is observe-only |
+| `revoked` | The grant that created the request was revoked or re-issued; a request never executes under another grant |
 | `recipient_not_allowed` | The recipient is outside the grant's standing allowlist |
 
 Every reason is a grant boundary. An agent should report it to its human
@@ -191,15 +193,19 @@ does not rely on the agent relaying its own status) and runs
 3. re-runs the grant's ladder with the real fee, and shows the human the
    recipient, amount, fee, and total;
 4. takes the wallet password — the authorization — and, under the grant
-   lock, reserves the budget and persists the request as `executing`
-   before any signature exists;
+   lock, checks that the grant on file is the one that created the
+   request, reserves the budget, and persists the request as `signing`
+   before the signer is invoked;
 5. signs, persists the finalized transaction, and broadcasts.
 
-A signing failure refunds the reservation and leaves the request `failed`,
-which the human may authorize again. A broadcast failure after signing is
-`broadcast_pending`: the reservation is final, the request is never
-signed again, and `sats tx broadcast <txid>` settles it to `sent`.
-`sats agent dismiss <id>` declines a pending request.
+A signer that reports no signature refunds the reservation and leaves the
+request `failed`, which the human may authorize again. Once the signer
+has been invoked, any other failure leaves the request `unresolved`: a
+signature may exist, nothing is refunded, and sats never signs it again.
+A broadcast failure after signing is `broadcast_pending`: the reservation
+is final, the request is never signed again, and `sats tx broadcast
+<txid>` settles it to `sent`. `sats agent dismiss <id>` declines a
+pending request.
 
 Provider HTTP requests time out after 30 seconds each; those limits apply
 to the human's approve command, not to the served process, which never
@@ -212,10 +218,12 @@ sats agent list
 sats agent revoke claude
 ```
 
-The grant is re-read at every filing and again under the grant lock at
-execution, so revocation takes effect on the next call without restarting
-the MCP client, and a pending request whose grant is gone cannot execute.
-A transaction signed before revocation remains valid.
+Every request records the grant instance that created it and executes
+only under that instance. Revocation takes effect on the next call
+without restarting the MCP client, and a pending request whose grant was
+revoked or re-issued is `denied` with reason `revoked` when a human tries
+to approve it — a new grant for the same agent never inherits old
+requests. A transaction signed before revocation remains valid.
 
 Expired grants cannot start a new MCP server and are removed when discovered
 by grant-listing and startup paths. Re-issuing a grant mints a new token, so

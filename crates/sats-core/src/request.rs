@@ -10,13 +10,18 @@
 //! The state machine, with the signature boundary explicit:
 //!
 //! ```text
-//! create ─► pending_approval ─approve─► executing ─► sent
+//! create ─► pending_approval ─approve─► signing ─► sent
 //!                 │                        ├─► broadcast_pending  (signed; never signs again)
-//!                 │                        ├─► failed             (nothing signed; refunded)
-//!                 │                        └─► denied             (real-fee ladder)
+//!                 │                        ├─► unresolved         (a signature may exist; a human resolves)
+//!                 │                        ├─► failed             (signer reported no signature; refunded)
+//!                 │                        └─► denied             (real-fee ladder, or the grant is gone)
 //!                 ├─dismiss─► dismissed
 //!                 └─(hard boundary at creation)─► denied
 //! ```
+//!
+//! `signing` is persisted *before* the signer is invoked. Observing it on
+//! disk therefore means the signer may have run: recovery never refunds
+//! and never signs again from that state.
 
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +42,11 @@ pub struct AgentRequest {
     pub id: String,
     pub network: String,
     pub agent: String,
+    /// `token_id` of the grant instance that created this request. A
+    /// request executes only under that exact grant: revoking or
+    /// re-issuing the grant makes every request filed under it
+    /// non-executable.
+    pub grant_token_id: String,
     /// The idempotency key exactly as the client supplied it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_request_id: Option<String>,
@@ -55,26 +65,34 @@ pub struct AgentRequest {
 
 /// The lifecycle states. Whether a signed transaction exists is
 /// structural: only `Sent` and `BroadcastPending` carry a txid, and a
-/// request in either state must never be signed again.
+/// request in either state must never be signed again. `Signing` and
+/// `Unresolved` mean a signature *may* exist; they are never refunded and
+/// never signed again automatically either.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum RequestState {
     /// Inside every grant boundary; awaiting a human decision.
     PendingApproval,
-    /// A grant boundary refused it — at creation (fee unknown) or at
-    /// execution (real fee). Terminal: no approval lifts a boundary.
+    /// A grant boundary refused it — at creation (fee unknown), at
+    /// execution (real fee), or because the grant that created it is
+    /// gone. Terminal: no approval lifts a boundary.
     Denied { deny: DenyReason, at: u64 },
     /// The human declined. Terminal.
     Dismissed { at: u64 },
-    /// A human authorized it and the budget is reserved; a signature is
-    /// in progress. Carries what the reservation drew and which grant
-    /// it drew from, so an interrupted execution can be reconciled.
-    Executing {
-        approved_at: u64,
-        /// The fee the reservation was made with (amount is on the record).
-        fee_sat: u64,
-        /// `token_id` of the grant the reservation was drawn from.
-        grant_token_id: String,
+    /// A human authorized it, the budget is reserved, and the signer is
+    /// about to be — or has been — invoked. Persisted before the signer
+    /// runs, so on disk it is the irreversible boundary. Carries the fee
+    /// the reservation was made with (amount is on the record).
+    Signing { approved_at: u64, fee_sat: u64 },
+    /// Execution stopped at or after the signer and no persisted
+    /// transaction settled it: a signature may exist. sats never refunds
+    /// and never signs again from here; a human resolves it. Carries the
+    /// transaction id when it was known.
+    Unresolved {
+        at: u64,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        txid: Option<String>,
     },
     /// Signed and broadcast. Terminal.
     Sent { txid: String, fee_sat: u64, at: u64 },
@@ -82,9 +100,10 @@ pub enum RequestState {
     /// the signer is never invoked again; only rebroadcasting the
     /// existing transaction settles it to `Sent`.
     BroadcastPending { txid: String, fee_sat: u64, at: u64 },
-    /// Execution stopped before a durable signature existed. Nothing was
-    /// signed and the reservation was refunded; a human may authorize
-    /// again or dismiss.
+    /// Execution stopped before any signature could exist — the signer
+    /// reported an error, or the process failed before invoking it — and
+    /// the reservation was refunded. A human may authorize again or
+    /// dismiss.
     Failed { message: String, at: u64 },
 }
 
@@ -95,16 +114,17 @@ impl RequestState {
             RequestState::PendingApproval => "pending_approval",
             RequestState::Denied { .. } => "denied",
             RequestState::Dismissed { .. } => "dismissed",
-            RequestState::Executing { .. } => "executing",
+            RequestState::Signing { .. } => "signing",
+            RequestState::Unresolved { .. } => "unresolved",
             RequestState::Sent { .. } => "sent",
             RequestState::BroadcastPending { .. } => "broadcast_pending",
             RequestState::Failed { .. } => "failed",
         }
     }
 
-    /// Whether a signed transaction exists for this request. Once true
-    /// it stays true: such a request is never signed again and its
-    /// reservation is never refunded.
+    /// Whether a signed transaction is known to exist for this request.
+    /// Once true it stays true: such a request is never signed again and
+    /// its reservation is never refunded.
     pub fn has_signature(&self) -> bool {
         matches!(
             self,
@@ -112,12 +132,24 @@ impl RequestState {
         )
     }
 
-    /// The signed transaction's id, when one exists.
+    /// Whether a signature may exist: the signer may have been invoked
+    /// and nothing durable settled the outcome. Never refund, never sign
+    /// again, automatically.
+    pub fn may_have_signature(&self) -> bool {
+        self.has_signature()
+            || matches!(
+                self,
+                RequestState::Signing { .. } | RequestState::Unresolved { .. }
+            )
+    }
+
+    /// The signed transaction's id, when one is known.
     pub fn txid(&self) -> Option<&str> {
         match self {
             RequestState::Sent { txid, .. } | RequestState::BroadcastPending { txid, .. } => {
                 Some(txid)
             }
+            RequestState::Unresolved { txid, .. } => txid.as_deref(),
             _ => None,
         }
     }
@@ -143,7 +175,7 @@ impl AgentRequest {
 
     /// Whether a human may authorize execution from this state: a
     /// pending request, or one whose earlier execution stopped before
-    /// any signature existed.
+    /// any signature could exist.
     pub fn is_approvable(&self) -> bool {
         matches!(
             self.state,
@@ -151,10 +183,12 @@ impl AgentRequest {
         )
     }
 
-    /// Whether a human may dismiss it: anything still awaiting a decision
-    /// or safely re-approvable.
+    /// Whether a human may dismiss it: anything awaiting a decision,
+    /// re-approvable, or unresolved. Dismissing an unresolved request
+    /// closes it without a refund — the budget stays drawn, because a
+    /// signature may exist.
     pub fn is_dismissable(&self) -> bool {
-        self.is_approvable()
+        self.is_approvable() || matches!(self.state, RequestState::Unresolved { .. })
     }
 
     pub fn status(&self) -> &'static str {
@@ -172,6 +206,7 @@ mod tests {
             id: "k-job-1".into(),
             network: "signet".into(),
             agent: "claude".into(),
+            grant_token_id: "t1".into(),
             client_request_id: Some("job-1".into()),
             recipient: "tb1pexample".into(),
             amount_sat: 25_000,
@@ -198,6 +233,7 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["status"], "denied");
         assert_eq!(json["deny"]["reason"], "over_max_tx");
+        assert_eq!(json["grant_token_id"], "t1");
         assert!(json.get("state").is_none(), "the state is flattened");
         let back: AgentRequest = serde_json::from_value(json).unwrap();
         assert_eq!(back.id, "k-job-1");
@@ -232,24 +268,39 @@ mod tests {
             message: "signing failed".into(),
             at: 1,
         };
-        let executing = RequestState::Executing {
+        let signing = RequestState::Signing {
             approved_at: 1,
             fee_sat: 100,
-            grant_token_id: "t".into(),
+        };
+        let unresolved = RequestState::Unresolved {
+            at: 1,
+            message: "m".into(),
+            txid: None,
         };
         assert!(sent.has_signature());
         assert!(pending_broadcast.has_signature());
         assert_eq!(pending_broadcast.txid(), Some("ab"));
         assert!(!failed.has_signature());
-        assert!(!executing.has_signature());
+        assert!(!signing.has_signature());
+        assert!(!unresolved.has_signature());
         assert!(!denied().has_signature());
-        assert!(!RequestState::PendingApproval.has_signature());
+        // Signing and unresolved may carry a signature: never refunded,
+        // never signed again automatically.
+        assert!(signing.may_have_signature());
+        assert!(unresolved.may_have_signature());
+        assert!(sent.may_have_signature());
+        assert!(!failed.may_have_signature());
+        assert!(!RequestState::PendingApproval.may_have_signature());
         // Only the no-signature stop is re-approvable.
         assert!(request(failed).is_approvable());
         assert!(!request(sent).is_approvable());
         assert!(!request(pending_broadcast).is_approvable());
-        assert!(!request(executing).is_approvable());
+        assert!(!request(signing.clone()).is_approvable());
+        assert!(!request(unresolved.clone()).is_approvable());
         assert!(!request(RequestState::Dismissed { at: 2 }).is_approvable());
+        // Unresolved can be closed by a human, never re-signed.
+        assert!(request(unresolved).is_dismissable());
+        assert!(!request(signing).is_dismissable());
     }
 
     #[test]
@@ -258,10 +309,14 @@ mod tests {
             RequestState::PendingApproval,
             denied(),
             RequestState::Dismissed { at: 2 },
-            RequestState::Executing {
+            RequestState::Signing {
                 approved_at: 3,
                 fee_sat: 100,
-                grant_token_id: "t".into(),
+            },
+            RequestState::Unresolved {
+                at: 3,
+                message: "m".into(),
+                txid: Some("ab".into()),
             },
             RequestState::Sent {
                 txid: "ab".into(),
@@ -294,6 +349,7 @@ mod tests {
         // Files without the field default to the current version.
         let json = serde_json::json!({
             "id": "r-abc", "network": "signet", "agent": "a",
+            "grant_token_id": "t1",
             "recipient": "tb1p", "amount_sat": 1,
             "intent_digest": "d", "created_at": 0, "updated_at": 0,
             "status": "pending_approval",
@@ -302,10 +358,11 @@ mod tests {
         assert!(back.version_supported());
     }
 
-    /// Pre-release contract: a record in the retired outcome/approval
-    /// shape does not parse, and is never migrated.
+    /// Pre-release contract: a record in a retired shape — the
+    /// outcome/approval shape, or one not bound to a grant instance —
+    /// does not parse, and is never migrated.
     #[test]
-    fn retired_record_shape_does_not_parse() {
+    fn retired_record_shapes_do_not_parse() {
         let json = serde_json::json!({
             "id": "k-old", "network": "signet", "agent": "a",
             "recipient": "tb1p", "amount_sat": 1,
@@ -313,5 +370,15 @@ mod tests {
             "outcome": {"status": "denied", "deny": {"reason": "ask_required"}, "resolved_at": 1},
         });
         assert!(serde_json::from_value::<AgentRequest>(json).is_err());
+        let unbound = serde_json::json!({
+            "id": "k-old", "network": "signet", "agent": "a",
+            "recipient": "tb1p", "amount_sat": 1,
+            "intent_digest": "d", "created_at": 0, "updated_at": 0,
+            "status": "pending_approval",
+        });
+        assert!(
+            serde_json::from_value::<AgentRequest>(unbound).is_err(),
+            "a request must name the grant that created it"
+        );
     }
 }

@@ -188,7 +188,7 @@ sequenceDiagram
     C->>P: sync, guards, fee estimate
     C->>E: prepare PSBT; derive what it pays; ladder with the real fee
     C-->>H: recipient, amount, fee, total; password
-    C->>S: under the grant lock: reserve budget, then record executing
+    C->>S: under the grant lock: check the grant instance, reserve budget, then record signing
     C->>E: construct the signer, sign, finalize
     C->>S: save the attributed transaction (before broadcast)
     C->>P: broadcast
@@ -197,19 +197,21 @@ sequenceDiagram
 
 The grant is re-read under the lock before the reservation, so revocation
 or a tightened boundary between the review and the password still
-refuses. The reservation and the `executing` record are persisted before
+refuses, and a request executes only under the grant instance that
+created it. The reservation and the `signing` record are persisted before
 the signer is constructed, so no denied or unauthorized request can reach
-it. Budget is refunded only while no durable signature exists: a signing
-failure or a crash before the transaction record is saved. Once the
-record exists the reservation is final, the request is never signed
-again, and a failed broadcast leaves `broadcast_pending` for
-`sats tx broadcast` to settle.
+it. Budget is refunded only before the signer is invoked, or when the
+signer itself reports that no signature was produced. Any other failure
+after the signer ran leaves `unresolved`: never refunded, never signed
+again. Once the transaction record exists the reservation is final, the
+request is never signed again, and a failed broadcast leaves
+`broadcast_pending` for `sats tx broadcast` to settle.
 
-An `executing` record left by a dead process is reconciled by the next
+A `signing` record left by a dead process is reconciled by the next
 listing or approve from the durable truth: a transaction attributed to
-the request (`origin.request_id`) means `broadcast_pending` or `sent`;
-none means `failed`, with the reservation refunded on the grant it was
-drawn from.
+the request (`origin` agent, request id, and intent digest all match)
+means `broadcast_pending` or `sent`; none means `unresolved`, with
+nothing refunded.
 
 Every transition — received, denied, approved, dismissed, reserved,
 signed, broadcast, refunded, failed — appends to the per-network event

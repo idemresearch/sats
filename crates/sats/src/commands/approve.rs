@@ -27,33 +27,45 @@ pub fn run(
         Stage::Denied(request, reason) => return report_denied(&request.id, &reason, json),
     };
 
-    if !json {
-        let rows = vec![
-            ("Approve", staged.request.id.clone()),
-            ("Agent", staged.request.agent.clone()),
-            ("Recipient", staged.request.recipient.clone()),
-            (
-                "Amount",
-                format!("{} sat", format_sats(staged.spend.amount_sat)),
+    // The human reviews the real transaction before authorizing it, in
+    // every mode. With --json, stdout stays a machine-readable result and
+    // the review goes to stderr, the human's channel.
+    let rows = vec![
+        ("Approve", staged.request.id.clone()),
+        ("Agent", staged.request.agent.clone()),
+        ("Recipient", staged.request.recipient.clone()),
+        (
+            "Amount",
+            format!("{} sat", format_sats(staged.spend.amount_sat)),
+        ),
+        ("Fee", format!("{} sat", format_sats(staged.spend.fee_sat))),
+        (
+            "Total",
+            format!("{} sat", format_sats(staged.spend.total_sat())),
+        ),
+        (
+            "Budget",
+            format!(
+                "{} sat remaining after this",
+                format_sats(
+                    staged
+                        .grant
+                        .remaining_sat()
+                        .saturating_sub(staged.spend.total_sat())
+                )
             ),
-            ("Fee", format!("{} sat", format_sats(staged.spend.fee_sat))),
-            (
-                "Total",
-                format!("{} sat", format_sats(staged.spend.total_sat())),
-            ),
-            (
-                "Budget",
-                format!(
-                    "{} sat remaining after this",
-                    format_sats(
-                        staged
-                            .grant
-                            .remaining_sat()
-                            .saturating_sub(staged.spend.total_sat())
-                    )
-                ),
-            ),
-        ];
+        ),
+    ];
+    if json {
+        ui::kv_rows_stderr(&rows);
+        if network == Network::Bitcoin {
+            eprintln!("! mainnet approval — this signs and broadcasts real bitcoin");
+        }
+        if !yes && !ui::confirm_stderr("Approve and sign?", true)? {
+            eprintln!("aborted — the request stays pending");
+            return Ok(());
+        }
+    } else {
         ui::kv_rows(&rows);
         if network == Network::Bitcoin {
             ui::warn("mainnet approval — this signs and broadcasts real bitcoin");
@@ -120,6 +132,25 @@ pub fn run(
                 Ok(())
             } else {
                 anyhow::bail!("{message}")
+            }
+        }
+        Outcome::Unresolved { txid, message } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": request_id,
+                        "status": "unresolved",
+                        "txid": txid,
+                        "message": message,
+                    })
+                );
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "{message} — the request is unresolved: sats will not sign it again or \
+                     refund it; check sats status, then dismiss it"
+                )
             }
         }
         Outcome::Failed { message } => {

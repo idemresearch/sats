@@ -572,11 +572,27 @@ fn revocation_takes_effect_mid_session() {
     let grant = mcp.call_tool(4, "get_grant", serde_json::json!({}));
     assert_eq!(grant["active"], false);
     assert_eq!(mcp.check_request(5, "before")["status"], "pending_approval");
-    // The pending request cannot execute without its grant.
+    // The pending request cannot execute without its grant: it is bound
+    // to the revoked instance and becomes denied.
     let output = sats_output(&dir, &["agent", "approve", "k-before", "--yes"]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("no active grant"));
-    assert_eq!(event_kinds(&dir), ["request_received"]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("revoked"));
+    assert_eq!(mcp.check_request(6, "before")["status"], "denied");
+    assert_eq!(mcp.check_request(7, "before")["reason"], "revoked");
+    assert_eq!(event_kinds(&dir), ["request_received", "denied"]);
+
+    // A re-issued grant for the same agent never executes the old request.
+    let fresh = grant_token(&dir, "claude", &["--budget", "50000"]);
+    let output = sats_output(&dir, &["agent", "approve", "k-before", "--yes"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("denied revoked"));
+    assert_eq!(spent_sat(&dir), 0);
+    let mut fresh_mcp = McpSession::start(&dir, "claude", &fresh);
+    handshake(&mut fresh_mcp);
+    assert_eq!(
+        fresh_mcp.request_send(2, 1_000, "after")["status"],
+        "pending_approval"
+    );
 }
 
 /// A signature that could not be broadcast is a distinct state: the

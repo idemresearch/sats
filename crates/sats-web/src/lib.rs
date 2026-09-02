@@ -534,6 +534,7 @@ impl Sim {
             id: id.clone(),
             network: NETWORK_NAME.into(),
             agent: agent.into(),
+            grant_token_id: grant.token_id.clone(),
             client_request_id: None,
             recipient: normalized,
             amount_sat,
@@ -593,6 +594,7 @@ impl Sim {
         let grant = self
             .grants
             .get(&agent)
+            .filter(|grant| grant.token_id == record.grant_token_id)
             .ok_or_else(|| format!("no active grant for {agent:?}"))?;
         // Precheck against the current grant before planning.
         if let Decision::Deny(reason) = evaluate_send(
@@ -626,10 +628,9 @@ impl Sim {
             ));
         }
         if let Some(record) = self.requests.get_mut(id) {
-            record.state = RequestState::Executing {
+            record.state = RequestState::Signing {
                 approved_at: now,
                 fee_sat: spend.fee_sat,
-                grant_token_id: grant.token_id.clone(),
             };
             record.updated_at = now;
         }

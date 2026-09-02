@@ -951,6 +951,7 @@ mod tests {
             id: id.into(),
             network: "signet".into(),
             agent: "claude".into(),
+            grant_token_id: "t1".into(),
             client_request_id: None,
             recipient: "tb1ptest".into(),
             amount_sat: 1_000,

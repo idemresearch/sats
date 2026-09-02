@@ -173,6 +173,11 @@ pub enum DenyReason {
     },
     /// The grant is observe-only.
     ObserveOnly,
+    /// The grant the request was filed under no longer exists: it was
+    /// revoked, or replaced by a re-issued grant with a new token. A
+    /// request is bound to the grant instance that created it and never
+    /// executes under another.
+    Revoked,
     /// The recipient is outside the grant's standing allowlist. Only
     /// editing the allowlist — never payment history — changes the list.
     RecipientNotAllowed {
@@ -345,6 +350,7 @@ impl DenyReason {
             DenyReason::OverBudget { .. } => "over_budget",
             DenyReason::AmountOverflow { .. } => "amount_overflow",
             DenyReason::ObserveOnly => "observe_only",
+            DenyReason::Revoked => "revoked",
             DenyReason::RecipientNotAllowed { .. } => "recipient_not_allowed",
         }
     }
@@ -387,6 +393,9 @@ impl DenyReason {
                 format_sats(*fee_sat)
             ),
             DenyReason::ObserveOnly => "grant is observe-only".to_string(),
+            DenyReason::Revoked => {
+                "the grant this request was filed under was revoked or replaced".to_string()
+            }
             DenyReason::RecipientNotAllowed { recipient } => {
                 format!("recipient {recipient} is not on the grant's allowlist")
             }
@@ -865,6 +874,7 @@ mod tests {
                 "amount_overflow",
             ),
             (DenyReason::ObserveOnly, "observe_only"),
+            (DenyReason::Revoked, "revoked"),
             (
                 DenyReason::RecipientNotAllowed {
                     recipient: "tb1p".into(),
@@ -872,7 +882,7 @@ mod tests {
                 "recipient_not_allowed",
             ),
         ];
-        assert_eq!(cases.len(), 7, "every variant is listed");
+        assert_eq!(cases.len(), 8, "every variant is listed");
         for (reason, code) in cases {
             let json = serde_json::to_value(&reason).unwrap();
             assert_eq!(json["reason"], code);

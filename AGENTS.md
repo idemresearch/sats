@@ -35,8 +35,8 @@ sats executes requests.** The MCP server reads the wallet and files
 requests under the grant its bearer token names; it holds no key
 material and never prepares, signs, or broadcasts. A request is the
 first-class workflow object (`sats-core::request`): `pending_approval`,
-`denied`, `dismissed`, `executing`, `sent`, `broadcast_pending`, or
-`failed`. The human-authorized execution path (`crates/sats/src/request/`)
+`denied`, `dismissed`, `signing`, `sent`, `broadcast_pending`,
+`unresolved`, or `failed`, bound to the grant instance that created it. The human-authorized execution path (`crates/sats/src/request/`)
 prepares, re-verifies, reserves budget, signs, persists, and broadcasts;
 in v0.0.1 that path is `sats agent approve`, which unseals the seed with
 the human's password for exactly one execution. The agent observes the
@@ -148,11 +148,17 @@ and rendering belong to callers.
 - Persist finalized transaction hex before attempting broadcast, in the
   process that produced the signature. Do not persist a signed PSBT for a
   fully finalized single-sig send.
-- The signature boundary is structural in the request state: `failed`
-  means no durable signature exists and the reservation was refunded;
-  `broadcast_pending` and `sent` mean one exists — never refund, never
-  sign again, only rebroadcast. An interrupted `executing` request is
-  reconciled from the persisted transaction record, never guessed.
+- The irreversible boundary is the signer invocation. `signing` is
+  persisted before the signer runs; from then on only the signer's own
+  report that no signature was produced permits a refund (`failed`,
+  re-approvable). Any other failure or crash after `signing` is
+  `unresolved`: never refund, never sign again automatically. `sent` and
+  `broadcast_pending` mean a persisted signature — only rebroadcast. A
+  `signing` record is reconciled from the transaction attributed to it
+  (agent, request id, intent digest), never guessed.
+- A request records the `token_id` of the grant that created it and
+  executes only under that instance; creation holds the grant lock so a
+  revoke or re-issue cannot interleave.
 - A grant carries no key material. Never reintroduce a field from which a
   seed can be recovered; only a token hash belongs beside a policy.
 - A bearer token is emitted once, at creation, and never persisted.
@@ -180,11 +186,14 @@ and rendering belong to callers.
 - Preserve check order: the specific boundary answers before the
   terminal ask, so a refusal names what was crossed.
 - Budget includes amount plus fee.
-- Reserve and persist budget, then persist the request as `executing`,
-  before signing; construct the signer only after the reservation is
-  durable (`request::execute::commit` takes it as a factory for exactly
-  this reason).
-- Refund only when no durable signature exists.
+- Reserve and persist budget, then persist the request as `signing`,
+  before the signer is invoked; construct the signer only after the
+  reservation is durable (`request::execute::commit` takes it as a
+  factory for exactly this reason).
+- Refund only before the signer is invoked, or when it reports that no
+  signature was produced.
+- The human review (recipient, amount, real fee, total) precedes the
+  password in every mode; `--json` moves it to stderr, never drops it.
 - Never refund a signed transaction after a broadcast failure.
 - Re-read the grant at creation and again under the grant lock at
   execution, so revocation takes effect immediately.

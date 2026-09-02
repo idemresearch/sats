@@ -151,9 +151,11 @@ model this implements.
   disagreement with the recorded request; a foreign input is refused
   outright.
 - Agent authorization is deterministic. Budget is reserved and persisted,
-  and the request recorded as executing, before signing, because a signed
-  transaction is already spendable. A request that signed is never signed
-  again and never refunded; one that did not is refunded.
+  and the request recorded as signing, before the signer is invoked,
+  because a signed transaction is already spendable. A request that
+  signed, or may have signed, is never signed again and never refunded;
+  one the signer reports unsigned is refunded. A request executes only
+  under the grant that created it.
 - Finalized transactions are written privately before broadcast, by the
   process that signed them, so a crash or lost response cannot strand the
   only retry copy.

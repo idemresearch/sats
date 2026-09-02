@@ -60,9 +60,10 @@ pub struct RequestSendParams {
 pub struct RequestView {
     /// The request's lifecycle state: pending_approval (filed, awaiting
     /// the human), denied (outside the grant; terminal), dismissed (the
-    /// human declined; terminal), executing (the human authorized it and
+    /// human declined; terminal), signing (the human authorized it and
     /// sats is signing), sent (broadcast; carries txid), broadcast_pending
     /// (signed, awaiting a rebroadcast by the human; carries txid),
+    /// unresolved (a signature may exist; the human resolves it),
     /// failed (execution stopped before any signature; the human may
     /// authorize again). Also "error" for a typed operational condition
     /// on this call, and "not_found" for an unknown request id.
@@ -72,8 +73,9 @@ pub struct RequestView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
     /// Denial code, when denied: expired, over_max_tx, over_max_fee,
-    /// over_budget, amount_overflow, observe_only, recipient_not_allowed.
-    /// Every one is a grant boundary no approval lifts.
+    /// over_budget, amount_overflow, observe_only, recipient_not_allowed,
+    /// revoked (the grant that created the request is gone). Every one is
+    /// a grant boundary no approval lifts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Typed operational error code, on status "error": invalid_agent,
@@ -153,13 +155,22 @@ impl RequestView {
                  before proposing it again"
                     .into(),
             ),
-            RequestState::Executing { .. } => (
+            RequestState::Signing { .. } => (
                 None,
                 None,
                 None,
                 "the human authorized it; sats is signing and broadcasting — poll \
                  check_request"
                     .into(),
+            ),
+            RequestState::Unresolved { txid, message, .. } => (
+                None,
+                None,
+                txid.clone(),
+                format!(
+                    "unresolved: {message} — the human resolves it; nothing for you to do, \
+                     and do not file it again"
+                ),
             ),
             RequestState::Sent { txid, fee_sat, .. } => (
                 None,

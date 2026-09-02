@@ -649,6 +649,7 @@ fn agent_requests_lists_pending_requests() {
         "id": "k-pay-1",
         "network": "signet",
         "agent": "claude",
+        "grant_token_id": "t1",
         "client_request_id": "pay-1",
         "recipient": common::ADDRESS,
         "amount_sat": 5_000,
@@ -662,6 +663,7 @@ fn agent_requests_lists_pending_requests() {
         "id": "k-big-1",
         "network": "signet",
         "agent": "claude",
+        "grant_token_id": "t1",
         "client_request_id": "big-1",
         "recipient": common::ADDRESS,
         "amount_sat": 20_000,
@@ -677,6 +679,7 @@ fn agent_requests_lists_pending_requests() {
         "id": "r-aa00bb11",
         "network": "signet",
         "agent": "claude",
+        "grant_token_id": "t1",
         "recipient": common::ADDRESS,
         "amount_sat": 4_500,
         "intent_digest": "f".repeat(64),
@@ -781,7 +784,8 @@ fn agent_log_renders_events_and_filters_by_request() {
         requests_dir.join("k-big-1.json"),
         serde_json::json!({
             "format_version": 1, "id": "k-big-1", "network": "signet",
-            "agent": "claude", "recipient": common::ADDRESS, "amount_sat": 20_000,
+            "agent": "claude", "grant_token_id": "t1",
+            "recipient": common::ADDRESS, "amount_sat": 20_000,
             "intent_digest": "d".repeat(64), "created_at": 1_000, "updated_at": 1_000,
             "status": "pending_approval",
         })
@@ -902,6 +906,7 @@ fn agent_requests_watch_streams_newly_pending_requests() {
         std::fs::create_dir_all(&requests_dir).unwrap();
         let record = serde_json::json!({
             "format_version": 1, "id": id, "network": "signet", "agent": "claude",
+            "grant_token_id": "t1",
             "recipient": common::ADDRESS, "amount_sat": 30_000,
             "intent_digest": "d".repeat(64), "created_at": 1_000, "updated_at": 1_000,
             "status": "denied",
@@ -1319,7 +1324,14 @@ fn agent_allowlist_edits_gate_on_widening() {
 
 /// Write the durable record an agent's novel ask leaves behind: an
 /// in-grant proposal resolved with the terminal, approvable ask.
+/// Fabricate a pending request the way the MCP server files one, bound
+/// to the agent's current grant when one exists.
 fn fabricate_pending_request(dir: &TempDir, agent: &str, id: &str) {
+    let grant_token_id = std::fs::read(dir.path().join(format!("signet/grants/{agent}.json")))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|grant| grant["token_id"].as_str().map(str::to_string))
+        .unwrap_or_else(|| "no-grant".to_string());
     let requests_dir = dir.path().join("signet/agent-requests").join(agent);
     std::fs::create_dir_all(&requests_dir).unwrap();
     let digest = sats_core::intent::SendIntent {
@@ -1334,6 +1346,7 @@ fn fabricate_pending_request(dir: &TempDir, agent: &str, id: &str) {
         "id": id,
         "network": "signet",
         "agent": agent,
+        "grant_token_id": grant_token_id,
         "recipient": common::ADDRESS,
         "amount_sat": 5_000,
         "intent_digest": digest,
@@ -1364,22 +1377,29 @@ fn approve_executes_with_the_password() {
     init_wallet(&dir);
     write_mock_provider(&dir);
     common::fund_wallet(&dir, &[100_000]);
-    fabricate_pending_request(&dir, "claude", "k-pay-1");
-
-    // Without a live grant nothing can execute. Refuse before the
-    // password, before any chain access.
+    // A request filed under a grant that no longer exists is denied
+    // before the password, before any chain access, and stays denied
+    // after a new grant for the same agent.
+    fabricate_pending_request(&dir, "claude", "k-orphan");
     sats(&dir)
         .env("SATS_PASSWORD", "wrong")
-        .args(["agent", "approve", "k-pay-1", "--yes"])
+        .args(["agent", "approve", "k-orphan", "--yes"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no active grant"));
+        .stderr(predicate::str::contains("revoked"));
     sats(&dir)
         .args([
             "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
         ])
         .assert()
         .success();
+    assert_eq!(request_json(&dir, "k-orphan")["status"], "denied");
+    sats(&dir)
+        .args(["agent", "approve", "k-orphan", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("denied revoked"));
+    fabricate_pending_request(&dir, "claude", "k-pay-1");
 
     // Without --yes and without a terminal, the review cannot be
     // confirmed: nothing executes.
@@ -1398,12 +1418,20 @@ fn approve_executes_with_the_password() {
     assert_eq!(request_json(&dir, "k-pay-1")["status"], "pending_approval");
     assert!(!dir.path().join("signet/transactions").exists());
 
-    // The right password signs, persists, broadcasts, and settles.
+    // The right password signs, persists, broadcasts, and settles. In
+    // --json mode the review still reaches the human, on stderr, before
+    // the password; stdout stays the machine-readable result.
     let sent = json_stdout(
         sats(&dir)
             .args(["agent", "approve", "k-pay-1", "--yes", "--json"])
             .assert()
-            .success(),
+            .success()
+            .stderr(predicate::str::contains("Recipient"))
+            .stderr(predicate::str::contains(common::ADDRESS))
+            .stderr(predicate::str::contains("Amount"))
+            .stderr(predicate::str::contains("5,000 sat"))
+            .stderr(predicate::str::contains("Fee"))
+            .stderr(predicate::str::contains("Total")),
     );
     assert_eq!(sent["id"], "k-pay-1");
     assert_eq!(sent["status"], "sent");

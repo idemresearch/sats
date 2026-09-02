@@ -7,19 +7,24 @@
 //! approval surface tomorrow), and [`reconcile`] for interrupted
 //! executions. Commands and tools are thin adapters over it.
 //!
-//! Every write to a request record happens under the grant lock, so
-//! approvals, outcomes, and budget decisions serialize as one history.
+//! Every read-then-write of grant or request state happens under the
+//! grant lock, so grant issuance and revocation, request creation,
+//! authorization, outcomes, and budget decisions serialize as one
+//! history. A request is bound to the grant instance (`token_id`) that
+//! created it and never executes under another.
 
 pub mod execute;
 
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
-use sats_core::authz::{AGENT_NAME_RULE, Decision, SpendRequest, evaluate_send, valid_agent_name};
+use sats_core::authz::{
+    AGENT_NAME_RULE, Decision, DenyReason, Grant, SpendRequest, evaluate_send, valid_agent_name,
+};
 use sats_core::bitcoin::{Address, Network};
 use sats_core::event::{AgentEvent, EVENT_FORMAT_VERSION, EventKind};
 use sats_core::intent::SendIntent;
-use sats_core::plan::TransactionStatus;
+use sats_core::plan::{TransactionRecord, TransactionStatus};
 use sats_core::request::{AgentRequest, REQUEST_FORMAT_VERSION, RequestState};
 
 use crate::config::network_name;
@@ -109,10 +114,14 @@ impl From<anyhow::Error> for CreateError {
 
 /// Create a request, or return the existing one for a repeated key.
 ///
-/// The grant's ladder runs at creation with the fee unknown (zero): a
-/// proposal inside every boundary is recorded as `pending_approval`; a
-/// hard boundary is recorded as `denied`. Both are durable records the
-/// agent can observe and the human can review. The same client key with
+/// The grant is read, the token checked, and the record written under
+/// the grant lock, so a revoke or re-issue cannot interleave: a request
+/// is created under exactly one grant instance and records its
+/// `token_id`. The grant's ladder runs at creation with the fee unknown
+/// (zero): a proposal inside every boundary is recorded as
+/// `pending_approval`; a hard boundary is recorded as `denied`. The
+/// audit line is appended *before* the record is written, so no request
+/// can exist on disk without its causal event. The same client key with
 /// the same canonical intent returns the existing record without
 /// writing anything; the same key with a different intent is a conflict.
 pub fn create(
@@ -146,6 +155,7 @@ pub fn create(
     // every grant by reporting 1970.
     let now = now_checked().map_err(|e| CreateError::ClockUnavailable(format!("{e:#}")))?;
 
+    let _lock = store.lock_grants(net_name)?;
     let grant = store
         .load_grant(net_name, params.agent)?
         .ok_or(CreateError::NoGrant)?;
@@ -199,6 +209,7 @@ pub fn create(
         id,
         network: net_name.to_string(),
         agent: params.agent.to_string(),
+        grant_token_id: grant.token_id.clone(),
         client_request_id: params.client_request_id.map(str::to_string),
         recipient: recipient.clone(),
         amount_sat: params.amount_sat,
@@ -207,40 +218,29 @@ pub fn create(
         updated_at: now,
         state: state.clone(),
     };
-
     let record = match params.client_request_id {
-        Some(key) => {
-            let record = fresh_record(format!("k-{key}"));
-            match store.create_agent_request(net_name, &record)? {
-                Some(_claim) => record,
-                // Created between our load and now: answer from it.
-                None => {
-                    let existing = store
-                        .load_agent_request(net_name, params.agent, &record.id)?
-                        .context("request vanished after a concurrent create")?;
-                    if existing.intent_digest != digest {
-                        return Err(CreateError::Conflict {
-                            request_id: existing.id,
-                        });
-                    }
-                    return Ok(existing);
+        Some(key) => fresh_record(format!("k-{key}")),
+        None => {
+            // Keyless requests get a random id; collisions retry.
+            loop {
+                let mut bytes = [0u8; 4];
+                getrandom::fill(&mut bytes)
+                    .map_err(|err| anyhow::anyhow!("cannot generate request id: {err}"))?;
+                let candidate = fresh_record(format!("r-{}", hex::encode(bytes)));
+                if store
+                    .load_agent_request(net_name, params.agent, &candidate.id)?
+                    .is_none()
+                {
+                    break candidate;
                 }
             }
         }
-        None => loop {
-            // Keyless requests get a random id; collisions retry.
-            let mut bytes = [0u8; 4];
-            getrandom::fill(&mut bytes)
-                .map_err(|err| anyhow::anyhow!("cannot generate request id: {err}"))?;
-            let record = fresh_record(format!("r-{}", hex::encode(bytes)));
-            if store.create_agent_request(net_name, &record)?.is_some() {
-                break record;
-            }
-        },
     };
 
-    // The record exists; an unwritable audit log fails the create so a
-    // request never exists without its causal line.
+    // Audit first, record second: an unwritable audit log refuses the
+    // create before anything exists, so a request on disk always has its
+    // causal line. (A crash between the two leaves a received line for a
+    // request that was never written — honest, and harmless.)
     journal(
         store,
         net_name,
@@ -251,6 +251,10 @@ pub fn create(
         },
     )
     .context("cannot record request")?;
+    let claim = store
+        .create_agent_request(net_name, &record)?
+        .context("request appeared between the existence check and the write")?;
+    drop(claim);
     if let Decision::Deny(reason) = verdict {
         journal_soft(
             store,
@@ -266,7 +270,8 @@ pub fn create(
 }
 
 /// A human dismisses a request. Reducing authority needs no password —
-/// the same posture as `sats agent revoke`.
+/// the same posture as `sats agent revoke`. Dismissing an `unresolved`
+/// request closes it without a refund: a signature may exist.
 pub fn dismiss(store: &Store, network: Network, id_or_prefix: &str) -> Result<AgentRequest> {
     let net_name = network_name(network);
     let request = store.find_agent_request(net_name, id_or_prefix)?;
@@ -292,29 +297,56 @@ pub fn dismiss(store: &Store, network: Network, id_or_prefix: &str) -> Result<Ag
     Ok(dismissed)
 }
 
+/// The grant a request may execute under: the one on file, only if it is
+/// the instance that created the request.
+pub(crate) fn bound_grant(
+    store: &Store,
+    net_name: &str,
+    request: &AgentRequest,
+) -> Result<Result<Grant, DenyReason>> {
+    Ok(match store.load_grant(net_name, &request.agent)? {
+        Some(grant) if grant.token_id == request.grant_token_id => Ok(grant),
+        _ => Err(DenyReason::Revoked),
+    })
+}
+
+/// The persisted transaction attributed to exactly this request: same
+/// agent, same request id, same canonical intent. Request ids are scoped
+/// to their agent, so the id alone identifies nothing.
+pub(crate) fn attributed_transaction(
+    store: &Store,
+    net_name: &str,
+    request: &AgentRequest,
+) -> Result<Option<TransactionRecord>> {
+    Ok(store
+        .list_transactions(net_name)?
+        .into_iter()
+        .find(|record| {
+            record.origin.as_ref().is_some_and(|origin| {
+                origin.agent.as_deref() == Some(request.agent.as_str())
+                    && origin.request_id.as_deref() == Some(request.id.as_str())
+                    && origin.intent_digest.as_deref() == Some(request.intent_digest.as_str())
+            })
+        }))
+}
+
 /// Settle an interrupted execution around the signature boundary.
 ///
-/// A request left `executing` by a process that died is resolved from
-/// the durable truth: a persisted transaction attributed to it means a
-/// signature exists — the reservation stands, and the request becomes
-/// `broadcast_pending` or `sent` by the record's status. No transaction
-/// means nothing durable was signed — the reservation is refunded on the
-/// grant it was drawn from, and the request becomes `failed`. A request
-/// whose execution is still live (its claim is held) is left alone.
+/// A request left `signing` by a process that died is resolved from the
+/// durable truth only. A persisted transaction attributed to it means a
+/// signature exists: the request becomes `broadcast_pending` or `sent` by
+/// the record's status. No transaction means the signer may or may not
+/// have run: the request becomes `unresolved`, nothing is refunded, and
+/// nothing is signed again — a human resolves it. A request whose
+/// execution is still live (its claim is held) is left alone.
 pub fn reconcile(store: &Store, network: Network, request: AgentRequest) -> Result<AgentRequest> {
     let net_name = network_name(network);
-    let RequestState::Executing {
-        fee_sat,
-        grant_token_id,
-        ..
-    } = &request.state
-    else {
+    if !matches!(request.state, RequestState::Signing { .. }) {
         return Ok(request);
-    };
+    }
     let Some(_claim) = store.claim_agent_request(net_name, &request.agent, &request.id)? else {
         return Ok(request);
     };
-    let (fee_sat, grant_token_id) = (*fee_sat, grant_token_id.clone());
     let now = unix_now();
     let _lock = store.lock_grants(net_name)?;
     // Re-read under the lock: the live execution may have settled it in
@@ -322,19 +354,10 @@ pub fn reconcile(store: &Store, network: Network, request: AgentRequest) -> Resu
     let mut fresh = store
         .load_agent_request(net_name, &request.agent, &request.id)?
         .with_context(|| format!("request {} disappeared", request.id))?;
-    if !matches!(fresh.state, RequestState::Executing { .. }) {
+    if !matches!(fresh.state, RequestState::Signing { .. }) {
         return Ok(fresh);
     }
-    let signed = store
-        .list_transactions(net_name)?
-        .into_iter()
-        .find(|record| {
-            record
-                .origin
-                .as_ref()
-                .is_some_and(|origin| origin.request_id.as_deref() == Some(fresh.id.as_str()))
-        });
-    match signed {
+    match attributed_transaction(store, net_name, &fresh)? {
         Some(record) => {
             // A signature exists: never refund, never sign again.
             fresh.state = match record.status {
@@ -363,45 +386,19 @@ pub fn reconcile(store: &Store, network: Network, request: AgentRequest) -> Resu
             journal_soft(store, net_name, &fresh, kind);
         }
         None => {
-            // Nothing durable was signed: give the budget back, on the
-            // grant that lent it. A replaced grant never inherits a
-            // refund it did not draw.
-            let spend = SpendRequest {
-                amount_sat: fresh.amount_sat,
-                fee_sat,
-            };
-            let refunded = match store.load_grant(net_name, &fresh.agent)? {
-                Some(mut grant) if grant.token_id == grant_token_id => {
-                    grant.refund(&spend);
-                    store.save_grant(net_name, &grant)?;
-                    true
-                }
-                _ => false,
-            };
-            fresh.state = RequestState::Failed {
-                message: "execution interrupted before a signature existed".into(),
+            // The signer may have run and nothing durable says how it
+            // ended. Neither a refund nor a second signature is safe.
+            let message = "execution interrupted at or after signing; a signature may exist — \
+                           the budget stays reserved and sats will not sign this request again"
+                .to_string();
+            fresh.state = RequestState::Unresolved {
                 at: now,
+                message: message.clone(),
+                txid: None,
             };
             fresh.updated_at = now;
             store.save_agent_request(net_name, &fresh)?;
-            if refunded {
-                journal_soft(
-                    store,
-                    net_name,
-                    &fresh,
-                    EventKind::Refunded {
-                        total_sat: spend.total_sat(),
-                    },
-                );
-            }
-            journal_soft(
-                store,
-                net_name,
-                &fresh,
-                EventKind::Failed {
-                    message: "execution interrupted before a signature existed".into(),
-                },
-            );
+            journal_soft(store, net_name, &fresh, EventKind::Failed { message });
         }
     }
     Ok(fresh)
@@ -418,7 +415,8 @@ pub fn list_reconciled(store: &Store, network: Network) -> Result<Vec<AgentReque
 }
 
 /// Settle a `broadcast_pending` request once its transaction has been
-/// broadcast by another path (`sats tx broadcast`).
+/// broadcast by another path (`sats tx broadcast`). The transaction's
+/// full attribution — agent, request id, intent digest — must match.
 pub fn settle_broadcast(store: &Store, network: Network, txid: &str) -> Result<()> {
     let net_name = network_name(network);
     let Some(record) = store
@@ -428,25 +426,24 @@ pub fn settle_broadcast(store: &Store, network: Network, txid: &str) -> Result<(
     else {
         return Ok(());
     };
-    let Some(request_id) = record
-        .origin
-        .as_ref()
-        .and_then(|origin| origin.request_id.clone())
-    else {
+    let Some(origin) = record.origin.as_ref() else {
         return Ok(());
     };
-    let Some(agent) = record
-        .origin
-        .as_ref()
-        .and_then(|origin| origin.agent.clone())
-    else {
+    let (Some(agent), Some(request_id), Some(digest)) = (
+        origin.agent.as_deref(),
+        origin.request_id.as_deref(),
+        origin.intent_digest.as_deref(),
+    ) else {
         return Ok(());
     };
     let now = unix_now();
     let _lock = store.lock_grants(net_name)?;
-    let Some(mut request) = store.load_agent_request(net_name, &agent, &request_id)? else {
+    let Some(mut request) = store.load_agent_request(net_name, agent, request_id)? else {
         return Ok(());
     };
+    if request.intent_digest != digest {
+        return Ok(());
+    }
     let RequestState::BroadcastPending { fee_sat, .. } = request.state else {
         return Ok(());
     };
@@ -477,7 +474,12 @@ pub fn describe_settled(request: &AgentRequest) -> String {
             deny.code()
         ),
         RequestState::Dismissed { .. } => "already dismissed".into(),
-        RequestState::Executing { .. } => "executing right now".into(),
+        RequestState::Signing { .. } => "signing right now".into(),
+        RequestState::Unresolved { txid, .. } => format!(
+            "unresolved — a signature may exist{}; sats will not sign it again or refund it; \
+             check sats status, then dismiss it",
+            txid.as_ref().map(|t| format!(" ({t})")).unwrap_or_default()
+        ),
         RequestState::Sent { txid, .. } => format!("already sent ({txid})"),
         RequestState::BroadcastPending { txid, .. } => {
             format!("signed but not broadcast — retry with: sats tx broadcast {txid}")

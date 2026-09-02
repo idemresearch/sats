@@ -57,8 +57,10 @@ requests. There is no resident signer: no process holds an unsealed seed
 between executions. `sats agent approve` is the human-authorized
 execution path, and it runs in the human's own process:
 
-1. the request is claimed (a per-request lock) and its grant is
-   re-checked with the fee unknown;
+1. the request is claimed (a per-request lock); the grant on file must
+   be the instance that created the request (its `token_id` is recorded
+   at filing, under the grant lock), and it is re-checked with the fee
+   unknown;
 2. the transaction is prepared on current chain state through the same
    pipeline as a human send, with no dust or guard bypass;
 3. what the prepared PSBT actually pays is derived from the wallet's own
@@ -68,28 +70,33 @@ execution path, and it runs in the human's own process:
    enters the wallet password — the authorization, and the only moment
    key material is unsealed;
 6. under the grant lock the budget is reserved and persisted, then the
-   request is persisted as `executing` — grant first, so an `executing`
-   record on disk always means its draw is on the grant;
+   request is persisted as `signing` — before the signer is invoked, so
+   `signing` on disk is the irreversible boundary;
 7. the signer is constructed only now, signs, and the finalized
    transaction is persisted before broadcast;
 8. broadcast settles the request to `sent`, or to `broadcast_pending` if
    the provider refused.
 
-The signature boundary is structural in the request record. `failed`
-means no durable signature exists: the reservation was refunded and the
-human may authorize again. `broadcast_pending` and `sent` mean a signed
-transaction exists: the reservation is never refunded, the signer is
-never invoked again for that request, and only rebroadcasting the saved
-transaction (`sats tx broadcast <txid>`) settles it.
+The irreversible boundary is the signer invocation, not a successful
+write afterwards. Before the signer runs, a failure refunds the
+reservation and the request is `failed` (re-approvable). Once the signer
+has been invoked, only its own report that no signature was produced
+permits a refund; any other failure — the signed transaction could not be
+finalized or saved — leaves the request `unresolved`: a signature may
+exist, so nothing is refunded and sats never signs it again. A human
+resolves it (checking `sats status`, then dismissing). `broadcast_pending`
+and `sent` mean a signed transaction is persisted: the reservation is
+never refunded, the signer is never invoked again for that request, and
+only rebroadcasting the saved transaction (`sats tx broadcast <txid>`)
+settles it.
 
 An interrupted execution is reconciled from that boundary, never
-guessed: a request left `executing` by a dead process becomes
+guessed: a request left `signing` by a dead process becomes
 `broadcast_pending` or `sent` when a persisted transaction attributed to
-it exists, and otherwise `failed` with its reservation refunded — on the
-grant it was drawn from, identified by the grant's token id, so a
-replaced grant never inherits a refund it did not draw. A crash can
-therefore never cause a double budget draw, a second signature for one
-authorized execution, or a refund after a signed transaction exists.
+it — same agent, request id, and intent digest — exists, and otherwise
+`unresolved`, with nothing refunded and nothing signed again. A crash can
+therefore never cause a second signature for one authorized execution or
+a refund after a signature may exist.
 
 Because execution happens in the approving process with the human's
 password, an approval is not a durable token another process trusts: a
@@ -247,8 +254,9 @@ Every agent request is a durable record under
 `<network>/agent-requests/<agent>/`, keyed by the agent's optional
 `request_id`, carrying the canonical intent digest (network, agent,
 normalized recipient, amount — never the fee) and its state:
-`pending_approval`, `denied`, `dismissed`, `executing`, `sent`,
-`broadcast_pending`, or `failed`. Filing the same key with the same
+`pending_approval`, `denied`, `dismissed`, `signing`, `unresolved`,
+`sent`, `broadcast_pending`, or `failed` — and the `token_id` of the
+grant instance that created it. Filing the same key with the same
 intent returns the existing record without writing; reusing a key for a
 different intent is a typed error that mutates nothing. The agent never
 executes and never retries to make a payment happen: it observes.
@@ -256,7 +264,10 @@ executes and never retries to make a payment happen: it observes.
 Only authenticated callers write: a filing for an agent with no grant on
 file — a name that never had one, or one already revoked — is refused
 without creating a request record or a journal line, exactly like a wrong
-token.
+token. Filing holds the grant lock from the grant read through the record
+write, so a revoke or re-issue cannot interleave, and the audit line is
+appended before the record is written, so no request exists on disk
+without its causal event.
 
 Each state transition — request received, denial, approval, dismissal,
 reservation, refund, signature, broadcast — appends one line to the
@@ -307,9 +318,17 @@ the signer. Its trust model:
   re-read at staging and again under the grant lock before the
   reservation, so a boundary tightened between the review and the
   password still refuses;
-- an authorization executes at most once: a request that signed is
-  terminal, and a request whose execution stopped before any signature
-  must be authorized again by a fresh human decision.
+- an authorization executes at most once: a request that signed, or may
+  have signed, is terminal for the signer, and a request whose execution
+  stopped before any signature could exist must be authorized again by a
+  fresh human decision;
+- a request is bound to the grant instance that created it. Revoking or
+  re-issuing the grant makes every request filed under it `denied` with
+  reason `revoked` the moment a human tries to execute one; a new grant
+  for the same agent never inherits requests it did not authorize;
+- the review — recipient, amount, real fee, total — is shown in every
+  mode before the password, on stderr when stdout is a JSON stream, so
+  the authorization is always bound to visible transaction details.
 
 ## MCP boundary
 
