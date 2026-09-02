@@ -529,11 +529,11 @@ impl Sim {
                 at: now,
             },
         };
-        // The native shape: `r-` plus 16 hex characters, global.
+        // The native shape: `r-` plus 32 hex characters, global.
         let bytes = random_bytes32()?;
         let id = format!(
             "r-{}",
-            bytes[..8]
+            bytes[..16]
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>()
@@ -544,7 +544,7 @@ impl Sim {
             network: NETWORK_NAME.into(),
             agent: agent.into(),
             grant_id: grant.grant_id.clone(),
-            client_request_id: None,
+            idempotency_key: None,
             recipient: normalized,
             amount_sat,
             intent_digest: digest,

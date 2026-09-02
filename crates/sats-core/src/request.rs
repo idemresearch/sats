@@ -13,7 +13,7 @@
 //! create ─► pending_approval ─approve─► signing ─► sent
 //!                 │                        ├─► broadcast_pending  (signed; never signs again)
 //!                 │                        ├─► unresolved         (a signature may exist; a human resolves)
-//!                 │                        ├─► failed             (signer reported no signature; refunded)
+//!                 │                        ├─► failed             (signer never invoked; refunded)
 //!                 │                        └─► denied             (real-fee ladder, or the grant is gone)
 //!                 ├─dismiss─► dismissed
 //!                 └─(hard boundary at creation)─► denied
@@ -37,12 +37,12 @@ const fn request_format_version() -> u32 {
 pub struct AgentRequest {
     #[serde(default = "request_format_version")]
     pub format_version: u32,
-    /// The server request id: `r-` plus 16 hex characters, globally
-    /// unique across agents. Derived deterministically from the grant,
-    /// the agent, and the client key for keyed requests (so a repeated
-    /// filing resolves to the same record); random for keyless ones.
-    /// This is the id humans review and approve; the client key is
-    /// only the agent's idempotency handle.
+    /// The server request id: `r-` plus 32 hex characters (128 bits),
+    /// globally unique across agents. Derived deterministically from
+    /// the grant, the agent, and the idempotency key, so a repeated
+    /// filing resolves to the same record. This is the id humans
+    /// review and approve; the idempotency key is only the agent's
+    /// retry handle.
     pub id: String,
     pub network: String,
     pub agent: String,
@@ -51,9 +51,10 @@ pub struct AgentRequest {
     /// re-issuing the grant makes every request filed under it
     /// non-executable.
     pub grant_id: String,
-    /// The idempotency key exactly as the client supplied it.
+    /// The idempotency key exactly as the agent supplied it. Absent
+    /// only on records not filed through `request_send`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_request_id: Option<String>,
+    pub idempotency_key: Option<String>,
     /// Normalized recipient address.
     pub recipient: String,
     pub amount_sat: u64,
@@ -104,10 +105,12 @@ pub enum RequestState {
     /// the signer is never invoked again; only rebroadcasting the
     /// existing transaction settles it to `Sent`.
     BroadcastPending { txid: String, fee_sat: u64, at: u64 },
-    /// Execution stopped before any signature could exist — the signer
-    /// reported an error, or the process failed before invoking it — and
-    /// the reservation was refunded. A human may authorize again or
-    /// dismiss.
+    /// Execution stopped before `Signer::sign` was invoked — the audit
+    /// log could not be written, or the signer could not be constructed
+    /// — and the draw was returned. Re-approvable only because it is
+    /// provable that the signer never ran: nothing reported after the
+    /// invocation is trusted to mean "no signature"; that is
+    /// `Unresolved`. A human may authorize again or dismiss.
     Failed { message: String, at: u64 },
 }
 
@@ -211,7 +214,7 @@ mod tests {
             network: "signet".into(),
             agent: "claude".into(),
             grant_id: "g1".into(),
-            client_request_id: Some("job-1".into()),
+            idempotency_key: Some("job-1".into()),
             recipient: "tb1pexample".into(),
             amount_sat: 25_000,
             intent_digest: "d".repeat(64),

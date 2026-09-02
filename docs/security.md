@@ -278,8 +278,8 @@ normalized recipient, amount — never the fee) and its state:
 `pending_approval`, `denied`, `dismissed`, `signing`, `unresolved`,
 `sent`, `broadcast_pending`, or `failed` — and the `grant_id` of the
 grant instance that created it. The record's id is global — `r-` plus
-16 hex characters — and is what humans approve and dismiss by. A keyed
-filing derives its id from the grant id, the agent, and the client key,
+32 hex characters — and is what humans approve and dismiss by. A keyed
+filing derives its id from the grant id, the agent, and the idempotency key,
 so the same key from two agents, or from the same agent under a
 re-issued grant, names two requests; a keyless filing gets a random id.
 Filing the same key with the same intent returns the existing record

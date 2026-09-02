@@ -102,10 +102,10 @@ result of `request_send` is a pending request —
 ```json
 {
   "status": "pending_approval",
-  "request_id": "r-8c1f0a2b9d3e4f57",
+  "request_id": "r-8c1f0a2b9d3e4f57a1b2c3d4e5f60718",
   "recipient": "tb1p...",
   "amount_sat": 4500,
-  "message": "filed for human review — the human approves with: sats agent approve r-8c1f0a2b9d3e4f57; poll check_request to observe the result, and do not file it again"
+  "message": "filed for human review — the human approves with: sats agent approve r-8c1f0a2b9d3e4f57a1b2c3d4e5f60718; poll check_request to observe the result, and do not file it again"
 }
 ```
 

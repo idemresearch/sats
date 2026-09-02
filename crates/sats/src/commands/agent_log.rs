@@ -126,6 +126,10 @@ fn detail(event: &AgentEvent) -> String {
         EventKind::Signed { txid } | EventKind::Broadcast { txid } => txid.clone(),
         EventKind::BroadcastFailed { txid, message } => format!("{txid}: {message}"),
         EventKind::Failed { message } => message.clone(),
+        EventKind::Unresolved { message, txid } => match txid {
+            Some(txid) => format!("{txid}: {message}"),
+            None => message.clone(),
+        },
         EventKind::Conflicted => String::new(),
         EventKind::ModeChanged { from, to, widened } => {
             format!("{from} → {to}{}", if *widened { " (widened)" } else { "" })

@@ -678,7 +678,7 @@ fn agent_component(agent: &str) -> Result<&str> {
 }
 
 /// Gate a request id before it becomes a path component. sats-minted
-/// ids (`r-` plus 16 hex) always pass; this is the backstop for any
+/// ids (`r-` plus 32 hex) always pass; this is the backstop for any
 /// future caller handing an id straight from a wire.
 fn request_id_component(id: &str) -> Result<&str> {
     let ok = !id.is_empty()
@@ -968,7 +968,7 @@ mod tests {
             network: "signet".into(),
             agent: "claude".into(),
             grant_id: "g1".into(),
-            client_request_id: None,
+            idempotency_key: None,
             recipient: "tb1ptest".into(),
             amount_sat: 1_000,
             intent_digest: "d".repeat(64),
@@ -984,9 +984,9 @@ mod tests {
     fn find_agent_request_refuses_duplicate_exact_ids() {
         let dir = TempDir::new().unwrap();
         let store = Store::open(Some(dir.path())).unwrap();
-        let mut alice = agent_request("r-0123456789abcdef");
+        let mut alice = agent_request("r-0123456789abcdef0123456789abcdef");
         alice.agent = "alice".into();
-        let mut bob = agent_request("r-0123456789abcdef");
+        let mut bob = agent_request("r-0123456789abcdef0123456789abcdef");
         bob.agent = "bob".into();
         store
             .create_agent_request("signet", &alice)
@@ -994,13 +994,13 @@ mod tests {
             .unwrap();
         store.create_agent_request("signet", &bob).unwrap().unwrap();
         let err = store
-            .find_agent_request("signet", "r-0123456789abcdef")
+            .find_agent_request("signet", "r-0123456789abcdef0123456789abcdef")
             .unwrap_err();
         assert!(err.to_string().contains("ambiguous"), "{err:#}");
         let err = store.find_agent_request("signet", "r-0123").unwrap_err();
         assert!(err.to_string().contains("ambiguous"), "{err:#}");
         // A unique prefix still resolves.
-        let mut carol = agent_request("r-fedcba9876543210");
+        let mut carol = agent_request("r-fedcba9876543210fedcba9876543210");
         carol.agent = "carol".into();
         store
             .create_agent_request("signet", &carol)
@@ -1008,7 +1008,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.find_agent_request("signet", "r-fed").unwrap().id,
-            "r-fedcba9876543210"
+            "r-fedcba9876543210fedcba9876543210"
         );
     }
 

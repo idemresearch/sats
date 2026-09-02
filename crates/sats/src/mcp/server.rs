@@ -33,10 +33,8 @@ pub const TOKEN_ENV: &str = "SATS_AGENT_TOKEN";
 
 #[derive(Deserialize, JsonSchema)]
 pub struct CheckRequestParams {
-    /// The request_id a request_send result returned (r-<16 hex>), or
-    /// the bare request_id key that was passed to it, resolved under
-    /// the current grant. A stored id takes precedence when it also
-    /// spells another request's bare key.
+    /// The request_id a request_send result returned: r- plus 32 hex
+    /// characters. Not the idempotency_key you passed in.
     pub request_id: String,
 }
 
@@ -46,12 +44,13 @@ pub struct RequestSendParams {
     pub address: String,
     /// Amount in satoshis.
     pub amount_sat: u64,
-    /// Optional idempotency key: 1-64 characters of A-Za-z0-9_-. Calling
-    /// again with the same key and the identical address and amount
-    /// returns the existing request instead of filing a second one.
-    /// Reusing a key for a different send is a typed error.
-    #[serde(default)]
-    pub request_id: Option<String>,
+    /// Your idempotency key for this send: 1-64 characters of
+    /// A-Za-z0-9_-, required. Calling again with the same key and the
+    /// identical address and amount returns the existing request instead
+    /// of filing a second one, so a lost response or a retried call never
+    /// files twice. Reusing a key for a different send is a typed error.
+    /// This is not the request_id: the result carries that.
+    pub idempotency_key: String,
 }
 
 /// The state of one request, as the agent sees it. The same shape is
@@ -79,8 +78,8 @@ pub struct RequestView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Typed operational error code, on status "error": invalid_agent,
-    /// invalid_request_id, invalid_address, clock_unavailable, no_grant,
-    /// unauthorized, request_id_conflict, store_error.
+    /// invalid_idempotency_key, invalid_address, clock_unavailable,
+    /// no_grant, unauthorized, idempotency_key_conflict, store_error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -426,9 +425,10 @@ impl SatsMcp {
         hard and enforced deterministically (budget, per-tx amount cap, fee cap, \
         expiry, mode, recipient allowlist): status='denied' names a boundary no \
         approval lifts — only the human changing the grant can, so do not file it \
-        again. Pass request_id (1-64 chars of A-Za-z0-9_-) so a repeated call with \
-        the same address and amount returns the existing request instead of filing a \
-        second one.",
+        again. idempotency_key (1-64 chars of A-Za-z0-9_-) is required and is your \
+        retry handle: a repeated call with the same key, address, and amount returns \
+        the existing request instead of filing a second one. The result's request_id \
+        is the server's id — use it with check_request; never pass it back as a key.",
         // Client-side hints only: the grant's ladder and the human's
         // authorization are the security boundary. A client that ignores
         // them changes nothing about what can be signed.
@@ -447,7 +447,7 @@ impl SatsMcp {
                 &CreateParams {
                     agent: &agent,
                     token: &token,
-                    client_request_id: params.request_id.as_deref(),
+                    idempotency_key: &params.idempotency_key,
                     address: &params.address,
                     amount_sat: params.amount_sat,
                 },
@@ -469,7 +469,7 @@ impl SatsMcp {
 
     #[tool(
         description = "Check the state of one of your own requests, by the request_id \
-        a request_send result returned (or your bare request_id key). This is the \
+        a request_send result returned (not your idempotency_key). This is the \
         sanctioned way to observe a human decision: it reads the durable record only — \
         no chain access, no side effects. pending_approval means the human has not \
         decided; sent carries the txid; denied, dismissed, and broadcast_pending need \
@@ -497,46 +497,30 @@ impl SatsMcp {
 
 /// The read-only request lookup behind `check_request`.
 ///
-/// Lookup is scoped to this agent's own directory, so another agent's
-/// record can never be exposed, and a malformed id is answered as a
-/// typed not-found before anything touches the disk. A bare client key
-/// resolves the way `request_send` resolves it — under the grant on
-/// file — so a key reused after a re-issue names the new request, never
-/// the old grant's. Nothing here mutates: no claim, no event, no
-/// reconciliation.
+/// Lookup is by server request id only, scoped to this agent's own
+/// directory, so another agent's record can never be exposed, and a
+/// malformed id — an idempotency key included — is answered as a typed
+/// not-found before anything touches the disk. Nothing here mutates: no
+/// claim, no event, no reconciliation.
 fn check_request_record(
     store: &Store,
     net_name: &'static str,
     agent: &str,
     raw_id: &str,
 ) -> RequestView {
-    // Server ids are unambiguous and tried first. If none exists, try
-    // the bare key, even when the key itself has the shape of an id.
-    let canonical = request::is_request_id(raw_id).then_some(raw_id);
-    let key = request::valid_request_key(raw_id).then_some(raw_id);
-    if canonical.is_none() && key.is_none() {
+    if !request::is_request_id(raw_id) {
         return RequestView::not_found(format!(
-            "malformed request id {raw_id:?} — pass the request_id a request_send result returned"
+            "malformed request id {raw_id:?} — pass the request_id a request_send result \
+             returned, not your idempotency_key"
         ));
     }
-    let keyed = match key {
-        Some(key) => match store.load_grant(net_name, agent) {
-            Ok(Some(grant)) => Some(request::keyed_request_id(&grant.grant_id, agent, key)),
-            Ok(None) => None,
-            Err(e) => return RequestView::not_found(format!("cannot read grant: {e:#}")),
-        },
-        None => None,
-    };
-    for id in canonical.into_iter().chain(keyed.as_deref()) {
-        match store.load_agent_request(net_name, agent, id) {
-            Ok(Some(record)) => return RequestView::of(&record),
-            Ok(None) => {}
-            Err(e) => return RequestView::not_found(format!("cannot read request: {e:#}")),
-        }
+    match store.load_agent_request(net_name, agent, raw_id) {
+        Ok(Some(record)) => RequestView::of(&record),
+        Ok(None) => RequestView::not_found(format!(
+            "no request {raw_id:?} recorded for agent {agent:?}"
+        )),
+        Err(e) => RequestView::not_found(format!("cannot read request: {e:#}")),
     }
-    RequestView::not_found(format!(
-        "no request {raw_id:?} recorded for agent {agent:?}"
-    ))
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -555,9 +539,9 @@ impl ServerHandler for SatsMcp {
              status='pending_approval' with a request_id: relay it to your human, then \
              observe with check_request(request_id) — free, no side effects. status='denied' \
              names a grant boundary no approval lifts — report it once and stop; only the \
-             human changing the grant can. Pass request_id on every request_send so a \
-             repeated call never files twice. Use get_grant() to see the remaining budget \
-             before filing.",
+             human changing the grant can. request_send requires an idempotency_key: pick \
+             a fresh one per send and reuse it on a retry, so a repeated call never files \
+             twice. Use get_grant() to see the remaining budget before filing.",
             self.agent,
             network_name(self.network),
         ))

@@ -62,7 +62,7 @@ fn id_of(view: &serde_json::Value) -> String {
         .as_str()
         .unwrap_or_else(|| panic!("no request_id in {view}"))
         .to_string();
-    assert_eq!(id.len(), 18, "{id}");
+    assert_eq!(id.len(), 34, "{id}");
     assert!(id.starts_with("r-"), "{id}");
     assert!(id[2..].bytes().all(|b| b.is_ascii_hexdigit()), "{id}");
     id
@@ -124,7 +124,9 @@ impl McpSession {
         }
     }
 
-    fn call_tool(
+    /// The whole JSON-RPC response, for calls expected to be rejected
+    /// before a tool result exists.
+    fn call_tool_raw(
         &mut self,
         id: u64,
         name: &str,
@@ -136,22 +138,31 @@ impl McpSession {
         }));
         let response = self.recv();
         assert_eq!(response["id"], id);
-        response["result"]["structuredContent"].clone()
+        response
+    }
+
+    fn call_tool(
+        &mut self,
+        id: u64,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        self.call_tool_raw(id, name, arguments)["result"]["structuredContent"].clone()
     }
 
     fn request_send(&mut self, id: u64, amount_sat: u64, key: &str) -> serde_json::Value {
         self.call_tool(
             id,
             "request_send",
-            serde_json::json!({ "address": ADDRESS, "amount_sat": amount_sat, "request_id": key }),
+            serde_json::json!({ "address": ADDRESS, "amount_sat": amount_sat, "idempotency_key": key }),
         )
     }
 
-    fn check_request(&mut self, id: u64, key: &str) -> serde_json::Value {
+    fn check_request(&mut self, id: u64, request_id: &str) -> serde_json::Value {
         self.call_tool(
             id,
             "check_request",
-            serde_json::json!({ "request_id": key }),
+            serde_json::json!({ "request_id": request_id }),
         )
     }
 }
@@ -315,24 +326,20 @@ fn mcp_serves_five_tools_and_enforces_the_grant() {
     assert_eq!(request_record(&dir, "claude", &big)["status"], "denied");
     assert_eq!(event_kinds(&dir), ["request_received", "denied"]);
 
-    // A keyless request is denied the same way and gets a random id.
-    let denied = mcp.call_tool(
-        5,
-        "request_send",
-        serde_json::json!({ "address": ADDRESS, "amount_sat": 60000 }),
-    );
+    // Over both the cap and the budget: the cap answers first.
+    let denied = mcp.request_send(5, 60_000, "huge");
     assert_eq!(denied["status"], "denied");
     assert_eq!(
         denied["reason"], "over_max_tx",
         "the cap answers before the budget"
     );
-    assert!(denied["request_id"].as_str().unwrap().starts_with("r-"));
+    assert_ne!(id_of(&denied), big);
 
     // A wrong-network address is a typed operational error, not a record.
     let bad = mcp.call_tool(
         6,
         "request_send",
-        serde_json::json!({ "address": "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", "amount_sat": 1 }),
+        serde_json::json!({ "address": "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4", "amount_sat": 1, "idempotency_key": "wrong-net" }),
     );
     assert_eq!(bad["status"], "error");
     assert_eq!(bad["error_code"], "invalid_address");
@@ -384,11 +391,20 @@ fn request_send_files_pending_and_approve_executes() {
         .join(format!("signet/agent-requests/claude/{id}.json"));
     let record_before = std::fs::read(&record_path).unwrap();
     let events_before = std::fs::read(dir.path().join("signet/events/log.jsonl")).unwrap();
-    for (call, handle) in [(3, "invoice-1"), (4, id.as_str()), (5, "invoice-1")] {
-        let view = mcp.check_request(call, handle);
+    for call in [3, 4] {
+        let view = mcp.check_request(call, &id);
         assert_eq!(view["status"], "pending_approval", "got: {view}");
         assert_eq!(view["request_id"], id);
     }
+    // The idempotency key is not a request id.
+    let by_key = mcp.check_request(5, "invoice-1");
+    assert_eq!(by_key["status"], "not_found", "got: {by_key}");
+    assert!(
+        by_key["message"]
+            .as_str()
+            .unwrap()
+            .contains("idempotency_key")
+    );
     assert_eq!(std::fs::read(&record_path).unwrap(), record_before);
     assert_eq!(
         std::fs::read(dir.path().join("signet/events/log.jsonl")).unwrap(),
@@ -409,7 +425,7 @@ fn request_send_files_pending_and_approve_executes() {
     assert_eq!(approved["remaining_budget_sat"], 50_000 - 4_500 - fee);
 
     // The agent observes the result without having done anything.
-    let view = mcp.check_request(6, "invoice-1");
+    let view = mcp.check_request(6, &id);
     assert_eq!(view["status"], "sent", "got: {view}");
     assert_eq!(view["txid"], txid);
     assert_eq!(view["fee_sat"], fee);
@@ -440,11 +456,17 @@ fn request_send_files_pending_and_approve_executes() {
     assert_eq!(log.as_array().unwrap().len(), 5);
 
     // Filing the same key again returns the settled request; it does
-    // not file a second one and never pays twice.
+    // not file a second one and never pays twice. Passing the server id
+    // back as the key is a different key: a new request, never a
+    // silent replay of the settled one.
     let again = mcp.request_send(7, 4_500, "invoice-1");
     assert_eq!(again["status"], "sent");
     assert_eq!(again["txid"], txid);
-    assert_eq!(event_kinds(&dir).len(), 5);
+    let misused = mcp.request_send(8, 4_500, &id);
+    assert_eq!(misused["status"], "pending_approval", "got: {misused}");
+    assert_ne!(id_of(&misused), id);
+    sats_json(&dir, &["--json", "agent", "dismiss", &id_of(&misused)]);
+    assert_eq!(event_kinds(&dir).len(), 7);
     assert_eq!(spent_sat(&dir), 4_500 + fee);
 
     // And a settled request cannot be approved again.
@@ -474,7 +496,7 @@ fn request_send_is_idempotent_and_conflicts_on_key_reuse() {
 
     let conflict = mcp.request_send(4, 2_000, "job-1");
     assert_eq!(conflict["status"], "error", "got: {conflict}");
-    assert_eq!(conflict["error_code"], "request_id_conflict");
+    assert_eq!(conflict["error_code"], "idempotency_key_conflict");
     assert_eq!(conflict["request_id"], id);
     assert_eq!(
         request_record(&dir, "claude", &id)["amount_sat"],
@@ -483,25 +505,25 @@ fn request_send_is_idempotent_and_conflicts_on_key_reuse() {
     );
     assert_eq!(event_kinds(&dir), ["request_received", "conflicted"]);
 
-    // Keyless requests each file separately.
-    let a = mcp.call_tool(
+    // The key is required: a call without one is rejected by the schema
+    // and files nothing.
+    let response = mcp.call_tool_raw(
         5,
         "request_send",
         serde_json::json!({ "address": ADDRESS, "amount_sat": 1_000 }),
     );
-    let b = mcp.call_tool(
-        6,
-        "request_send",
-        serde_json::json!({ "address": ADDRESS, "amount_sat": 1_000 }),
+    assert!(
+        response.get("error").is_some() || response["result"]["isError"] == true,
+        "got: {response}"
     );
-    assert_ne!(id_of(&a), id_of(&b));
     let queue = sats_json(&dir, &["--json", "agent", "requests"]);
-    assert_eq!(queue.as_array().unwrap().len(), 3);
+    assert_eq!(queue.as_array().unwrap().len(), 1);
+    assert_eq!(event_kinds(&dir), ["request_received", "conflicted"]);
 
     // A malformed key is a typed error, before anything touches the disk.
-    let bad = mcp.request_send(7, 1_000, "../etc");
+    let bad = mcp.request_send(6, 1_000, "../etc");
     assert_eq!(bad["status"], "error");
-    assert_eq!(bad["error_code"], "invalid_request_id");
+    assert_eq!(bad["error_code"], "invalid_idempotency_key");
 }
 
 /// Dismissal and grant boundaries are terminal states the agent observes.
@@ -518,7 +540,7 @@ fn dismissed_and_denied_requests_observe_as_terminal() {
     let later = id_of(&filed);
     let dismissed = sats_json(&dir, &["--json", "agent", "dismiss", &later]);
     assert_eq!(dismissed["status"], "dismissed");
-    let view = mcp.check_request(3, "later");
+    let view = mcp.check_request(3, &later);
     assert_eq!(view["status"], "dismissed", "got: {view}");
     assert!(view["message"].as_str().unwrap().contains("dismissed"));
     assert_eq!(event_kinds(&dir), ["request_received", "dismissed"]);
@@ -533,7 +555,7 @@ fn dismissed_and_denied_requests_observe_as_terminal() {
     let off = mcp.call_tool(
         4,
         "request_send",
-        serde_json::json!({ "address": other, "amount_sat": 1_000, "request_id": "stranger" }),
+        serde_json::json!({ "address": other, "amount_sat": 1_000, "idempotency_key": "stranger" }),
     );
     assert_eq!(off["status"], "denied", "got: {off}");
     assert_eq!(off["reason"], "recipient_not_allowed");
@@ -551,17 +573,14 @@ fn dismissed_and_denied_requests_observe_as_terminal() {
     let balance = watcher.call_tool(3, "get_balance", serde_json::json!({}));
     assert_eq!(balance["balance_sat"], 100_000, "reading still works");
 
-    // Another agent cannot see this agent's records through the tool,
-    // by the id or by the key.
+    // Another agent cannot see this agent's records through the tool.
     let cross = watcher.check_request(4, &later);
     assert_eq!(cross["status"], "not_found", "got: {cross}");
-    let cross = watcher.check_request(5, "later");
-    assert_eq!(cross["status"], "not_found", "got: {cross}");
     // The same key from another agent is another request.
-    let peek = watcher.request_send(6, 1_000, "later");
+    let peek = watcher.request_send(5, 1_000, "later");
     assert_eq!(peek["status"], "denied", "observe-only: {peek}");
     assert_ne!(id_of(&peek), later);
-    assert_eq!(mcp.check_request(6, "later")["status"], "dismissed");
+    assert_eq!(mcp.check_request(6, &later)["status"], "dismissed");
     let malformed = mcp.check_request(7, "../../etc");
     assert_eq!(malformed["status"], "not_found");
     assert!(malformed["message"].as_str().unwrap().contains("malformed"));
@@ -598,8 +617,7 @@ fn revocation_takes_effect_mid_session() {
     assert_eq!(refused["status"], "error", "got: {refused}");
     assert_eq!(refused["error_code"], "no_grant");
     assert_eq!(records(), records_before);
-    // Reading the grant reports it gone; observing the old request by
-    // its id works. Its key cannot be resolved without a grant.
+    // Reading the grant reports it gone; observing the old request works.
     let grant = mcp.call_tool(4, "get_grant", serde_json::json!({}));
     assert_eq!(grant["active"], false);
     assert_eq!(mcp.check_request(5, &before)["status"], "pending_approval");
@@ -608,9 +626,8 @@ fn revocation_takes_effect_mid_session() {
     let output = sats_output(&dir, &["agent", "approve", &before, "--yes"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("revoked"));
-    assert_eq!(mcp.check_request(6, "before")["status"], "not_found");
-    assert_eq!(mcp.check_request(7, &before)["status"], "denied");
-    assert_eq!(mcp.check_request(8, &before)["reason"], "revoked");
+    assert_eq!(mcp.check_request(6, &before)["status"], "denied");
+    assert_eq!(mcp.check_request(7, &before)["reason"], "revoked");
     assert_eq!(event_kinds(&dir), ["request_received", "denied"]);
 
     // A re-issued grant for the same agent never executes the old request.
@@ -621,20 +638,18 @@ fn revocation_takes_effect_mid_session() {
     assert_eq!(spent_sat(&dir), 0);
     let mut fresh_mcp = McpSession::start(&dir, "claude", &fresh);
     handshake(&mut fresh_mcp);
-    // The old request is not the new grant's: its key resolves to
-    // nothing under the new grant, and reusing it files a new request
-    // with a new id rather than returning the old record.
-    assert_eq!(fresh_mcp.check_request(2, "before")["status"], "not_found");
-    assert_eq!(fresh_mcp.check_request(3, &before)["status"], "denied");
-    let refiled = fresh_mcp.request_send(4, 1_000, "before");
+    // The old request is not the new grant's: reusing its key files a
+    // new request with a new id rather than returning the old record.
+    assert_eq!(fresh_mcp.check_request(2, &before)["status"], "denied");
+    let refiled = fresh_mcp.request_send(3, 1_000, "before");
     assert_eq!(refiled["status"], "pending_approval", "got: {refiled}");
     assert_ne!(id_of(&refiled), before);
     assert_eq!(
-        fresh_mcp.check_request(5, "before")["request_id"],
-        id_of(&refiled)
+        fresh_mcp.check_request(4, &id_of(&refiled))["status"],
+        "pending_approval"
     );
     assert_eq!(
-        fresh_mcp.request_send(6, 1_000, "after")["status"],
+        fresh_mcp.request_send(5, 1_000, "after")["status"],
         "pending_approval"
     );
     assert_eq!(records(), records_before + 2);
@@ -667,7 +682,7 @@ fn broadcast_failure_observes_as_broadcast_pending_until_rebroadcast() {
     assert_eq!(record["status"], "pending");
     let spent = spent_sat(&dir);
     assert!(spent > 1_000);
-    let view = mcp.check_request(3, "flaky");
+    let view = mcp.check_request(3, &flaky);
     assert_eq!(view["status"], "broadcast_pending", "got: {view}");
     assert_eq!(view["txid"], txid);
     assert_eq!(
@@ -695,7 +710,7 @@ fn broadcast_failure_observes_as_broadcast_pending_until_rebroadcast() {
     // The human retries the broadcast; the request settles to sent.
     std::fs::remove_file(fx.mockdata.join("broadcast-fail")).unwrap();
     run_sats(&dir, &["tx", "broadcast", &txid]);
-    assert_eq!(mcp.check_request(4, "flaky")["status"], "sent");
+    assert_eq!(mcp.check_request(4, &flaky)["status"], "sent");
     assert_eq!(spent_sat(&dir), spent, "no second draw");
     assert_eq!(request_record(&dir, "claude", &flaky)["status"], "sent");
     assert_eq!(event_kinds(&dir).last().unwrap(), "broadcast");
@@ -937,7 +952,7 @@ fn broadcast_timeout_keeps_signed_transaction_and_reserved_budget() {
             "broadcast_failed"
         ]
     );
-    let view = mcp.check_request(3, "broadcast-timeout");
+    let view = mcp.check_request(3, &id);
     assert_eq!(view["status"], "broadcast_pending");
     assert_eq!(view["txid"], txid);
     assert_eq!(http.requests.load(std::sync::atomic::Ordering::SeqCst), 1);

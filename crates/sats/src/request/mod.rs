@@ -14,12 +14,12 @@
 //! history. A request is bound to the grant instance (`grant_id`) that
 //! created it and never executes under another.
 //!
-//! Request ids are global: `r-` plus 16 hex characters. A keyed filing
-//! derives its id from the grant, the agent, and the client key, so the
-//! same key resolves to the same record within one grant and to a fresh
-//! record under a re-issued grant; a keyless filing gets a random id.
-//! The client key is only the agent's idempotency handle — the id is
-//! what humans review, approve, and dismiss.
+//! Request ids are global: `r-` plus 32 hex characters (128 bits). A
+//! filing derives its id from the grant, the agent, and the agent's
+//! idempotency key, so the same key resolves to the same record within
+//! one grant and to a fresh record under a re-issued grant. The key is
+//! only the agent's retry handle — the id is what humans review,
+//! approve, and dismiss.
 
 pub mod execute;
 
@@ -39,8 +39,8 @@ use sats_core::request::{AgentRequest, REQUEST_FORMAT_VERSION, RequestState};
 use crate::config::network_name;
 use crate::store::{Store, now_checked, unix_now};
 
-/// The canonical rule for a client-supplied request key.
-pub const REQUEST_KEY_RULE: &str = "request_id must be 1-64 characters of A-Za-z0-9_-";
+/// The canonical rule for an agent-supplied idempotency key.
+pub const REQUEST_KEY_RULE: &str = "idempotency_key must be 1-64 characters of A-Za-z0-9_-";
 
 pub fn valid_request_key(key: &str) -> bool {
     (1..=64).contains(&key.len())
@@ -49,21 +49,21 @@ pub fn valid_request_key(key: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// Whether `id` has the shape of a server request id: `r-` plus 16
+/// Whether `id` has the shape of a server request id: `r-` plus 32
 /// lowercase hex characters.
 pub fn is_request_id(id: &str) -> bool {
-    id.len() == 18
+    id.len() == 34
         && id.starts_with("r-")
         && id.as_bytes()[2..]
             .iter()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
 }
 
-/// The server request id a keyed filing resolves to: 64 bits of
-/// SHA-256 over the grant id, the agent, and the client key. The grant
-/// id is in the preimage so a key reused after a revoke and re-issue
-/// names a new request — a new grant never inherits old requests — and
-/// two agents with the same key never share an id.
+/// The server request id a filing resolves to: 128 bits of SHA-256
+/// over the grant id, the agent, and the idempotency key. The grant id
+/// is in the preimage so a key reused after a revoke and re-issue names
+/// a new request — a new grant never inherits old requests — and two
+/// agents with the same key never share an id.
 pub fn keyed_request_id(grant_id: &str, agent: &str, key: &str) -> String {
     let mut preimage = Vec::with_capacity(64);
     preimage.extend_from_slice(b"sats-request-v1\0");
@@ -73,14 +73,7 @@ pub fn keyed_request_id(grant_id: &str, agent: &str, key: &str) -> String {
     preimage.push(0);
     preimage.extend_from_slice(key.as_bytes());
     let digest = sha256::Hash::hash(&preimage);
-    format!("r-{}", hex::encode(&digest.as_byte_array()[..8]))
-}
-
-fn random_request_id() -> Result<String> {
-    let mut bytes = [0u8; 8];
-    getrandom::fill(&mut bytes)
-        .map_err(|err| anyhow::anyhow!("cannot generate request id: {err}"))?;
-    Ok(format!("r-{}", hex::encode(bytes)))
+    format!("r-{}", hex::encode(&digest.as_byte_array()[..16]))
 }
 
 /// What an agent asks for. The token authenticates the agent against
@@ -88,7 +81,9 @@ fn random_request_id() -> Result<String> {
 pub struct CreateParams<'a> {
     pub agent: &'a str,
     pub token: &'a str,
-    pub client_request_id: Option<&'a str>,
+    /// The agent's retry handle: required, so a lost response or a
+    /// retried tool call can never file twice.
+    pub idempotency_key: &'a str,
     pub address: &'a str,
     pub amount_sat: u64,
 }
@@ -99,7 +94,7 @@ pub struct CreateParams<'a> {
 #[derive(Debug)]
 pub enum CreateError {
     InvalidAgent,
-    InvalidRequestId,
+    InvalidIdempotencyKey,
     InvalidAddress(String),
     ClockUnavailable(String),
     /// No grant on file for this agent: nothing can be authenticated,
@@ -118,12 +113,12 @@ impl CreateError {
     pub fn code(&self) -> &'static str {
         match self {
             CreateError::InvalidAgent => "invalid_agent",
-            CreateError::InvalidRequestId => "invalid_request_id",
+            CreateError::InvalidIdempotencyKey => "invalid_idempotency_key",
             CreateError::InvalidAddress(_) => "invalid_address",
             CreateError::ClockUnavailable(_) => "clock_unavailable",
             CreateError::NoGrant => "no_grant",
             CreateError::Unauthorized => "unauthorized",
-            CreateError::Conflict { .. } => "request_id_conflict",
+            CreateError::Conflict { .. } => "idempotency_key_conflict",
             CreateError::Store(_) => "store_error",
         }
     }
@@ -131,7 +126,7 @@ impl CreateError {
     pub fn message(&self, agent: &str) -> String {
         match self {
             CreateError::InvalidAgent => AGENT_NAME_RULE.to_string(),
-            CreateError::InvalidRequestId => REQUEST_KEY_RULE.to_string(),
+            CreateError::InvalidIdempotencyKey => REQUEST_KEY_RULE.to_string(),
             CreateError::InvalidAddress(message) => message.clone(),
             CreateError::ClockUnavailable(message) => message.clone(),
             CreateError::NoGrant => format!(
@@ -142,7 +137,8 @@ impl CreateError {
                  replaced later has a different token"
             ),
             CreateError::Conflict { request_id } => format!(
-                "request_id was already used for a different send ({request_id}) — pick a fresh id"
+                "idempotency_key was already used for a different send ({request_id}) — pick a \
+                 fresh key"
             ),
             CreateError::Store(err) => format!("{err:#}"),
         }
@@ -160,13 +156,15 @@ impl From<anyhow::Error> for CreateError {
 /// The grant is read, the token checked, and the record written under
 /// the grant lock, so a revoke or re-issue cannot interleave: a request
 /// is created under exactly one grant instance and records its
-/// `grant_id`. The grant's ladder runs at creation with the fee unknown
-/// (zero): a proposal inside every boundary is recorded as
-/// `pending_approval`; a hard boundary is recorded as `denied`. The
-/// audit line is appended *before* the record is written, so no request
-/// can exist on disk without its causal event. The same client key with
-/// the same canonical intent returns the existing record without
-/// writing anything; the same key with a different intent is a conflict.
+/// `grant_id`. The grant's reservation ledger is reconciled first, so
+/// the verdict is never taken from accounting a crashed execution left
+/// behind. The ladder then runs with the fee unknown (zero): a proposal
+/// inside every boundary is recorded as `pending_approval`; a hard
+/// boundary is recorded as `denied`. The audit line is appended
+/// *before* the record is written, so no request can exist on disk
+/// without its causal event. The same key with the same canonical
+/// intent returns the existing record without writing anything; the
+/// same key with a different intent is a conflict.
 pub fn create(
     store: &Store,
     network: Network,
@@ -178,11 +176,8 @@ pub fn create(
     if !valid_agent_name(params.agent) {
         return Err(CreateError::InvalidAgent);
     }
-    if params
-        .client_request_id
-        .is_some_and(|key| !valid_request_key(key))
-    {
-        return Err(CreateError::InvalidRequestId);
+    if !valid_request_key(params.idempotency_key) {
+        return Err(CreateError::InvalidIdempotencyKey);
     }
     // Normalize the recipient first: the canonical intent hashes one
     // spelling of the address, so textual variants deduplicate.
@@ -199,12 +194,15 @@ pub fn create(
     let now = now_checked().map_err(|e| CreateError::ClockUnavailable(format!("{e:#}")))?;
 
     let _lock = store.lock_grants(net_name)?;
-    let grant = store
+    let mut grant = store
         .load_grant(net_name, params.agent)?
         .ok_or(CreateError::NoGrant)?;
     if !grant.authorizes(params.token) {
         return Err(CreateError::Unauthorized);
     }
+    // A draw orphaned by a crashed execution must not deny this
+    // request: settle the ledger before any policy decision.
+    reconcile_grant_locked(store, net_name, &mut grant)?;
 
     let digest = SendIntent {
         network: net_name.to_string(),
@@ -218,33 +216,16 @@ pub fn create(
     // same request. The id already commits to the grant, so a record
     // under another grant id at this path is a collision, answered as a
     // conflict rather than as someone else's request.
-    let id = match params.client_request_id {
-        Some(key) => {
-            let id = keyed_request_id(&grant.grant_id, params.agent, key);
-            if let Some(existing) = store.load_agent_request(net_name, params.agent, &id)? {
-                if existing.grant_id != grant.grant_id || existing.intent_digest != digest {
-                    journal_soft(store, net_name, &existing, EventKind::Conflicted);
-                    return Err(CreateError::Conflict {
-                        request_id: existing.id,
-                    });
-                }
-                return Ok(existing);
-            }
-            id
+    let id = keyed_request_id(&grant.grant_id, params.agent, params.idempotency_key);
+    if let Some(existing) = store.load_agent_request(net_name, params.agent, &id)? {
+        if existing.grant_id != grant.grant_id || existing.intent_digest != digest {
+            journal_soft(store, net_name, &existing, EventKind::Conflicted);
+            return Err(CreateError::Conflict {
+                request_id: existing.id,
+            });
         }
-        None => {
-            // Keyless requests get a random id; collisions retry.
-            loop {
-                let candidate = random_request_id()?;
-                if store
-                    .load_agent_request(net_name, params.agent, &candidate)?
-                    .is_none()
-                {
-                    break candidate;
-                }
-            }
-        }
-    };
+        return Ok(existing);
+    }
 
     // The verdict at creation: fee unknown, so amount alone. The full
     // ladder runs — recipient rule included — so a refusal any later
@@ -271,7 +252,7 @@ pub fn create(
         network: net_name.to_string(),
         agent: params.agent.to_string(),
         grant_id: grant.grant_id.clone(),
-        client_request_id: params.client_request_id.map(str::to_string),
+        idempotency_key: Some(params.idempotency_key.to_string()),
         recipient: recipient.clone(),
         amount_sat: params.amount_sat,
         intent_digest: digest,
@@ -418,9 +399,22 @@ pub fn reconcile_grant(store: &Store, net_name: &str, agent: &str) -> Result<()>
     let Some(mut grant) = store.load_grant(net_name, agent)? else {
         return Ok(());
     };
+    reconcile_grant_locked(store, net_name, &mut grant)
+}
+
+/// [`reconcile_grant`] for a caller that already holds the grant lock
+/// and the grant: the ledger is settled in place, and the grant is
+/// persisted only if something was returned.
+pub(crate) fn reconcile_grant_locked(
+    store: &Store,
+    net_name: &str,
+    grant: &mut Grant,
+) -> Result<()> {
+    let agent = grant.agent.clone();
     let mut released = Vec::new();
     for entry in grant.reservations.clone() {
-        let Ok(Some(request)) = store.load_agent_request(net_name, agent, &entry.request_id) else {
+        let Ok(Some(request)) = store.load_agent_request(net_name, &agent, &entry.request_id)
+        else {
             continue;
         };
         if never_reached_signer(&request.state)
@@ -432,7 +426,7 @@ pub fn reconcile_grant(store: &Store, net_name: &str, agent: &str) -> Result<()>
     if released.is_empty() {
         return Ok(());
     }
-    store.save_grant(net_name, &grant)?;
+    store.save_grant(net_name, grant)?;
     for (request, spend) in released {
         journal_soft(
             store,
@@ -534,7 +528,15 @@ pub fn reconcile(store: &Store, network: Network, request: AgentRequest) -> Resu
             };
             fresh.updated_at = now;
             store.save_agent_request(net_name, &fresh)?;
-            journal_soft(store, net_name, &fresh, EventKind::Failed { message });
+            journal_soft(
+                store,
+                net_name,
+                &fresh,
+                EventKind::Unresolved {
+                    message,
+                    txid: None,
+                },
+            );
         }
     }
     Ok(fresh)
@@ -678,11 +680,12 @@ mod tests {
 
     #[test]
     fn request_id_shape() {
-        assert!(is_request_id("r-0123456789abcdef"));
-        assert!(!is_request_id("r-0123456789ABCDEF"));
-        assert!(!is_request_id("r-0123456789abcde"));
-        assert!(!is_request_id("k-0123456789abcdef"));
+        assert!(is_request_id("r-0123456789abcdef0123456789abcdef"));
+        assert!(!is_request_id("r-0123456789ABCDEF0123456789ABCDEF"));
+        assert!(!is_request_id("r-0123456789abcdef0123456789abcde"));
+        assert!(!is_request_id("r-0123456789abcdef"));
+        assert!(!is_request_id("k-0123456789abcdef0123456789abcdef"));
         assert!(!is_request_id("invoice-1"));
-        assert!(is_request_id(&random_request_id().unwrap()));
+        assert_eq!(keyed_request_id("g1", "alice", "k").len(), 34);
     }
 }

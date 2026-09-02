@@ -285,7 +285,7 @@ sats agent requests            # pending: requests awaiting your decision
 sats agent requests --all      # every recorded request, newest first
 sats agent requests --watch    # stay running; print each new pending request once
 sats agent log                 # the causal event chain, oldest first
-sats agent log --request r-2e7d41c0a95b6f13
+sats agent log --request r-2e7d41c0a95b6f13c4d5e6f708192a3b
 ```
 
 `requests` shows each request's id, agent, recipient, amount, status, and

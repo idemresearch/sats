@@ -167,9 +167,12 @@ and rendering belong to callers.
   durable record proves the signer was never invoked (`pending_approval`,
   `failed`, `denied`); every other draw stays. Never solve a crash
   window by accepting a leaked or double-counted budget.
-- Request ids are global (`r-` + 16 hex). A keyed filing derives its id
-  from the grant id, the agent, and the client key; the client key is
-  never the id. A request records the `grant_id` (128 random bits) of
+- Request ids are global (`r-` + 32 hex). A filing derives its id from
+  the grant id, the agent, and the agent's idempotency key; the key is
+  never the id, and `check_request` deals in ids only. Request creation
+  reconciles the reservation ledger under the grant lock before its
+  verdict, so a crashed execution's orphaned draw never denies another
+  request. A request records the `grant_id` (128 random bits) of
   the grant that created it and executes only under that instance;
   creation holds the grant lock so a revoke or re-issue cannot
   interleave.

@@ -62,10 +62,19 @@ pub enum EventKind {
         txid: String,
         message: String,
     },
+    /// Execution stopped before `Signer::sign` was invoked; the draw was
+    /// returned and the request is re-approvable.
     Failed {
         message: String,
     },
-    /// A request key was reused for a different intent.
+    /// The signer was invoked and the outcome is not durable: a
+    /// signature may exist. Never refunded, never signed again.
+    Unresolved {
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        txid: Option<String>,
+    },
+    /// An idempotency key was reused for a different intent.
     Conflicted,
     /// A human changed the grant's authority mode. Control-plane events
     /// carry "-" for the request id and intent digest: they belong to
@@ -105,6 +114,7 @@ impl AgentEvent {
             EventKind::Broadcast { .. } => "broadcast",
             EventKind::BroadcastFailed { .. } => "broadcast_failed",
             EventKind::Failed { .. } => "failed",
+            EventKind::Unresolved { .. } => "unresolved",
             EventKind::Conflicted => "conflicted",
             EventKind::ModeChanged { .. } => "mode_changed",
             EventKind::RecipientAllowed { .. } => "recipient_allowed",
@@ -189,6 +199,10 @@ mod tests {
             }),
             event(EventKind::Failed {
                 message: "m".into(),
+            }),
+            event(EventKind::Unresolved {
+                message: "m".into(),
+                txid: Some("t".into()),
             }),
             event(EventKind::Conflicted),
             event(EventKind::ModeChanged {

@@ -47,7 +47,7 @@ use crate::config::network_name;
 use crate::provider::Services;
 use crate::request::{
     bound_grant, describe_settled, journal, journal_soft, reconcile, reconcile_grant,
-    release_orphan,
+    reconcile_grant_locked, release_orphan,
 };
 use crate::store::{RequestClaim, Store, now_checked, unix_now};
 use crate::walletd::{self, WalletCtx};
@@ -284,12 +284,12 @@ fn commit_inner(
                 return Ok(Outcome::Denied(reason));
             }
         };
-        // The record is approvable, so it never reached the signer since
-        // its last transition: a draw it still holds is an orphan of an
-        // interrupted attempt. Return it before drawing again, so one
-        // request never holds two draws and a retry with a different fee
-        // is never refused as a mismatch.
-        release_orphan(store, net_name, &mut grant, &request)?;
+        // Settle the ledger under the lock before drawing: this request
+        // is approvable, so a draw it still holds is an orphan of an
+        // interrupted attempt (returned, so a retry with a different fee
+        // is never refused as a mismatch), and no other request's orphan
+        // may deny this one.
+        reconcile_grant_locked(store, net_name, &mut grant)?;
         match grant.reserve_send(&request.id, &request.recipient, &spend, now) {
             Ok(Reserved::Drawn) => {}
             Ok(Reserved::AlreadyReserved) => {
@@ -593,7 +593,7 @@ fn record_unresolved_locked(
     request.state = RequestState::Unresolved {
         at: now,
         message: message.to_string(),
-        txid,
+        txid: txid.clone(),
     };
     request.updated_at = now;
     store.save_agent_request(net_name, request)?;
@@ -601,8 +601,9 @@ fn record_unresolved_locked(
         store,
         net_name,
         request,
-        EventKind::Failed {
+        EventKind::Unresolved {
             message: message.to_string(),
+            txid,
         },
     );
     Ok(())
@@ -744,7 +745,7 @@ mod tests {
                 &CreateParams {
                     agent,
                     token,
-                    client_request_id: Some(key),
+                    idempotency_key: key,
                     address: ADDRESS,
                     amount_sat,
                 },
@@ -971,7 +972,7 @@ mod tests {
             first.id,
             keyed_request_id(&grant.grant_id, "claude", "job-1")
         );
-        assert_eq!(first.client_request_id.as_deref(), Some("job-1"));
+        assert_eq!(first.idempotency_key.as_deref(), Some("job-1"));
         assert_eq!(first.state, RequestState::PendingApproval);
         assert_eq!(first.grant_id, grant.grant_id);
         assert_eq!(grant.grant_id.len(), 32);
@@ -1187,7 +1188,7 @@ mod tests {
                 &CreateParams {
                     agent: "claude",
                     token: &old_token,
-                    client_request_id: Some("racy"),
+                    idempotency_key: "racy",
                     address: ADDRESS,
                     amount_sat: 10_000,
                 },
@@ -1317,7 +1318,7 @@ mod tests {
         assert_eq!(fx.transactions(), 0);
         assert_eq!(
             fx.events(),
-            vec!["request_received", "approved", "reserved", "failed"]
+            vec!["request_received", "approved", "reserved", "unresolved"]
         );
         // No second invocation, however the human asks, and no
         // reconciliation ever returns the draw.
@@ -1435,7 +1436,7 @@ mod tests {
         assert_eq!(fx.transactions(), 0);
         assert_eq!(
             fx.events(),
-            vec!["request_received", "approved", "reserved", "failed"]
+            vec!["request_received", "approved", "reserved", "unresolved"]
         );
         // Never a second signature, however the human asks.
         let again = approve(&fx, &id, &probe).unwrap_err();
@@ -1550,6 +1551,49 @@ mod tests {
     }
 
     // ---- crash windows around the reservation --------------------------
+
+    /// An orphaned draw must never deny another request. Crash A after
+    /// its reservation is persisted, then file B before anything lists or
+    /// retries A: creation settles the ledger before its verdict, so B
+    /// is pending, A's draw is back, and A still executes exactly once.
+    #[test]
+    fn create_reconciles_an_orphaned_draw_before_evaluating_a_new_request() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(15_000, 5_000);
+        let a = fx.create(&token, "a", 10_000).id;
+        let probe = SignerProbe::default();
+        approve_crashing_at(&fx, &a, &probe, "grant-saved").unwrap_err();
+        let stale = fx.grant_state();
+        assert!(stale.reservation(&a).is_some());
+        assert!(
+            stale.remaining_sat() < 5_000,
+            "the stale view would deny B: {} sat left",
+            stale.remaining_sat()
+        );
+        assert_eq!(fx.request(&a).status(), "pending_approval");
+
+        let b = fx.create(&token, "b", 5_000);
+        assert_eq!(b.state, RequestState::PendingApproval, "{:?}", b.state);
+        let grant = fx.grant_state();
+        assert_eq!(grant.spent_sat, 0);
+        assert_eq!(grant.tx_count, 0);
+        assert!(grant.reservations.is_empty());
+        assert_eq!(fx.request(&a).status(), "pending_approval");
+        assert_eq!(
+            fx.events(),
+            vec!["request_received", "refunded", "request_received"]
+        );
+
+        // A still executes, drawing once; the ledger is exact.
+        let (_, fee_sat) = sent(approve(&fx, &a, &probe).unwrap());
+        assert_eq!(probe.counts(), (1, 1));
+        let grant = fx.grant_state();
+        assert_eq!(grant.spent_sat, 10_000 + fee_sat);
+        assert_eq!(grant.tx_count, 1);
+        assert_eq!(grant.reservations.len(), 1);
+        assert_eq!(fx.count_events("refunded"), 1);
+        fx.assert_ledger_consistent();
+    }
 
     /// Window A: the process dies after deciding to reserve and before
     /// the grant is written. Nothing is on disk; the retry draws once.
@@ -1713,7 +1757,7 @@ mod tests {
         let grant = fx.grant_state();
         assert_eq!(grant.spent_sat, spent, "never refunded");
         assert!(grant.reservation(&id).is_some());
-        assert_eq!(fx.events(), vec!["request_received", "failed"]);
+        assert_eq!(fx.events(), vec!["request_received", "unresolved"]);
         list_reconciled(&fx.store, Network::Signet).unwrap();
         assert_eq!(fx.grant_state().spent_sat, spent);
         assert!(approve(&fx, &id, &probe).is_err());
@@ -1750,7 +1794,7 @@ mod tests {
         let grant = fx.grant_state();
         assert_eq!(grant.spent_sat, 10_300, "never refunded");
         assert_eq!(grant.tx_count, 1);
-        assert_eq!(fx.events(), vec!["request_received", "failed"]);
+        assert_eq!(fx.events(), vec!["request_received", "unresolved"]);
         // Reconciling again is a no-op, and approving refuses.
         list_reconciled(&fx.store, Network::Signet).unwrap();
         assert_eq!(fx.grant_state().spent_sat, 10_300);
@@ -1856,11 +1900,15 @@ mod tests {
         }
         // And one draw whose record is unreadable.
         grant
-            .reserve_send("r-00000000000000ff", ADDRESS, &spend, now)
+            .reserve_send("r-000000000000000000000000000000ff", ADDRESS, &spend, now)
             .unwrap();
         fx.store.save_grant("signet", &grant).unwrap();
         let requests_dir = fx.dir.path().join("signet/agent-requests/claude");
-        std::fs::write(requests_dir.join("r-00000000000000ff.json"), b"torn").unwrap();
+        std::fs::write(
+            requests_dir.join("r-000000000000000000000000000000ff.json"),
+            b"torn",
+        )
+        .unwrap();
 
         crate::request::reconcile_grant(&fx.store, "signet", "claude").unwrap();
         let after = fx.grant_state();

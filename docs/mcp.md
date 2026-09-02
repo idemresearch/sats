@@ -90,17 +90,20 @@ issue one.
 
 Files a request to send bitcoin.
 
-Parameters: `address`, `amount_sat`, and an optional `request_id`
-(1–64 characters of `A-Za-z0-9_-`). The `request_id` you pass is a
-client idempotency key; the `request_id` the result returns is the
-server's request id — `r-` plus 16 hex characters, globally unique
-across agents — and is the handle the human approves or dismisses by.
-With a key, a repeated call with the identical address and amount
-returns the existing request instead of filing a second one; reusing the
+Parameters: `address`, `amount_sat`, and `idempotency_key` (required;
+1–64 characters of `A-Za-z0-9_-`). The key is the agent's retry
+handle: a repeated call with the same key and the identical address and
+amount returns the existing request instead of filing a second one, so
+a lost response or a retried tool call never files twice; reusing the
 key for a different send is a typed error. The key is scoped to the
 grant it was filed under: after a revoke and re-issue, the same key
-files a new request rather than returning the old grant's. Without a
-key, every call files a new request with a random id.
+files a new request rather than returning the old grant's.
+
+The `request_id` the result returns is the server's request id — `r-`
+plus 32 hex characters, globally unique across agents — and is the
+handle the human approves or dismisses by and the agent observes with.
+It is never the key: passing a returned `request_id` back as an
+`idempotency_key` files a new request.
 
 The grant's full verdict ladder runs at filing, with the fee unknown. A
 proposal inside every boundary is recorded as `pending_approval` and
@@ -109,10 +112,10 @@ returned as a successful result:
 ```json
 {
   "status": "pending_approval",
-  "request_id": "r-8c1f0a2b9d3e4f57",
+  "request_id": "r-8c1f0a2b9d3e4f57a1b2c3d4e5f60718",
   "recipient": "tb1p...",
   "amount_sat": 4500,
-  "message": "filed for human review — the human approves with: sats agent approve r-8c1f0a2b9d3e4f57; poll check_request to observe the result, and do not file it again"
+  "message": "filed for human review — the human approves with: sats agent approve r-8c1f0a2b9d3e4f57a1b2c3d4e5f60718; poll check_request to observe the result, and do not file it again"
 }
 ```
 
@@ -122,7 +125,7 @@ recorded as `denied`, with a `reason`:
 ```json
 {
   "status": "denied",
-  "request_id": "r-2e7d41c0a95b6f13",
+  "request_id": "r-2e7d41c0a95b6f13c4d5e6f708192a3b",
   "reason": "over_max_tx",
   "recipient": "tb1p...",
   "amount_sat": 20000,
@@ -136,13 +139,12 @@ escalation is the human changing the grant.
 ### `check_request`
 
 Returns the state of one of this agent's own requests, by the `request_id`
-a `request_send` result returned or the bare key that was passed to it.
-A key resolves under the grant on file, exactly as `request_send`
-resolves it, so a key from before a re-issue names nothing; the returned
-id always works. It reads the durable record only: no chain access, no
-side effects. The result has the same shape as `request_send`; a `sent`
-request carries its `txid` and `fee_sat`. An unknown or malformed id is
-`status: "not_found"`, and another agent's requests are never visible.
+a `request_send` result returned. It deals in server request ids only:
+an idempotency key is a malformed id here. It reads the durable record
+only: no chain access, no side effects. The result has the same shape
+as `request_send`; a `sent` request carries its `txid` and `fee_sat`. An
+unknown or malformed id is `status: "not_found"`, and another agent's
+requests are never visible.
 
 ## Request states
 
@@ -163,9 +165,9 @@ call itself, with an `error_code` and no record written.
 | `error_code` | Meaning |
 |---|---|
 | `invalid_agent` | The agent name is not 1–32 characters of `a-z0-9_-` |
-| `invalid_request_id` | The key is not 1–64 characters of `A-Za-z0-9_-` |
+| `invalid_idempotency_key` | The key is missing or not 1–64 characters of `A-Za-z0-9_-` |
 | `invalid_address` | The address does not parse, or is for another network |
-| `request_id_conflict` | The key was already used for a different send; `request_id` names it |
+| `idempotency_key_conflict` | The key was already used for a different send; `request_id` names it |
 | `no_grant` | No grant on file: nothing can be authenticated, so nothing is written |
 | `unauthorized` | The presented token does not authorize this agent's grant |
 | `clock_unavailable` | The system clock cannot be read; expiry cannot be evaluated |
