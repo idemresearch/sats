@@ -1,195 +1,166 @@
-//! One-time approval of an exact asked agent request.
+//! `sats agent approve` — the human-authorized execution path, v0.0.1.
 //!
-//! The approval binds the request's intent digest — network, agent,
-//! recipient, amount — so it authorizes exactly the send the human saw,
-//! once, until it expires or is revoked with `sats agent deny`. It
-//! authorizes a proposal *inside* the grant: every grant boundary,
-//! the fee cap included, still applies when the send executes.
+//! A thin adapter: the request is staged on current chain state so the
+//! human reviews the real fee, the password prompt is the authorization,
+//! and the shared executor in `crate::request::execute` does the rest.
 
-use anyhow::{Context, Result, bail};
-use sats_core::authz::{Decision, Grant, IntentApproval, SpendRequest, evaluate_send};
+use anyhow::Result;
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
-use sats_core::request::{AgentRequest, RequestOutcome};
+use sats_core::signer::LocalSigner;
 
-use crate::config::network_name;
-use crate::store::{Store, now_checked};
+use crate::provider::Services;
+use crate::request::execute::{self, Outcome, Stage};
+use crate::store::Store;
 use crate::{keys, ui};
 
 pub fn run(
     store: &Store,
     network: Network,
+    services: &Services,
     id_or_prefix: &str,
-    duration: &str,
+    yes: bool,
     json: bool,
 ) -> Result<()> {
-    let net_name = network_name(network);
-    let request = store.find_agent_request(net_name, id_or_prefix)?;
-    let grant = ensure_approvable(store, net_name, &request, now_checked()?)?;
-    match store.claim_agent_request(net_name, &request.agent, &request.id)? {
-        Some(claim) => drop(claim),
-        None => bail!(
-            "request {} is executing right now — wait for it to settle",
-            request.id
-        ),
-    }
-
-    let lifetime = humantime::parse_duration(duration)
-        .with_context(|| format!("invalid --for {duration:?} (try 1h, 30m)"))?
-        .as_secs();
-    if lifetime == 0 {
-        bail!("--for must be a positive duration");
-    }
+    let staged = match execute::stage(store, network, services, id_or_prefix)? {
+        Stage::Ready(staged) => staged,
+        Stage::Denied(request, reason) => return report_denied(&request.id, &reason, json),
+    };
 
     if !json {
-        let mut rows = vec![
-            ("Approve", request.id.clone()),
-            ("Agent", request.agent.clone()),
-            ("Recipient", request.recipient.clone()),
-            ("Amount", format!("{} sat", format_sats(request.amount_sat))),
+        let rows = vec![
+            ("Approve", staged.request.id.clone()),
+            ("Agent", staged.request.agent.clone()),
+            ("Recipient", staged.request.recipient.clone()),
+            (
+                "Amount",
+                format!("{} sat", format_sats(staged.spend.amount_sat)),
+            ),
+            ("Fee", format!("{} sat", format_sats(staged.spend.fee_sat))),
+            (
+                "Total",
+                format!("{} sat", format_sats(staged.spend.total_sat())),
+            ),
+            (
+                "Budget",
+                format!(
+                    "{} sat remaining after this",
+                    format_sats(
+                        staged
+                            .grant
+                            .remaining_sat()
+                            .saturating_sub(staged.spend.total_sat())
+                    )
+                ),
+            ),
         ];
-        rows.push((
-            "Max fee",
-            format!("{} sat (the grant's cap)", format_sats(grant.max_fee_sat)),
-        ));
-        rows.push((
-            "Budget",
-            format!("{} sat remaining", format_sats(grant.remaining_sat())),
-        ));
-        rows.push(("For", ui::human_duration(lifetime)));
         ui::kv_rows(&rows);
         if network == Network::Bitcoin {
-            ui::warn("mainnet approval — this authorizes real bitcoin, once");
+            ui::warn("mainnet approval — this signs and broadcasts real bitcoin");
+        }
+        if !yes && !ui::confirm("Approve and sign?", true)? {
+            ui::dim("aborted — the request stays pending");
+            return Ok(());
         }
     }
 
-    // The password prompt IS the human authorization, exactly as it is
-    // for grant creation; the unlocked mnemonic itself is not needed.
-    let _ = keys::unlock(store)?;
+    // The password prompt IS the human authorization, and the key it
+    // unseals lives only in the signer factory below, constructed after
+    // the reservation is durable.
+    let mnemonic = keys::unlock(store)?;
+    let request_id = staged.request.id.clone();
+    let outcome = execute::commit(store, network, services, *staged, move || {
+        Ok(Box::new(LocalSigner::new(mnemonic, network)))
+    })?;
 
-    let replaced;
-    let approval;
-    {
-        // Under the grant lock: approval writes serialize with budget
-        // decisions, policy changes, and a concurrent deny. Recheck after
-        // the password prompt so a newly hard restriction cannot arm an
-        // approval that the daemon would refuse.
-        let _lock = store.lock_grants(net_name)?;
-        let now = now_checked()?;
-        let mut fresh = store
-            .load_agent_request(net_name, &request.agent, &request.id)?
-            .with_context(|| format!("request {} disappeared", request.id))?;
-        ensure_approvable(store, net_name, &fresh, now)?;
-        approval = IntentApproval {
-            intent_digest: request.intent_digest.clone(),
-            approved_at: now,
-            expires_at: now.saturating_add(lifetime),
-            consumed_at: None,
-            consumed_by_request: None,
-        };
-        replaced = fresh
-            .approval
-            .as_ref()
-            .is_some_and(|a| a.consumed_at.is_none());
-        fresh.approval = Some(approval.clone());
-        // An explicit approval outranks an earlier dismissal.
-        fresh.dismissed_at = None;
-        fresh.updated_at = now;
-        store.save_agent_request(net_name, &fresh)?;
+    match outcome {
+        Outcome::Sent {
+            txid,
+            amount_sat,
+            fee_sat,
+            remaining_sat,
+        } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": request_id,
+                        "status": "sent",
+                        "txid": txid,
+                        "amount_sat": amount_sat,
+                        "fee_sat": fee_sat,
+                        "total_sat": amount_sat.saturating_add(fee_sat),
+                        "remaining_budget_sat": remaining_sat,
+                    })
+                );
+            } else {
+                println!();
+                ui::ok(&format!("sent  {request_id}  {txid}"));
+            }
+            Ok(())
+        }
+        Outcome::BroadcastPending {
+            txid,
+            amount_sat,
+            fee_sat,
+            message,
+        } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": request_id,
+                        "status": "broadcast_pending",
+                        "txid": txid,
+                        "amount_sat": amount_sat,
+                        "fee_sat": fee_sat,
+                        "message": message,
+                    })
+                );
+                Ok(())
+            } else {
+                anyhow::bail!("{message}")
+            }
+        }
+        Outcome::Failed { message } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": request_id,
+                        "status": "failed",
+                        "message": message,
+                    })
+                );
+                Ok(())
+            } else {
+                anyhow::bail!("{message} — the request can be approved again")
+            }
+        }
+        Outcome::Denied(reason) => report_denied(&request_id, &reason, json),
     }
-    if let Err(err) = store.append_event(
-        net_name,
-        &sats_core::event::AgentEvent {
-            format_version: sats_core::event::EVENT_FORMAT_VERSION,
-            at: approval.approved_at,
-            network: net_name.to_string(),
-            agent: request.agent.clone(),
-            request_id: request.id.clone(),
-            intent_digest: request.intent_digest.clone(),
-            kind: sats_core::event::EventKind::Approved {
-                approval_expires_at: approval.expires_at,
-            },
-        },
-    ) {
-        eprintln!("⚠ event log append failed: {err:#}");
-    }
+}
 
+/// A grant boundary refused the request at execution. In JSON the
+/// terminal state is the result; for a human it is a failure to act on.
+fn report_denied(
+    request_id: &str,
+    reason: &sats_core::authz::DenyReason,
+    json: bool,
+) -> Result<()> {
     if json {
         println!(
             "{}",
             serde_json::json!({
-                "id": request.id,
-                "agent": request.agent,
-                "recipient": request.recipient,
-                "amount_sat": request.amount_sat,
-                "expires_at": approval.expires_at,
-                "replaced": replaced,
+                "id": request_id,
+                "status": "denied",
+                "reason": reason.code(),
             })
         );
-    } else {
-        println!();
-        ui::ok(&format!(
-            "approved  {} (single use, expires in {})",
-            request.id,
-            ui::human_duration(lifetime)
-        ));
-        ui::dim("the agent's next matching send consumes this approval");
+        return Ok(());
     }
-    Ok(())
-}
-
-/// Refuse hard refusals before prompting, then again under the grant
-/// lock before writing; hand back the grant the check ran against. The
-/// recorded refusal alone can be stale. As in the daemon's precheck, fee
-/// zero checks the current amount against the grant's boundaries; the
-/// daemon still checks the prepared transaction's actual fee later.
-fn ensure_approvable(
-    store: &Store,
-    network: &str,
-    request: &AgentRequest,
-    now: u64,
-) -> Result<Grant> {
-    if matches!(request.outcome, Some(RequestOutcome::Sent { .. })) {
-        bail!(
-            "request {} was already sent — nothing to approve",
-            request.id
-        );
-    }
-    if let Some(RequestOutcome::Denied { deny, .. }) = &request.outcome
-        && !deny.approvable()
-    {
-        bail!(
-            "request {} was refused with {}, which no approval can lift — the only \
-             escalation is changing the grant itself: sats agent grant {} --budget <sats> ...",
-            request.id,
-            deny.code(),
-            request.agent,
-        );
-    }
-    let grant = store
-        .load_grant(network, &request.agent)?
-        .with_context(|| {
-            format!(
-                "no active grant for {:?} — issue a grant before approving",
-                request.agent
-            )
-        })?;
-    if let Decision::Deny(deny) = evaluate_send(
-        &grant,
-        &request.recipient,
-        &SpendRequest {
-            amount_sat: request.amount_sat,
-            fee_sat: 0,
-        },
-        now,
-    ) && !deny.approvable()
-    {
-        bail!(
-            "the current grant refuses request {} with {}, which no approval can lift — \
-             the human must change the grant itself",
-            request.id,
-            deny.code(),
-        );
-    }
-    Ok(grant)
+    anyhow::bail!(
+        "denied  {request_id} — {} (outside the grant; only changing the grant lifts it)",
+        reason.code()
+    )
 }

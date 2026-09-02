@@ -53,9 +53,9 @@ Every agent action resolves through three verdicts:
 - **ALLOW** — the action needs no signing authority: read balance, list
   history, derive a receive address, inspect the grant, poll a request,
   prepare a transaction.
-- **ASK** — the normal verdict for a valid agent-originated spend: a
-  durable approval request is filed for exactly this intent, and a human
-  decides.
+- **ASK** — the normal verdict for a valid agent-originated request: a
+  durable `pending_approval` request is filed for exactly this intent,
+  and a human decides.
 - **DENY** — the proposal violates a boundary the human pre-committed to:
   the grant expired or was revoked, the amount or fee exceeds a cap, the
   budget is spent, the recipient is off the allowlist, the intent is not
@@ -106,17 +106,21 @@ always crosses the human approval boundary first.
 Agent requests never block waiting on a human:
 
 ```text
-agent proposes a spend
-  → policy verdict: ASK (or DENY)
-  → durable pending request with an id
+agent creates a request
+  → policy verdict: ASK (pending) or DENY
+  → durable request with an id
   → a trusted surface shows it (sats agent requests --watch)
   → the human approves or dismisses
-  → the agent polls, then retries the identical send
-  → sats re-verifies policy and the real fee, signs, broadcasts
+  → the approving process prepares, re-verifies, signs, broadcasts
+  → the request's status is updated
+  → the agent only observes the result
 ```
 
-The request queue is a product primitive, not incidental UI, and the
-discovery channel must not depend on the agent relaying its own denials.
+Agents create requests. Humans authorize requests. sats executes requests.
+The agent takes no action after filing — it never retries to make a
+payment happen. The request is a product primitive, not incidental UI,
+and the discovery channel must not depend on the agent relaying its own
+status.
 
 ## Intent authorization
 
@@ -140,19 +144,17 @@ The invariant holds today; several boundaries are process-internal
 rather than device-separated, and they are implementation facts, not the
 model:
 
-- the signer is an in-memory software signer inside `satsd`; the
-  decrypted seed exists in daemon memory while unlocked;
-- password verification is a trial unseal, so approving briefly derives
-  key material in the approving process too;
-- unlock is a daemon-wide session, not per-payment — approvals and
-  accounting stay per-payment regardless;
-- approval is digest-bound semantic authorization; the human reviews the
-  recorded request, not the raw PSBT — the daemon's independent
-  derivation enforces the exact-transaction property instead.
+- the signer is an in-memory software signer constructed inside the
+  approving process, from the seed the human's password unseals for that
+  one execution; no process holds an unsealed seed between executions;
+- the human reviews the recorded request and the prepared transaction's
+  real fee, not the raw PSBT — the executor's independent derivation
+  enforces the exact-transaction property instead;
+- the only human-authorized execution path is the CLI; a desktop or
+  mobile approval client would call the same execution layer.
 
 These are the debt to pay down — with hardware or independent-device
-signers, per-action unlock, and richer review surfaces — not properties
-to market away.
+signers and richer review surfaces — not properties to market away.
 
 ## Threat model and claims
 

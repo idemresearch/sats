@@ -8,26 +8,6 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 #[test]
-fn daemon_service_commands_have_help_and_validate_duration() {
-    let dir = TempDir::new().unwrap();
-    sats(&dir)
-        .args(["daemon", "install", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--auto-lock"));
-    sats(&dir)
-        .args(["daemon", "uninstall", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("preserving wallet data"));
-    sats(&dir)
-        .args(["daemon", "install", "--auto-lock", "0s"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("positive duration"));
-}
-
-#[test]
 fn init_receive_balance_flow() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
@@ -477,6 +457,9 @@ fn old_command_names_are_gone() {
         vec!["grants"],
         vec!["revoke", "claude"],
         vec!["mcp", "--agent", "claude"],
+        vec!["daemon", "status"],
+        vec!["agent", "deny", "k-1"],
+        vec!["agent", "approve", "k-1", "--for", "1h"],
     ] {
         sats(&dir).args(&args).assert().code(2);
     }
@@ -655,12 +638,25 @@ fn missing_wallet_points_to_init() {
 }
 
 #[test]
-fn agent_requests_lists_pending_denials() {
+fn agent_requests_lists_pending_requests() {
     let dir = TempDir::new().unwrap();
     let requests_dir = dir.path().join("signet/agent-requests/claude");
     std::fs::create_dir_all(&requests_dir).unwrap();
-    // Fabricate records the way the MCP server writes them: one denied
-    // (pending review), one already sent.
+    // Fabricate records the way the MCP server writes them: one pending
+    // review, one denied at creation, one already sent.
+    let pending = serde_json::json!({
+        "format_version": 1,
+        "id": "k-pay-1",
+        "network": "signet",
+        "agent": "claude",
+        "client_request_id": "pay-1",
+        "recipient": common::ADDRESS,
+        "amount_sat": 5_000,
+        "intent_digest": "d".repeat(64),
+        "created_at": 1_000,
+        "updated_at": 1_000,
+        "status": "pending_approval",
+    });
     let denied = serde_json::json!({
         "format_version": 1,
         "id": "k-big-1",
@@ -669,14 +665,12 @@ fn agent_requests_lists_pending_denials() {
         "client_request_id": "big-1",
         "recipient": common::ADDRESS,
         "amount_sat": 20_000,
-        "intent_digest": "d".repeat(64),
+        "intent_digest": "e".repeat(64),
         "created_at": 1_000,
         "updated_at": 1_001,
-        "outcome": {
-            "status": "denied",
-            "deny": { "reason": "over_max_tx", "requested_sat": 20_000, "max_tx_sat": 10_000 },
-            "resolved_at": 1_001,
-        },
+        "status": "denied",
+        "deny": { "reason": "over_max_tx", "requested_sat": 20_000, "max_tx_sat": 10_000 },
+        "at": 1_001,
     });
     let sent = serde_json::json!({
         "format_version": 1,
@@ -685,44 +679,58 @@ fn agent_requests_lists_pending_denials() {
         "agent": "claude",
         "recipient": common::ADDRESS,
         "amount_sat": 4_500,
-        "intent_digest": "e".repeat(64),
+        "intent_digest": "f".repeat(64),
         "created_at": 900,
         "updated_at": 950,
-        "outcome": { "status": "sent", "txid": "ab".repeat(32), "fee_sat": 281, "resolved_at": 950 },
+        "status": "sent", "txid": "ab".repeat(32), "fee_sat": 281, "at": 950,
     });
+    std::fs::write(requests_dir.join("k-pay-1.json"), pending.to_string()).unwrap();
     std::fs::write(requests_dir.join("k-big-1.json"), denied.to_string()).unwrap();
     std::fs::write(requests_dir.join("r-aa00bb11.json"), sent.to_string()).unwrap();
     std::fs::write(requests_dir.join("garbage.json"), b"not json").unwrap();
 
-    // Default view: pending denials only; unreadable files warn, not fail.
-    let pending = json_stdout(
+    // Default view: pending only; unreadable files warn, not fail.
+    let queue = json_stdout(
         sats(&dir)
             .args(["agent", "requests", "--json"])
             .assert()
             .success()
             .stderr(predicate::str::contains("skipping unreadable")),
     );
-    let pending = pending.as_array().unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0]["id"], "k-big-1");
-    assert_eq!(pending[0]["outcome"]["deny"]["reason"], "over_max_tx");
+    let queue = queue.as_array().unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0]["id"], "k-pay-1");
+    assert_eq!(queue[0]["status"], "pending_approval");
 
-    // --all includes the resolved one.
+    // --all includes the settled ones.
     let all = json_stdout(
         sats(&dir)
             .args(["agent", "requests", "--all", "--json"])
             .assert()
             .success(),
     );
-    assert_eq!(all.as_array().unwrap().len(), 2);
+    assert_eq!(all.as_array().unwrap().len(), 3);
+    assert!(
+        all.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["status"] == "denied" && r["deny"]["reason"] == "over_max_tx")
+    );
 
-    // The human table names the pending request.
+    // The human table names the pending request and the next commands.
     sats(&dir)
         .args(["agent", "requests"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("k-big-1"))
-        .stdout(predicate::str::contains("denied over_max_tx"));
+        .stdout(predicate::str::contains("k-pay-1"))
+        .stdout(predicate::str::contains("pending_approval"))
+        .stdout(predicate::str::contains("sats agent approve <id>"));
+    sats(&dir)
+        .args(["agent", "requests", "--all"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("denied over_max_tx"))
+        .stdout(predicate::str::contains("sent abababab"));
 }
 
 #[test]
@@ -752,10 +760,10 @@ fn agent_log_renders_events_and_filters_by_request() {
         ),
         line(
             "k-big-1",
-            serde_json::json!({ "event": "denied", "stage": "precheck",
+            serde_json::json!({ "event": "denied", "stage": "create",
                 "deny": { "reason": "over_max_tx", "requested_sat": 20_000, "max_tx_sat": 10_000 } }),
         ),
-        line("r-aa00bb11", serde_json::json!({ "event": "replayed" })),
+        line("r-aa00bb11", serde_json::json!({ "event": "approved" })),
         // A kind from a future sats: shown raw, never hidden or fatal.
         line(
             "k-future-1",
@@ -775,6 +783,7 @@ fn agent_log_renders_events_and_filters_by_request() {
             "format_version": 1, "id": "k-big-1", "network": "signet",
             "agent": "claude", "recipient": common::ADDRESS, "amount_sat": 20_000,
             "intent_digest": "d".repeat(64), "created_at": 1_000, "updated_at": 1_000,
+            "status": "pending_approval",
         })
         .to_string(),
     )
@@ -808,7 +817,7 @@ fn agent_log_renders_events_and_filters_by_request() {
         .args(["agent", "log"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("over_max_tx at precheck"))
+        .stdout(predicate::str::contains("over_max_tx at create"))
         .stdout(predicate::str::contains("quantum_settled"))
         .stdout(predicate::str::contains("unknown to this sats"))
         .stdout(predicate::str::contains("written by a newer sats"));
@@ -873,14 +882,14 @@ fn grant_writes_the_first_released_format() {
 /// newly pending approvable request exactly once, stay quiet for
 /// everything else, and keep streaming past torn records.
 #[test]
-fn agent_requests_watch_streams_newly_pending_asks() {
+fn agent_requests_watch_streams_newly_pending_requests() {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     use std::sync::mpsc;
     use std::time::Duration;
 
     let dir = TempDir::new().unwrap();
-    init_wallet(&dir); // approving later needs the sealed seed
+    init_wallet(&dir);
     sats(&dir)
         .args([
             "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
@@ -895,17 +904,15 @@ fn agent_requests_watch_streams_newly_pending_asks() {
             "format_version": 1, "id": id, "network": "signet", "agent": "claude",
             "recipient": common::ADDRESS, "amount_sat": 30_000,
             "intent_digest": "d".repeat(64), "created_at": 1_000, "updated_at": 1_000,
-            "outcome": {
-                "status": "denied",
-                "deny": { "reason": "over_max_tx", "requested_sat": 30_000, "max_tx_sat": 10_000 },
-                "resolved_at": 1_001,
-            },
+            "status": "denied",
+            "deny": { "reason": "over_max_tx", "requested_sat": 30_000, "max_tx_sat": 10_000 },
+            "at": 1_001,
         });
         std::fs::write(requests_dir.join(format!("{id}.json")), record.to_string()).unwrap();
     };
 
     // One request is already waiting before the watcher starts.
-    fabricate_denied_request(&dir, "claude", "k-w-0");
+    fabricate_pending_request(&dir, "claude", "k-w-0");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_sats"))
         .args(["--json", "agent", "requests", "--watch"])
@@ -944,22 +951,22 @@ fn agent_requests_watch_streams_newly_pending_asks() {
 
     // Request ids are scoped to an agent. A later ask from another
     // agent must announce even while the first agent's same id is pending.
-    fabricate_denied_request(&dir, "bob", "k-w-0");
+    fabricate_pending_request(&dir, "bob", "k-w-0");
     assert_eq!(expect_id(&lines, "k-w-0")["agent"], "bob");
 
     // A new ask announces once; repeats and rewrites stay silent.
-    fabricate_denied_request(&dir, "claude", "k-w-1");
+    fabricate_pending_request(&dir, "claude", "k-w-1");
     expect_id(&lines, "k-w-1");
-    fabricate_denied_request(&dir, "claude", "k-w-1"); // rewritten, still pending
+    fabricate_pending_request(&dir, "claude", "k-w-1"); // rewritten, still pending
     expect_quiet(&lines);
 
-    // Approving removes it from the queue silently; only the next new
-    // ask prints.
+    // Dismissing removes it from the queue silently; only the next new
+    // request prints.
     sats(&dir)
-        .args(["agent", "approve", "k-w-1"])
+        .args(["agent", "dismiss", "k-w-1"])
         .assert()
         .success();
-    fabricate_denied_request(&dir, "claude", "k-w-2");
+    fabricate_pending_request(&dir, "claude", "k-w-2");
     expect_id(&lines, "k-w-2");
 
     // A hard denial is not "awaiting approval" and never announces.
@@ -972,7 +979,7 @@ fn agent_requests_watch_streams_newly_pending_asks() {
         "{ not json",
     )
     .unwrap();
-    fabricate_denied_request(&dir, "claude", "k-w-4");
+    fabricate_pending_request(&dir, "claude", "k-w-4");
     expect_id(&lines, "k-w-4");
 
     child.kill().unwrap();
@@ -1312,9 +1319,16 @@ fn agent_allowlist_edits_gate_on_widening() {
 
 /// Write the durable record an agent's novel ask leaves behind: an
 /// in-grant proposal resolved with the terminal, approvable ask.
-fn fabricate_denied_request(dir: &TempDir, agent: &str, id: &str) {
+fn fabricate_pending_request(dir: &TempDir, agent: &str, id: &str) {
     let requests_dir = dir.path().join("signet/agent-requests").join(agent);
     std::fs::create_dir_all(&requests_dir).unwrap();
+    let digest = sats_core::intent::SendIntent {
+        network: "signet".into(),
+        agent: agent.into(),
+        recipient: common::ADDRESS.into(),
+        amount_sat: 5_000,
+    }
+    .digest();
     let request = serde_json::json!({
         "format_version": 1,
         "id": id,
@@ -1322,29 +1336,41 @@ fn fabricate_denied_request(dir: &TempDir, agent: &str, id: &str) {
         "agent": agent,
         "recipient": common::ADDRESS,
         "amount_sat": 5_000,
-        "intent_digest": "d".repeat(64),
+        "intent_digest": digest,
         "created_at": 1_000,
         "updated_at": 1_001,
-        "outcome": {
-            "status": "denied",
-            "deny": { "reason": "ask_required" },
-            "resolved_at": 1_001,
-        },
+        "status": "pending_approval",
     });
     std::fs::write(requests_dir.join(format!("{id}.json")), request.to_string()).unwrap();
 }
 
+fn request_json(dir: &TempDir, id: &str) -> serde_json::Value {
+    serde_json::from_slice(
+        &std::fs::read(
+            dir.path()
+                .join("signet/agent-requests/claude")
+                .join(format!("{id}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+/// The human-authorized execution path: the password is the
+/// authorization, and only a correct one produces a signature.
 #[test]
-fn approve_requires_the_password_and_arms_a_single_use_approval() {
+fn approve_executes_with_the_password() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
-    fabricate_denied_request(&dir, "claude", "k-big-1");
+    write_mock_provider(&dir);
+    common::fund_wallet(&dir, &[100_000]);
+    fabricate_pending_request(&dir, "claude", "k-pay-1");
 
-    // Without a live grant there is no approval to arm, even for a
-    // recorded ask. Refuse before the password.
+    // Without a live grant nothing can execute. Refuse before the
+    // password, before any chain access.
     sats(&dir)
         .env("SATS_PASSWORD", "wrong")
-        .args(["agent", "approve", "k-big-1"])
+        .args(["agent", "approve", "k-pay-1", "--yes"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("no active grant"));
@@ -1355,85 +1381,84 @@ fn approve_requires_the_password_and_arms_a_single_use_approval() {
         .assert()
         .success();
 
-    // The wrong password is a hard failure that writes no approval.
+    // Without --yes and without a terminal, the review cannot be
+    // confirmed: nothing executes.
+    sats(&dir)
+        .args(["agent", "approve", "k-pay-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--yes"));
+
+    // The wrong password is a hard failure: no signature, no state change.
     sats(&dir)
         .env("SATS_PASSWORD", "wrong")
-        .args(["agent", "approve", "k-big-1"])
+        .args(["agent", "approve", "k-pay-1", "--yes"])
         .assert()
         .failure();
-    let request: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(dir.path().join("signet/agent-requests/claude/k-big-1.json")).unwrap(),
-    )
-    .unwrap();
-    assert!(request.get("approval").is_none());
+    assert_eq!(request_json(&dir, "k-pay-1")["status"], "pending_approval");
+    assert!(!dir.path().join("signet/transactions").exists());
 
-    // The routine bare approve arms a digest-bound single-use approval;
-    // the fee stays bounded by the grant's own fee cap at send time.
-    let approved = json_stdout(
+    // The right password signs, persists, broadcasts, and settles.
+    let sent = json_stdout(
         sats(&dir)
-            .args(["agent", "approve", "k-big-1", "--json"])
+            .args(["agent", "approve", "k-pay-1", "--yes", "--json"])
             .assert()
             .success(),
     );
-    assert_eq!(approved["id"], "k-big-1");
-    assert_eq!(approved["replaced"], false);
-
-    // Approving again replaces the standing unconsumed approval.
-    let approved = json_stdout(
-        sats(&dir)
-            .args(["agent", "approve", "k-big-1", "--json"])
-            .assert()
-            .success(),
-    );
-    assert_eq!(approved["replaced"], true);
-    let request: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(dir.path().join("signet/agent-requests/claude/k-big-1.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(request["approval"]["intent_digest"], "d".repeat(64));
+    assert_eq!(sent["id"], "k-pay-1");
+    assert_eq!(sent["status"], "sent");
+    let txid = sent["txid"].as_str().unwrap();
+    assert_eq!(sent["amount_sat"], 5_000);
+    let record = request_json(&dir, "k-pay-1");
+    assert_eq!(record["status"], "sent");
+    assert_eq!(record["txid"], txid);
     assert!(
-        request["approval"].get("max_fee_sat").is_none(),
-        "an approval carries no fee bound of its own — the grant's cap governs"
+        dir.path()
+            .join(format!("signet/transactions/{txid}.json"))
+            .exists()
+    );
+
+    // Executed once: a second approve refuses and signs nothing.
+    sats(&dir)
+        .args(["agent", "approve", "k-pay-1", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already sent"));
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("signet/transactions"))
+            .unwrap()
+            .count(),
+        1
     );
 
     // An ambiguous prefix refuses rather than guessing.
-    fabricate_denied_request(&dir, "claude", "k-big-2");
+    fabricate_pending_request(&dir, "claude", "k-pay-2");
+    fabricate_pending_request(&dir, "claude", "k-pay-3");
     sats(&dir)
-        .args(["agent", "approve", "k-big"])
+        .args(["agent", "approve", "k-pay", "--yes"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("ambiguous"));
-
-    // The removed per-approval fee ceiling stays removed.
-    sats(&dir)
-        .args(["agent", "approve", "k-big-1", "--max-fee", "500"])
-        .assert()
-        .code(2);
 }
 
+/// A grant change between the review and the commit is caught under
+/// the grant lock: the request is denied, nothing is drawn or signed.
 #[test]
-fn approve_rechecks_policy_before_writing() {
+fn approve_rechecks_policy_under_the_lock_before_signing() {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
+    write_mock_provider(&dir);
+    common::fund_wallet(&dir, &[100_000]);
     sats(&dir)
         .args([
             "agent", "grant", "claude", "--budget", "50000", "--mode", "ask",
         ])
         .assert()
         .success();
-    fabricate_denied_request(&dir, "claude", "k-race-1");
-    let request_path = dir
-        .path()
-        .join("signet/agent-requests/claude/k-race-1.json");
-    let request_before = std::fs::read(&request_path).unwrap();
-    let events_path = dir.path().join("signet/events/log.jsonl");
-    assert!(
-        !events_path.exists(),
-        "the fabricated request has no events"
-    );
+    fabricate_pending_request(&dir, "claude", "k-race-1");
 
     // Hold the real grant lock so the approving process cannot commit
     // until this concurrent policy change has finished.
@@ -1441,7 +1466,7 @@ fn approve_rechecks_policy_before_writing() {
     lock.lock().unwrap();
     let stdout_path = dir.path().join("approve-output.txt");
     let mut child = Command::new(env!("CARGO_BIN_EXE_sats"))
-        .args(["agent", "approve", "k-race-1"])
+        .args(["agent", "approve", "k-race-1", "--yes"])
         .env("SATS_DIR", dir.path())
         .env("SATS_PASSWORD", common::PASSWORD)
         .env("NO_COLOR", "1")
@@ -1450,8 +1475,7 @@ fn approve_rechecks_policy_before_writing() {
         .spawn()
         .unwrap();
 
-    // Printing the review means the initial policy check passed. No
-    // timing guess about password derivation is needed.
+    // Printing the review means staging passed on the old policy.
     let deadline = Instant::now() + Duration::from_secs(15);
     let reviewing = loop {
         if std::fs::read_to_string(&stdout_path)
@@ -1478,15 +1502,21 @@ fn approve_rechecks_policy_before_writing() {
     }
     let _ = child.kill();
     let output = child.wait_with_output().unwrap();
-    assert!(reviewing, "approval never reached its initial review");
+    assert!(reviewing, "approval never reached its review");
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("observe_only"));
-    assert_eq!(std::fs::read(&request_path).unwrap(), request_before);
-    assert!(!events_path.exists(), "a refused approval must not journal");
+    assert_eq!(request_json(&dir, "k-race-1")["status"], "denied");
+    let grant: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&grant_path).unwrap()).unwrap();
+    assert_eq!(grant["spent_sat"], 0, "nothing drawn");
+    assert!(
+        !dir.path().join("signet/transactions").exists(),
+        "nothing signed"
+    );
 }
 
 #[test]
-fn deny_dismisses_and_revokes_the_unconsumed_approval() {
+fn dismiss_declines_a_pending_request() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
@@ -1495,28 +1525,19 @@ fn deny_dismisses_and_revokes_the_unconsumed_approval() {
         ])
         .assert()
         .success();
-    fabricate_denied_request(&dir, "claude", "k-big-1");
-    sats(&dir)
-        .args(["agent", "approve", "k-big-1"])
-        .assert()
-        .success();
+    fabricate_pending_request(&dir, "claude", "k-pay-1");
 
-    let denied = json_stdout(
+    let dismissed = json_stdout(
         sats(&dir)
-            .args(["agent", "deny", "k-big-1", "--json"])
+            .args(["agent", "dismiss", "k-pay-1", "--json"])
             .assert()
             .success(),
     );
-    assert_eq!(denied["dismissed"], true);
-    assert_eq!(denied["approval_revoked"], true);
-    let request: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(dir.path().join("signet/agent-requests/claude/k-big-1.json")).unwrap(),
-    )
-    .unwrap();
-    assert!(request.get("approval").is_none());
-    assert!(request["dismissed_at"].is_u64());
+    assert_eq!(dismissed["id"], "k-pay-1");
+    assert_eq!(dismissed["status"], "dismissed");
+    assert_eq!(request_json(&dir, "k-pay-1")["status"], "dismissed");
 
-    // Dismissed requests leave the default review queue.
+    // Dismissed requests leave the default review queue and are terminal.
     let pending = json_stdout(
         sats(&dir)
             .args(["agent", "requests", "--json"])
@@ -1524,4 +1545,22 @@ fn deny_dismisses_and_revokes_the_unconsumed_approval() {
             .success(),
     );
     assert_eq!(pending.as_array().unwrap().len(), 0);
+    sats(&dir)
+        .args(["agent", "dismiss", "k-pay-1"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already dismissed"));
+    sats(&dir)
+        .args(["agent", "approve", "k-pay-1", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already dismissed"));
+    let log = json_stdout(
+        sats(&dir)
+            .args(["agent", "log", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(log.as_array().unwrap().len(), 1);
+    assert_eq!(log[0]["event"], "dismissed");
 }

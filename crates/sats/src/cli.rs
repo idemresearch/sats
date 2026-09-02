@@ -80,12 +80,7 @@ pub enum Command {
         #[command(subcommand)]
         command: TxCommand,
     },
-    /// Run and control satsd, the local signing daemon
-    Daemon {
-        #[command(subcommand)]
-        command: DaemonCommand,
-    },
-    /// Manage agent spending grants and the agent-facing MCP server
+    /// Manage agent grants, review requests, and serve the MCP tools
     Agent {
         #[command(subcommand)]
         command: AgentCommand,
@@ -95,38 +90,6 @@ pub enum Command {
         #[command(subcommand)]
         command: AlkanesCommand,
     },
-}
-
-#[derive(Subcommand)]
-pub enum DaemonCommand {
-    /// Run the daemon in the foreground (for systemd, launchd, or a shell)
-    Run {
-        /// Lock the seed after this much inactivity (e.g. 8h, 30m)
-        #[arg(long, default_value = "8h", value_name = "DURATION")]
-        auto_lock: String,
-    },
-    /// Start the daemon in the background
-    Start {
-        /// Idle lock duration (default: installed service setting, otherwise 8h)
-        #[arg(long, value_name = "DURATION")]
-        auto_lock: Option<String>,
-    },
-    /// Install and start a locked per-user macOS service (opt-in)
-    Install {
-        /// Lock the seed after this much inactivity (e.g. 8h, 30m)
-        #[arg(long, default_value = "8h", value_name = "DURATION")]
-        auto_lock: String,
-    },
-    /// Stop and remove the matching macOS service, preserving wallet data
-    Uninstall,
-    /// Show whether the daemon is running, and whether it can sign
-    Status,
-    /// Unseal the wallet into the daemon so agent sends can be signed
-    Unlock,
-    /// Drop the seed from the daemon's memory, without stopping it
-    Lock,
-    /// Stop the daemon
-    Stop,
 }
 
 #[derive(Subcommand)]
@@ -247,7 +210,7 @@ pub struct GrantArgs {
     /// (default: 2% of the budget, at least 1000, never above the budget)
     #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
     pub max_fee: Option<u64>,
-    /// Authority mode: ask (every send needs a one-time approval) or
+    /// Authority mode: ask (every request waits for your approval) or
     /// observe (read-only)
     #[arg(long, default_value = "ask", value_name = "ask|observe")]
     pub mode: String,
@@ -291,27 +254,28 @@ pub enum AgentCommand {
     },
     /// List active grants
     List,
-    /// Approve one asked request exactly once (password required)
+    /// Authorize and execute one pending request: prepare, review the
+    /// real fee, enter the password, sign, broadcast
     Approve {
         /// Request id or unique prefix (see: sats agent requests)
         id: String,
-        /// Approval lifetime (e.g. 1h, 30m)
-        #[arg(long = "for", default_value = "1h", value_name = "DURATION")]
-        duration: String,
+        /// Skip the confirmation prompt (the password is still required)
+        #[arg(short, long)]
+        yes: bool,
     },
-    /// Dismiss a request and revoke its unconsumed approval
-    Deny {
+    /// Dismiss a pending request without executing it
+    Dismiss {
         /// Request id or unique prefix
         id: String,
     },
-    /// Review agent send requests (asked ones await a human decision)
+    /// Review agent requests (pending ones await your decision)
     Requests {
-        /// Include resolved and dismissed requests, not only pending ones
+        /// Include settled and dismissed requests, not only pending ones
         #[arg(long, conflicts_with = "watch")]
         all: bool,
-        /// Stay running and print each request as it newly awaits an
-        /// approval — a trusted channel that does not rely on the agent
-        /// relaying its own denials. With --json, a JSONL stream
+        /// Stay running and print each request as it newly awaits a
+        /// decision — a trusted channel that does not rely on the agent
+        /// relaying its own status. With --json, a JSONL stream
         #[arg(long)]
         watch: bool,
     },
@@ -324,7 +288,7 @@ pub enum AgentCommand {
         #[arg(long, value_name = "ID")]
         request: Option<String>,
     },
-    /// Run an MCP server exposing wallet tools as this agent
+    /// Serve the agent's wallet tools over MCP stdio as this agent
     #[cfg(feature = "mcp")]
     Serve {
         /// Agent name the server acts as (must hold an active grant)

@@ -1,9 +1,9 @@
 //! The causal record of the agent path.
 //!
 //! One event per state transition of an agent request — received,
-//! decided, reserved, signed, broadcast, refunded — linked to its
-//! request by id and to its exact meaning by intent digest. Events are
-//! appended, never rewritten: the [`crate::request::AgentRequest`]
+//! decided, approved, reserved, signed, broadcast, refunded — linked to
+//! its request by id and to its exact meaning by intent digest. Events
+//! are appended, never rewritten: the [`crate::request::AgentRequest`]
 //! record holds current state, this log holds how it got there.
 
 use serde::{Deserialize, Serialize};
@@ -38,16 +38,13 @@ pub enum EventKind {
     },
     Denied {
         deny: DenyReason,
-        /// "precheck" (offline, fee unknown) or "authorize" (real fee).
+        /// "create" (fee unknown) or "execute" (real fee).
         stage: String,
     },
-    Approved {
-        approval_expires_at: u64,
-    },
-    ApprovalRevoked,
-    ApprovalConsumed {
-        consumed_by_request: String,
-    },
+    /// A human authorized execution of exactly this request.
+    Approved,
+    /// A human dismissed the request.
+    Dismissed,
     Reserved {
         total_sat: u64,
         remaining_sat: u64,
@@ -68,8 +65,6 @@ pub enum EventKind {
     Failed {
         message: String,
     },
-    /// A keyed retry returned the recorded outcome; nothing executed.
-    Replayed,
     /// A request key was reused for a different intent.
     Conflicted,
     /// A human changed the grant's authority mode. Control-plane events
@@ -102,16 +97,14 @@ impl AgentEvent {
         match self.kind {
             EventKind::RequestReceived { .. } => "request_received",
             EventKind::Denied { .. } => "denied",
-            EventKind::Approved { .. } => "approved",
-            EventKind::ApprovalRevoked => "approval_revoked",
-            EventKind::ApprovalConsumed { .. } => "approval_consumed",
+            EventKind::Approved => "approved",
+            EventKind::Dismissed => "dismissed",
             EventKind::Reserved { .. } => "reserved",
             EventKind::Refunded { .. } => "refunded",
             EventKind::Signed { .. } => "signed",
             EventKind::Broadcast { .. } => "broadcast",
             EventKind::BroadcastFailed { .. } => "broadcast_failed",
             EventKind::Failed { .. } => "failed",
-            EventKind::Replayed => "replayed",
             EventKind::Conflicted => "conflicted",
             EventKind::ModeChanged { .. } => "mode_changed",
             EventKind::RecipientAllowed { .. } => "recipient_allowed",
@@ -157,10 +150,10 @@ mod tests {
 
     #[test]
     fn unit_kinds_serialize_as_bare_tags() {
-        let json = serde_json::to_value(event(EventKind::Replayed)).unwrap();
-        assert_eq!(json["event"], "replayed");
+        let json = serde_json::to_value(event(EventKind::Approved)).unwrap();
+        assert_eq!(json["event"], "approved");
         let back: AgentEvent = serde_json::from_value(json).unwrap();
-        assert!(matches!(back.kind, EventKind::Replayed));
+        assert!(matches!(back.kind, EventKind::Approved));
     }
 
     #[test]
@@ -170,12 +163,12 @@ mod tests {
                 requested_sat: 20_000,
                 remaining_sat: 4_588,
             },
-            stage: "authorize".into(),
+            stage: "execute".into(),
         });
         let json = serde_json::to_value(&e).unwrap();
         assert_eq!(json["event"], "denied");
         assert_eq!(json["deny"]["reason"], "over_budget");
-        assert_eq!(json["stage"], "authorize");
+        assert_eq!(json["stage"], "execute");
     }
 
     #[test]
@@ -185,13 +178,8 @@ mod tests {
                 recipient: "tb1p".into(),
                 amount_sat: 1,
             }),
-            event(EventKind::Approved {
-                approval_expires_at: 2,
-            }),
-            event(EventKind::ApprovalRevoked),
-            event(EventKind::ApprovalConsumed {
-                consumed_by_request: "k".into(),
-            }),
+            event(EventKind::Approved),
+            event(EventKind::Dismissed),
             event(EventKind::Refunded { total_sat: 1 }),
             event(EventKind::Signed { txid: "t".into() }),
             event(EventKind::Broadcast { txid: "t".into() }),
@@ -245,7 +233,7 @@ mod tests {
         let json = serde_json::json!({
             "at": 0, "network": "signet", "agent": "a",
             "request_id": "r", "intent_digest": "d",
-            "event": "replayed",
+            "event": "conflicted",
         });
         let back: AgentEvent = serde_json::from_value(json).unwrap();
         assert!(back.version_supported());

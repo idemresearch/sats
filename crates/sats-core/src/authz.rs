@@ -3,15 +3,15 @@
 //!
 //! [`evaluate_send`] is pure — no clock, no IO — and is the single
 //! ladder every frontend decides through: the grant's hard boundaries
-//! (expiry, observe mode, intent authority, overflow, recipient rule,
-//! caps, budget), then the terminal `ask_required` — the one refusal a
-//! one-time human approval can lift. A grant bounds what an agent may
-//! propose; an approval authorizes one valid proposal inside it and
-//! never exceeds it. A send never allows on the grant alone: no
-//! agent-originated spend may reach the signer without explicit,
-//! one-time human authorization bound to that action. Callers reserve
+//! (expiry, observe mode, overflow, recipient rule, caps, budget), then
+//! the terminal [`Decision::Ask`] — a valid proposal inside the grant,
+//! which only a human may authorize. A grant bounds what an agent may
+//! propose; the human's authorization executes one valid proposal
+//! inside it and never exceeds it. The grant alone never allows a spend:
+//! no agent-originated request may reach the signer without explicit
+//! human authorization bound to that exact request. Callers reserve
 //! budget *before* signing (a signed transaction is already spendable),
-//! and refund only when signing fails.
+//! and refund only while no signature exists.
 
 use serde::{Deserialize, Serialize};
 
@@ -42,11 +42,11 @@ const fn grant_format_version() -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantMode {
-    /// Every send terminates in a one-time human approval; the grant's
+    /// Every request waits for a human's authorization; the grant's
     /// boundaries decide what may be asked for at all.
     #[default]
     Ask,
-    /// Read-only: no send can be authorized, and no approval can lift it.
+    /// Read-only: no request can be created, and no approval can lift it.
     Observe,
 }
 
@@ -107,12 +107,11 @@ pub struct Grant {
     /// Public identifier for this grant's bearer token: a prefix of
     /// `token_hash`, safe to log, display, and put in an error.
     pub token_id: String,
-    /// SHA-256 of the bearer token, compared in constant time by the
-    /// signing daemon. The token itself is shown to the human once, at
-    /// creation, and is never persisted by sats.
+    /// SHA-256 of the bearer token, compared in constant time. The token
+    /// itself is shown to the human once, at creation, and is never
+    /// persisted by sats.
     ///
-    /// This file holds no key material. Deleting it is revocation; the
-    /// seed it authorizes spending from lives only in `satsd`'s memory.
+    /// This file holds no key material. Deleting it is revocation.
     pub token_hash: String,
     /// Standing authority mode. Required on disk: a record without one
     /// is unreleased development state and fails to parse.
@@ -145,65 +144,9 @@ impl SpendRequest {
     }
 }
 
-/// A typed intent an agent asks the wallet to execute.
-///
-/// Send is the only executable intent today. The enum is the extension
-/// point for venue intents: each variant carries the facts the budget
-/// needs — worst-case sats leaving the wallet, plus the fee — never
-/// protocol payloads, scripts, or provider data structures.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IntentRequest {
-    /// Transfer sats to an external recipient.
-    Send(SpendRequest),
-    /// Commit sats to a swap on a named venue. No grant can carry swap
-    /// authority yet, so this always denies as not granted; the variant
-    /// exists so the decision layer, denial code, and check order are
-    /// fixed before any venue machinery lands.
-    Swap {
-        /// Local label of the venue the caller resolved.
-        venue: String,
-        /// Worst-case sats leaving the wallet, excluding the fee.
-        give_sat: u64,
-        fee_sat: u64,
-    },
-}
-
-impl IntentRequest {
-    pub fn kind(&self) -> &'static str {
-        match self {
-            IntentRequest::Send(_) => "send",
-            IntentRequest::Swap { .. } => "swap",
-        }
-    }
-
-    /// Worst-case sats leaving the wallet, excluding the fee.
-    pub fn sats_out(&self) -> u64 {
-        match self {
-            IntentRequest::Send(spend) => spend.amount_sat,
-            IntentRequest::Swap { give_sat, .. } => *give_sat,
-        }
-    }
-
-    pub fn fee_sat(&self) -> u64 {
-        match self {
-            IntentRequest::Send(spend) => spend.fee_sat,
-            IntentRequest::Swap { fee_sat, .. } => *fee_sat,
-        }
-    }
-
-    /// What the intent draws from the budget: sats out + fee. Saturating,
-    /// for display and journaling; decisions use
-    /// [`IntentRequest::checked_total_sat`].
-    pub fn total_sat(&self) -> u64 {
-        self.sats_out().saturating_add(self.fee_sat())
-    }
-
-    /// The budget draw, or `None` when sats out + fee overflows.
-    pub fn checked_total_sat(&self) -> Option<u64> {
-        self.sats_out().checked_add(self.fee_sat())
-    }
-}
-
+/// Why a proposal is outside the grant. Every variant is a grant
+/// boundary: no human approval lifts one, and the only escalation is
+/// changing the grant itself.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum DenyReason {
@@ -222,81 +165,36 @@ pub enum DenyReason {
         requested_sat: u64,
         remaining_sat: u64,
     },
-    IntentNotGranted {
-        intent: String,
-    },
     /// Amount + fee overflows u64. Arithmetically absurd, so it fails
     /// closed instead of saturating into a number a budget could pass.
     AmountOverflow {
         amount_sat: u64,
         fee_sat: u64,
     },
-    /// The terminal verdict for a valid proposal inside the grant: the
-    /// grant alone never authorizes a spend, so authorization requires a
-    /// one-time human approval. The only approvable refusal.
-    AskRequired,
-    /// The grant is observe-only. Never approvable.
+    /// The grant is observe-only.
     ObserveOnly,
-    /// The recipient is outside the grant's standing allowlist. A grant
-    /// boundary: no approval lifts it, and only editing the allowlist —
-    /// never payment history or an approval — changes the list.
+    /// The recipient is outside the grant's standing allowlist. Only
+    /// editing the allowlist — never payment history — changes the list.
     RecipientNotAllowed {
         recipient: String,
     },
 }
 
+/// The verdict of the ladder. The grant alone never allows a spend:
+/// a proposal inside every boundary is [`Decision::Ask`], and only a
+/// human's authorization turns it into an execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
-    /// Unreachable for a spend: the ladder terminates every send in the
-    /// approvable `ask_required`, so only a non-monetary decision could
-    /// ever allow here. The variant stays for the type's completeness.
-    Allow,
+    /// A valid proposal inside the grant, awaiting a human.
+    Ask,
+    /// Outside the grant. Terminal: no approval lifts it.
     Deny(DenyReason),
 }
 
-/// A one-time human authorization bound to an exact intent digest.
-///
-/// An approval authorizes one valid proposal *inside* the grant — it
-/// lifts only the terminal `ask_required`, never a grant boundary. The
-/// amount and recipient are pinned by the digest; the fee is bounded by
-/// the grant's own fee cap at authorization time. It never survives
-/// revocation (the grant file, and with it the signing key, is gone) and
-/// never outranks grant expiry. Consumption is permanent: one approval
-/// authorizes at most one signature, ever.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IntentApproval {
-    /// Digest of the exact [`crate::intent::SendIntent`] the human saw.
-    pub intent_digest: String,
-    pub approved_at: u64,
-    /// Inclusive, matching the grant convention: now >= expires_at is
-    /// expired.
-    pub expires_at: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub consumed_at: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub consumed_by_request: Option<String>,
-}
-
-impl IntentApproval {
-    pub fn is_expired(&self, now_unix: u64) -> bool {
-        now_unix >= self.expires_at
+impl Decision {
+    pub fn is_ask(&self) -> bool {
+        matches!(self, Decision::Ask)
     }
-
-    /// Whether this approval can authorize the given intent right now:
-    /// same digest, never consumed, not expired.
-    pub fn is_valid_for(&self, intent_digest: &str, now_unix: u64) -> bool {
-        self.consumed_at.is_none()
-            && !self.is_expired(now_unix)
-            && self.intent_digest == intent_digest
-    }
-}
-
-/// The decision of [`evaluate_send_with_approval`]: the only allow a
-/// spend can reach rides a one-time human approval.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ApprovalDecision {
-    AllowByApproval,
-    Deny(DenyReason),
 }
 
 /// The one agent-name rule, stated once for every surface's error text.
@@ -307,7 +205,7 @@ pub const AGENT_NAME_RULE: &str = "agent name must be 1-32 chars of a-z, 0-9, - 
 /// Agent names become path components (grant files, request
 /// directories), so this is a security check, not cosmetics: the only
 /// names that may ever reach a path join are the ones this accepts.
-/// Shared by the CLI, the daemon socket boundary, and the store.
+/// Shared by the CLI, the MCP boundary, and the store.
 pub fn valid_agent_name(agent: &str) -> bool {
     !agent.is_empty()
         && agent.len() <= 32
@@ -327,44 +225,21 @@ pub fn default_max_fee_sat(budget_sat: u64) -> u64 {
     (budget_sat / 50).max(1_000).min(budget_sat)
 }
 
-/// PURE. Send-shaped view of [`authorize_intent`], for callers that only
-/// ever send. Both paths make the identical decision. Like
-/// [`authorize_intent`], this cannot see the recipient — the full agent
-/// decision is [`evaluate_send`].
-pub fn authorize_spend(grant: &Grant, req: &SpendRequest, now_unix: u64) -> Decision {
-    authorize_intent(grant, &IntentRequest::Send(*req), now_unix)
-}
-
 /// PURE. The full verdict ladder for a send, recipient rule included.
-/// This is the decision the daemon enforces on every agent send.
+/// This is the decision every surface enforces: at request creation
+/// (fee unknown, so fee 0) and again at execution with the real fee.
+///
+/// Every rung is a grant boundary: expiry → observe mode → arithmetic
+/// overflow → recipient rule → per-tx amount cap → per-tx fee cap →
+/// budget. A proposal inside every boundary terminates in
+/// [`Decision::Ask`]. The specific boundary answers before the terminal
+/// ask, so a refusal names what was crossed.
 pub fn evaluate_send(
     grant: &Grant,
     recipient: &str,
     req: &SpendRequest,
     now_unix: u64,
 ) -> Decision {
-    ladder(grant, Some(recipient), &IntentRequest::Send(*req), now_unix)
-}
-
-/// PURE. [`evaluate_send`] minus the recipient rule, for callers that do
-/// not have one (venue intents, the send-shaped compatibility views).
-/// Everything else — the hard envelope and the rest of the ask band —
-/// decides identically.
-pub fn authorize_intent(grant: &Grant, req: &IntentRequest, now_unix: u64) -> Decision {
-    ladder(grant, None, req, now_unix)
-}
-
-/// The single deterministic ladder behind every decision.
-///
-/// Every rung is a grant boundary, and none of them is liftable by an
-/// approval: expiry → observe mode → intent authority → arithmetic
-/// overflow → recipient rule (when the caller supplies one) → per-tx
-/// amount cap → per-tx fee cap → budget. A proposal inside every
-/// boundary terminates in `ask_required` — the one refusal a one-time
-/// human approval lifts, so the only allow a spend can obtain is
-/// [`ApprovalDecision::AllowByApproval`]. An approval authorizes a valid
-/// proposal inside the grant; it never creates an exception to it.
-fn ladder(grant: &Grant, recipient: Option<&str>, req: &IntentRequest, now_unix: u64) -> Decision {
     // Expiry outranks everything: a dead grant reports dead.
     if grant.is_expired(now_unix) {
         return Decision::Deny(DenyReason::Expired {
@@ -374,23 +249,13 @@ fn ladder(grant: &Grant, recipient: Option<&str>, req: &IntentRequest, now_unix:
     if grant.mode == GrantMode::Observe {
         return Decision::Deny(DenyReason::ObserveOnly);
     }
-    // A grant carries send authority only; every other intent denies
-    // until grants can carry typed rules for it.
-    let req = match req {
-        IntentRequest::Send(spend) => spend,
-        other => {
-            return Decision::Deny(DenyReason::IntentNotGranted {
-                intent: other.kind().to_string(),
-            });
-        }
-    };
     let Some(total_sat) = req.checked_total_sat() else {
         return Decision::Deny(DenyReason::AmountOverflow {
             amount_sat: req.amount_sat,
             fee_sat: req.fee_sat,
         });
     };
-    if let (Some(recipient), Some(allowed)) = (recipient, &grant.allowed_recipients)
+    if let Some(allowed) = &grant.allowed_recipients
         && !allowed.iter().any(|entry| entry == recipient)
     {
         return Decision::Deny(DenyReason::RecipientNotAllowed {
@@ -419,74 +284,8 @@ fn ladder(grant: &Grant, recipient: Option<&str>, req: &IntentRequest, now_unix:
         });
     }
     // The terminal verdict: a valid proposal inside the grant still
-    // asks. The grant alone never authorizes a spend — mode is `Ask`
-    // here (observe returned above), and there is no other mode.
-    Decision::Deny(DenyReason::AskRequired)
-}
-
-/// PURE. [`evaluate_send`] extended with a one-time approval — the full
-/// agent decision, as the daemon prechecks it.
-pub fn evaluate_send_with_approval(
-    grant: &Grant,
-    recipient: &str,
-    req: &SpendRequest,
-    intent_digest: &str,
-    approval: Option<&IntentApproval>,
-    now_unix: u64,
-) -> ApprovalDecision {
-    lift_with_approval(
-        evaluate_send(grant, recipient, req, now_unix),
-        intent_digest,
-        approval,
-        now_unix,
-    )
-}
-
-/// PURE. [`authorize_intent`] extended with a one-time approval.
-pub fn authorize_intent_with_approval(
-    grant: &Grant,
-    req: &IntentRequest,
-    intent_digest: &str,
-    approval: Option<&IntentApproval>,
-    now_unix: u64,
-) -> ApprovalDecision {
-    lift_with_approval(
-        authorize_intent(grant, req, now_unix),
-        intent_digest,
-        approval,
-        now_unix,
-    )
-}
-
-/// The one approval-lifting rule, shared by both decision surfaces.
-///
-/// The plain decision runs first, unchanged, and only its terminal
-/// `ask_required` can be lifted — by a valid approval (digest match,
-/// unconsumed, unexpired) for exactly that intent. Every other refusal
-/// is a grant boundary the approval cannot cross: an approval authorizes
-/// a valid proposal inside the grant, never an exception to it.
-fn lift_with_approval(
-    decision: Decision,
-    intent_digest: &str,
-    approval: Option<&IntentApproval>,
-    now_unix: u64,
-) -> ApprovalDecision {
-    let reason = match decision {
-        // The ladder never allows a spend; treat a structural allow as
-        // the terminal ask so the invariant holds even if a refactor
-        // ever reintroduced one.
-        Decision::Allow => DenyReason::AskRequired,
-        Decision::Deny(reason) => reason,
-    };
-    if !reason.approvable() {
-        return ApprovalDecision::Deny(reason);
-    }
-    match approval {
-        Some(approval) if approval.is_valid_for(intent_digest, now_unix) => {
-            ApprovalDecision::AllowByApproval
-        }
-        _ => ApprovalDecision::Deny(reason),
-    }
+    // waits for a human. The grant alone never authorizes a spend.
+    Decision::Ask
 }
 
 impl Grant {
@@ -504,46 +303,33 @@ impl Grant {
         now_unix >= self.expires_at
     }
 
-    /// Re-check the full send ladder — recipient rule included — and
-    /// draw the spend down from the budget. A send only ever reserves
-    /// via an approval, and the ladder re-runs here with every boundary
-    /// hard, so the draw can never exceed the budget: an approval
-    /// authorizes a valid proposal inside the grant, never past it. The
-    /// approval is marked consumed. Callers must persist the approval's
-    /// holder before the grant, and the grant before signing.
+    /// Draw a human-authorized spend down from the budget.
+    ///
+    /// The caller asserts the human authorization; this re-runs the full
+    /// ladder — recipient rule included, with the real fee — so the draw
+    /// can never exceed the grant: authorization executes a valid
+    /// proposal inside the grant, never past it. Callers must persist
+    /// the grant before signing.
     pub fn reserve_send(
         &mut self,
         recipient: &str,
         req: &SpendRequest,
-        intent_digest: &str,
-        approval: Option<&mut IntentApproval>,
         now_unix: u64,
     ) -> Result<(), DenyReason> {
-        let decision = evaluate_send_with_approval(
-            self,
-            recipient,
-            req,
-            intent_digest,
-            approval.as_deref(),
-            now_unix,
-        );
-        match decision {
-            ApprovalDecision::AllowByApproval => {
-                if let Some(approval) = approval {
-                    approval.consumed_at = Some(now_unix);
-                }
-            }
-            ApprovalDecision::Deny(reason) => return Err(reason),
+        match evaluate_send(self, recipient, req, now_unix) {
+            Decision::Ask => {}
+            Decision::Deny(reason) => return Err(reason),
         }
         self.spent_sat = self.spent_sat.saturating_add(req.total_sat());
         self.tx_count = self.tx_count.saturating_add(1);
         Ok(())
     }
 
-    /// Return a reservation whose signing failed. Never refund after a
-    /// signature exists — a signed transaction is spendable regardless of
-    /// whether the broadcast succeeded. Both subtractions saturate, so a
-    /// refund can never credit more than what stands reserved.
+    /// Return a reservation whose signing did not produce a durable
+    /// signature. Never refund after a signed transaction exists — it is
+    /// spendable regardless of whether the broadcast succeeded. Both
+    /// subtractions saturate, so a refund can never credit more than
+    /// what stands reserved.
     pub fn refund(&mut self, req: &SpendRequest) {
         self.spent_sat = self.spent_sat.saturating_sub(req.total_sat());
         self.tx_count = self.tx_count.saturating_sub(1);
@@ -557,26 +343,14 @@ impl DenyReason {
             DenyReason::OverMaxTx { .. } => "over_max_tx",
             DenyReason::OverMaxFee { .. } => "over_max_fee",
             DenyReason::OverBudget { .. } => "over_budget",
-            DenyReason::IntentNotGranted { .. } => "intent_not_granted",
             DenyReason::AmountOverflow { .. } => "amount_overflow",
-            DenyReason::AskRequired => "ask_required",
             DenyReason::ObserveOnly => "observe_only",
             DenyReason::RecipientNotAllowed { .. } => "recipient_not_allowed",
         }
     }
 
-    /// Whether a one-time human approval can lift this refusal. Only the
-    /// terminal `ask_required` — a valid proposal inside the grant —
-    /// qualifies; every other refusal is a grant boundary, and the only
-    /// escalation is changing the grant itself. Every surface that
-    /// offers, creates, or honors an approval must key off this one
-    /// predicate.
-    pub fn approvable(&self) -> bool {
-        matches!(self, DenyReason::AskRequired)
-    }
-
     /// The canonical refusal detail lines, shown under
-    /// "human authorization required".
+    /// "outside the grant".
     pub fn human(&self) -> String {
         match self {
             DenyReason::Expired { .. } => "grant expired".to_string(),
@@ -604,9 +378,6 @@ impl DenyReason {
                 format_sats(*requested_sat),
                 format_sats(*remaining_sat)
             ),
-            DenyReason::IntentNotGranted { intent } => {
-                format!("grant does not authorize {intent}")
-            }
             DenyReason::AmountOverflow {
                 amount_sat,
                 fee_sat,
@@ -615,9 +386,6 @@ impl DenyReason {
                 format_sats(*amount_sat),
                 format_sats(*fee_sat)
             ),
-            DenyReason::AskRequired => {
-                "every agent send needs a one-time human approval".to_string()
-            }
             DenyReason::ObserveOnly => "grant is observe-only".to_string(),
             DenyReason::RecipientNotAllowed { recipient } => {
                 format!("recipient {recipient} is not on the grant's allowlist")
@@ -652,7 +420,6 @@ mod tests {
 
     const NOW: u64 = 1_500;
     const RECIPIENT: &str = "tb1ptestrecipient";
-    const DIGEST: &str = "d1";
 
     fn req(amount: u64, fee: u64) -> SpendRequest {
         SpendRequest {
@@ -661,83 +428,51 @@ mod tests {
         }
     }
 
-    fn approval() -> IntentApproval {
-        IntentApproval {
-            intent_digest: DIGEST.into(),
-            approved_at: NOW - 100,
-            expires_at: 1_900,
-            consumed_at: None,
-            consumed_by_request: None,
-        }
-    }
-
-    fn decide(
-        g: &Grant,
-        amount: u64,
-        fee: u64,
-        approval: Option<&IntentApproval>,
-    ) -> ApprovalDecision {
-        authorize_intent_with_approval(
-            g,
-            &IntentRequest::Send(req(amount, fee)),
-            DIGEST,
-            approval,
-            NOW,
-        )
+    fn decide(g: &Grant, amount: u64, fee: u64) -> Decision {
+        evaluate_send(g, RECIPIENT, &req(amount, fee), NOW)
     }
 
     #[test]
     fn within_all_limits_terminates_in_ask() {
         let g = grant(50_000, 0, Some(10_000), Some(1_000));
         // The grant alone never authorizes: a valid in-envelope proposal
-        // ends in the approvable terminal ask.
-        assert_eq!(
-            authorize_spend(&g, &req(4_500, 281), NOW),
-            Decision::Deny(DenyReason::AskRequired)
-        );
-        // Only a matching human approval turns it into an allow.
-        assert_eq!(
-            decide(&g, 4_500, 281, Some(&approval())),
-            ApprovalDecision::AllowByApproval
-        );
+        // ends in the terminal ask, which only a human turns into an
+        // execution.
+        assert_eq!(decide(&g, 4_500, 281), Decision::Ask);
+        assert!(decide(&g, 4_500, 281).is_ask());
     }
 
     #[test]
     fn denies_expired_even_when_within_budget() {
-        let g = grant(50_000, 0, None, None);
-        // Expiry is inclusive: now == expires_at is expired.
+        let g = grant(50_000, 0, Some(10_000), None);
         assert_eq!(
-            authorize_spend(&g, &req(1, 1), 2_000),
-            Decision::Deny(DenyReason::Expired { expired_at: 2_000 })
+            evaluate_send(&g, RECIPIENT, &req(1, 1), 2_000),
+            Decision::Deny(DenyReason::Expired { expired_at: 2_000 }),
+            "expiry is inclusive"
         );
-        assert_eq!(
-            authorize_spend(&g, &req(1, 1), 1_999),
-            Decision::Deny(DenyReason::AskRequired),
-            "unexpired: the terminal ask, not expiry"
-        );
+        assert!(matches!(
+            evaluate_send(&g, RECIPIENT, &req(1, 1), 5_000),
+            Decision::Deny(DenyReason::Expired { .. })
+        ));
     }
 
     #[test]
     fn expiry_trumps_every_other_reason() {
-        let g = grant(100, 0, Some(10), Some(1));
-        // Over max-tx, max-fee, AND budget — but expired wins.
+        let mut g = grant(1, 1, Some(1), Some(1));
+        g.mode = GrantMode::Observe;
+        g.allowed_recipients = Some(vec![]);
         assert!(matches!(
-            authorize_spend(&g, &req(1_000, 1_000), 5_000),
+            evaluate_send(&g, RECIPIENT, &req(u64::MAX, u64::MAX), 5_000),
             Decision::Deny(DenyReason::Expired { .. })
         ));
     }
 
     #[test]
     fn max_tx_is_amount_only() {
-        let g = grant(50_000, 0, Some(10_000), None);
-        // amount at the cap: a routine ask, even though amount+fee
-        // exceeds the cap — the cap judges the amount alone.
+        let g = grant(50_000, 0, Some(10_000), Some(5_000));
+        assert_eq!(decide(&g, 10_000, 4_000), Decision::Ask, "cap is inclusive");
         assert_eq!(
-            authorize_spend(&g, &req(10_000, 500), NOW),
-            Decision::Deny(DenyReason::AskRequired)
-        );
-        assert_eq!(
-            authorize_spend(&g, &req(10_001, 0), NOW),
+            decide(&g, 10_001, 0),
             Decision::Deny(DenyReason::OverMaxTx {
                 requested_sat: 10_001,
                 max_tx_sat: 10_000
@@ -748,12 +483,9 @@ mod tests {
     #[test]
     fn max_fee_is_fee_only() {
         let g = grant(50_000, 0, None, Some(1_000));
+        assert_eq!(decide(&g, 40_000, 1_000), Decision::Ask, "cap is inclusive");
         assert_eq!(
-            authorize_spend(&g, &req(20_000, 1_000), NOW),
-            Decision::Deny(DenyReason::AskRequired)
-        );
-        assert_eq!(
-            authorize_spend(&g, &req(20_000, 1_001), NOW),
+            decide(&g, 100, 1_001),
             Decision::Deny(DenyReason::OverMaxFee {
                 fee_sat: 1_001,
                 max_fee_sat: 1_000
@@ -763,15 +495,14 @@ mod tests {
 
     #[test]
     fn budget_counts_amount_plus_fee() {
-        let g = grant(10_000, 0, None, None);
-        // Exactly the budget: a routine ask.
+        let g = grant(10_000, 0, None, Some(1_000));
         assert_eq!(
-            authorize_spend(&g, &req(9_500, 500), NOW),
-            Decision::Deny(DenyReason::AskRequired)
+            decide(&g, 9_000, 1_000),
+            Decision::Ask,
+            "exactly the budget"
         );
-        // One sat over via the fee: the budget speaks.
         assert_eq!(
-            authorize_spend(&g, &req(9_500, 501), NOW),
+            decide(&g, 9_001, 1_000),
             Decision::Deny(DenyReason::OverBudget {
                 requested_sat: 10_001,
                 remaining_sat: 10_000
@@ -781,70 +512,48 @@ mod tests {
 
     #[test]
     fn budget_accounts_for_prior_spending() {
-        let g = grant(50_000, 45_412, None, None);
-        assert_eq!(
-            authorize_spend(&g, &req(4_500, 88), NOW),
-            Decision::Deny(DenyReason::AskRequired)
-        );
-        assert_eq!(
-            authorize_spend(&g, &req(4_500, 89), NOW),
-            Decision::Deny(DenyReason::OverBudget {
-                requested_sat: 4_589,
-                remaining_sat: 4_588
-            })
-        );
-    }
-
-    #[test]
-    fn overspent_grant_denies_everything() {
-        // spent > budget (should be impossible, but must not underflow).
-        let g = grant(1_000, 2_000, None, None);
-        assert_eq!(g.remaining_sat(), 0);
+        let g = grant(10_000, 6_100, None, None);
+        assert_eq!(decide(&g, 3_800, 100), Decision::Ask);
         assert!(matches!(
-            authorize_spend(&g, &req(0, 1), NOW),
-            Decision::Deny(DenyReason::OverBudget { .. })
+            decide(&g, 3_900, 100),
+            Decision::Deny(DenyReason::OverBudget {
+                remaining_sat: 3_900,
+                ..
+            })
         ));
     }
 
     #[test]
-    fn zero_total_request_still_asks() {
+    fn overspent_grant_denies_everything() {
         let g = grant(1_000, 1_000, None, None);
-        // Remaining is 0; a zero-sat request fits the budget (0 > 0 is
-        // false) and still terminates in the ask — nothing auto-executes.
-        assert_eq!(
-            authorize_spend(&g, &req(0, 0), NOW),
-            Decision::Deny(DenyReason::AskRequired)
-        );
-    }
-
-    /// Reserve through a fresh matching approval — the only path a send
-    /// can take, since the ladder never allows a spend on its own.
-    fn reserve(g: &mut Grant, r: &SpendRequest, now: u64) -> Result<(), DenyReason> {
-        let mut a = approval();
-        g.reserve_send(RECIPIENT, r, DIGEST, Some(&mut a), now)
+        assert!(matches!(
+            decide(&g, 1, 0),
+            Decision::Deny(DenyReason::OverBudget {
+                remaining_sat: 0,
+                ..
+            })
+        ));
+        assert_eq!(g.remaining_sat(), 0);
     }
 
     #[test]
-    fn unapproved_reserve_terminates_in_ask_and_draws_nothing() {
-        let mut g = grant(10_000, 0, None, None);
-        let err = g
-            .reserve_send(RECIPIENT, &req(1_000, 100), DIGEST, None, NOW)
-            .unwrap_err();
-        assert_eq!(err, DenyReason::AskRequired);
-        assert_eq!(g.spent_sat, 0, "a denied send draws no budget");
-        assert_eq!(g.tx_count, 0);
+    fn zero_total_request_still_asks() {
+        let g = grant(1_000, 0, None, None);
+        assert_eq!(decide(&g, 0, 0), Decision::Ask);
     }
 
+    /// Reserve as the human-authorized executor does: the ladder re-runs
+    /// with the real fee, and only an in-envelope proposal draws.
     #[test]
     fn reserve_draws_down_and_recheck_denies() {
         let mut g = grant(10_000, 0, None, None);
-        reserve(&mut g, &req(6_000, 100), NOW).unwrap();
+        g.reserve_send(RECIPIENT, &req(6_000, 100), NOW).unwrap();
         assert_eq!(g.spent_sat, 6_100);
         assert_eq!(g.tx_count, 1);
-        // A second spend that no longer fits reports the budget, not the
-        // terminal ask — the specific reason runs first.
+        // A second spend that no longer fits reports the budget: the
+        // specific boundary runs before the terminal ask.
         let err = g
-            .reserve_send(RECIPIENT, &req(4_000, 100), DIGEST, None, NOW)
+            .reserve_send(RECIPIENT, &req(4_000, 100), NOW)
             .unwrap_err();
         assert_eq!(
             err,
@@ -860,14 +569,22 @@ mod tests {
     fn refund_restores_reservation() {
         let mut g = grant(10_000, 0, None, None);
         let r = req(6_000, 100);
-        reserve(&mut g, &r, NOW).unwrap();
+        g.reserve_send(RECIPIENT, &r, NOW).unwrap();
         g.refund(&r);
         assert_eq!(g.spent_sat, 0);
         assert_eq!(g.tx_count, 0);
-        // The restored budget accepts a fresh approved reservation of
-        // the whole amount.
-        reserve(&mut g, &req(9_900, 100), NOW).unwrap();
+        // The restored budget accepts a fresh reservation of the whole
+        // amount.
+        g.reserve_send(RECIPIENT, &req(9_900, 100), NOW).unwrap();
         assert_eq!(g.spent_sat, 10_000);
+    }
+
+    #[test]
+    fn refund_saturates_at_zero() {
+        let mut g = grant(10_000, 100, None, None);
+        g.refund(&req(5_000, 5_000));
+        assert_eq!(g.spent_sat, 0);
+        assert_eq!(g.tx_count, 0);
     }
 
     #[test]
@@ -878,21 +595,18 @@ mod tests {
         assert_eq!(r.total_sat(), u64::MAX);
         assert_eq!(r.checked_total_sat(), None);
         assert_eq!(
-            authorize_spend(&g, &r, NOW),
+            evaluate_send(&g, RECIPIENT, &r, NOW),
             Decision::Deny(DenyReason::AmountOverflow {
                 amount_sat: u64::MAX,
                 fee_sat: u64::MAX,
             })
         );
-        assert!(reserve(&mut g, &r, NOW).is_err());
+        assert!(g.reserve_send(RECIPIENT, &r, NOW).is_err());
         assert_eq!(g.spent_sat, 0, "denied reserve must not draw down");
         assert_eq!(g.tx_count, 0);
         // The largest representable total is not overflow — it reaches
         // the terminal ask like any other in-envelope proposal.
-        assert_eq!(
-            authorize_spend(&g, &req(u64::MAX, 0), NOW),
-            Decision::Deny(DenyReason::AskRequired)
-        );
+        assert_eq!(decide(&g, u64::MAX, 0), Decision::Ask);
     }
 
     #[test]
@@ -910,20 +624,10 @@ mod tests {
     }
 
     #[test]
-    fn approval_never_lifts_amount_overflow() {
-        let g = grant(u64::MAX, 0, None, None);
-        let a = approval();
-        assert!(matches!(
-            decide(&g, u64::MAX, u64::MAX, Some(&a)),
-            ApprovalDecision::Deny(DenyReason::AmountOverflow { .. })
-        ));
-    }
-
-    #[test]
     fn tx_count_saturates_at_max() {
         let mut g = grant(10_000, 0, None, None);
         g.tx_count = u64::MAX;
-        reserve(&mut g, &req(1_000, 100), NOW).unwrap();
+        g.reserve_send(RECIPIENT, &req(1_000, 100), NOW).unwrap();
         assert_eq!(g.tx_count, u64::MAX);
     }
 
@@ -957,85 +661,6 @@ mod tests {
         assert_eq!(default_max_fee_sat(1_000_000), 20_000);
         assert_eq!(default_max_fee_sat(500), 500, "never above the budget");
         assert_eq!(default_max_fee_sat(0), 0);
-    }
-
-    fn swap(give: u64, fee: u64) -> IntentRequest {
-        IntentRequest::Swap {
-            venue: "testvenue".into(),
-            give_sat: give,
-            fee_sat: fee,
-        }
-    }
-
-    #[test]
-    fn ungranted_intent_is_denied_even_within_budget() {
-        let g = grant(50_000, 0, None, None);
-        assert_eq!(
-            authorize_intent(&g, &swap(1_000, 100), NOW),
-            Decision::Deny(DenyReason::IntentNotGranted {
-                intent: "swap".into()
-            })
-        );
-    }
-
-    #[test]
-    fn expiry_trumps_intent_authority() {
-        let g = grant(50_000, 0, None, None);
-        assert!(matches!(
-            authorize_intent(&g, &swap(1_000, 100), 5_000),
-            Decision::Deny(DenyReason::Expired { .. })
-        ));
-    }
-
-    #[test]
-    fn send_intent_and_authorize_spend_agree() {
-        let g = grant(50_000, 45_412, Some(10_000), Some(1_000));
-        for (amount, fee) in [(4_500, 88), (4_500, 89), (10_001, 0), (0, 1_001), (0, 0)] {
-            let r = req(amount, fee);
-            assert_eq!(
-                authorize_spend(&g, &r, NOW),
-                authorize_intent(&g, &IntentRequest::Send(r), NOW),
-                "decisions diverged for amount {amount} fee {fee}"
-            );
-        }
-    }
-
-    #[test]
-    fn evaluate_send_agrees_with_authorize_spend_without_an_allowlist() {
-        let g = grant(50_000, 4_781, Some(10_000), Some(1_000));
-        for (amount, fee) in [(4_500, 281), (10_001, 0), (0, 1_001), (45_000, 300), (0, 0)] {
-            assert_eq!(
-                authorize_spend(&g, &req(amount, fee), NOW),
-                evaluate_send(&g, RECIPIENT, &req(amount, fee), NOW),
-                "diverged for amount {amount} fee {fee}"
-            );
-        }
-    }
-
-    #[test]
-    fn intent_accessors_cover_every_kind() {
-        let send = IntentRequest::Send(req(9_500, 500));
-        assert_eq!(send.kind(), "send");
-        assert_eq!(send.sats_out(), 9_500);
-        assert_eq!(send.fee_sat(), 500);
-        assert_eq!(send.total_sat(), 10_000);
-
-        let s = swap(u64::MAX, 1);
-        assert_eq!(s.kind(), "swap");
-        assert_eq!(s.sats_out(), u64::MAX);
-        assert_eq!(s.total_sat(), u64::MAX, "budget draw must saturate");
-    }
-
-    #[test]
-    fn intent_not_granted_serializes_with_tag() {
-        let reason = DenyReason::IntentNotGranted {
-            intent: "swap".into(),
-        };
-        let json = serde_json::to_value(&reason).unwrap();
-        assert_eq!(json["reason"], "intent_not_granted");
-        assert_eq!(json["intent"], "swap");
-        assert_eq!(reason.code(), "intent_not_granted");
-        assert_eq!(reason.human(), "grant does not authorize swap");
     }
 
     #[test]
@@ -1088,129 +713,11 @@ mod tests {
         );
     }
 
-    /// The one lift there is: a valid proposal inside every grant
-    /// boundary, paired with a valid approval for exactly that intent.
-    #[test]
-    fn approval_lifts_only_the_terminal_ask() {
-        let mut g = grant(50_000, 0, Some(10_000), Some(1_000));
-        let mut a = approval();
-        assert_eq!(
-            decide(&g, 1_000, 100, Some(&a)),
-            ApprovalDecision::AllowByApproval
-        );
-        g.reserve_send(RECIPIENT, &req(1_000, 100), DIGEST, Some(&mut a), NOW)
-            .unwrap();
-        assert_eq!(a.consumed_at, Some(NOW), "the approval is spent");
-        assert_eq!(g.spent_sat, 1_100);
-        assert_eq!(g.tx_count, 1);
-    }
-
-    /// A grant bounds what an agent may propose; human approval does not
-    /// override the grant. Every boundary holds with a valid approval in
-    /// hand, and each denial names its boundary, not the ask.
-    #[test]
-    fn approval_never_overrides_the_grant() {
-        let a = approval();
-        // Over the amount cap.
-        let g = grant(50_000, 0, Some(10_000), None);
-        assert!(matches!(
-            decide(&g, 20_000, 100, Some(&a)),
-            ApprovalDecision::Deny(DenyReason::OverMaxTx { .. })
-        ));
-        // Over the fee cap.
-        let g = grant(50_000, 0, None, Some(100));
-        assert!(matches!(
-            decide(&g, 1_000, 500, Some(&a)),
-            ApprovalDecision::Deny(DenyReason::OverMaxFee { .. })
-        ));
-        // Over the budget.
-        let g = grant(1_000, 0, None, None);
-        assert!(matches!(
-            decide(&g, 5_000, 100, Some(&a)),
-            ApprovalDecision::Deny(DenyReason::OverBudget { .. })
-        ));
-        // Off the recipient allowlist.
-        let mut g = grant(50_000, 0, None, None);
-        g.allowed_recipients = Some(vec!["tb1pother".into()]);
-        assert!(matches!(
-            evaluate_send_with_approval(&g, RECIPIENT, &req(1_000, 100), DIGEST, Some(&a), NOW),
-            ApprovalDecision::Deny(DenyReason::RecipientNotAllowed { .. })
-        ));
-        // Observe-only.
-        let mut g = grant(50_000, 0, None, None);
-        g.mode = GrantMode::Observe;
-        assert!(matches!(
-            evaluate_send_with_approval(&g, RECIPIENT, &req(1_000, 100), DIGEST, Some(&a), NOW),
-            ApprovalDecision::Deny(DenyReason::ObserveOnly)
-        ));
-    }
-
-    #[test]
-    fn approval_never_overrides_expiry() {
-        let g = grant(50_000, 0, Some(10), None);
-        let a = IntentApproval {
-            expires_at: 10_000,
-            ..approval()
-        };
-        assert!(matches!(
-            authorize_intent_with_approval(
-                &g,
-                &IntentRequest::Send(req(1, 1)),
-                DIGEST,
-                Some(&a),
-                5_000, // grant expired at 2_000
-            ),
-            ApprovalDecision::Deny(DenyReason::Expired { .. })
-        ));
-    }
-
-    #[test]
-    fn approval_never_overrides_intent_authority() {
-        let g = grant(50_000, 0, None, None);
-        let a = approval();
-        assert!(matches!(
-            authorize_intent_with_approval(&g, &swap(1_000, 100), DIGEST, Some(&a), NOW),
-            ApprovalDecision::Deny(DenyReason::IntentNotGranted { .. })
-        ));
-    }
-
-    #[test]
-    fn spent_or_stale_approval_does_not_apply() {
-        let g = grant(50_000, 0, Some(10_000), None);
-        // Consumed: the in-envelope proposal falls back to the ask.
-        let consumed = IntentApproval {
-            consumed_at: Some(NOW - 10),
-            ..approval()
-        };
-        assert!(matches!(
-            decide(&g, 1_000, 100, Some(&consumed)),
-            ApprovalDecision::Deny(DenyReason::AskRequired)
-        ));
-        // Expired — inclusive boundary, like the grant.
-        let expired = IntentApproval {
-            expires_at: NOW,
-            ..approval()
-        };
-        assert!(matches!(
-            decide(&g, 1_000, 100, Some(&expired)),
-            ApprovalDecision::Deny(DenyReason::AskRequired)
-        ));
-        assert!(expired.is_expired(NOW));
-        // Wrong digest.
-        let other = IntentApproval {
-            intent_digest: "other".into(),
-            ..approval()
-        };
-        assert!(matches!(
-            decide(&g, 1_000, 100, Some(&other)),
-            ApprovalDecision::Deny(DenyReason::AskRequired)
-        ));
-    }
-
     /// The core invariant, swept: no send request — routine, at a cap,
-    /// zero, or enormous — reaches an allow without an approval.
+    /// zero, or enormous — is ever allowed by the ladder on its own. The
+    /// only non-denial is the terminal ask.
     #[test]
-    fn a_send_never_allows_without_an_approval() {
+    fn the_ladder_never_allows_a_spend() {
         let grants = [
             grant(50_000, 0, Some(10_000), Some(1_000)),
             grant(u64::MAX, 0, None, None),
@@ -1226,99 +733,39 @@ mod tests {
         ];
         for g in &grants {
             for r in &requests {
-                assert_ne!(
-                    authorize_spend(g, r, NOW),
-                    Decision::Allow,
-                    "grant-alone allow for {r:?}"
-                );
                 assert!(
                     matches!(
-                        evaluate_send_with_approval(g, RECIPIENT, r, DIGEST, None, NOW),
-                        ApprovalDecision::Deny(_)
+                        evaluate_send(g, RECIPIENT, r, NOW),
+                        Decision::Ask | Decision::Deny(_)
                     ),
-                    "approval-free allow for {r:?}"
+                    "unexpected verdict for {r:?}"
                 );
             }
         }
     }
 
     #[test]
-    fn approved_reserve_cannot_overspend_the_budget() {
+    fn reserve_cannot_overspend_the_budget() {
         let mut g = grant(1_000, 0, None, None);
-        let mut a = approval();
-        // The budget is a grant boundary: the approval does not lift it,
-        // and a denied reserve neither draws budget nor spends the
-        // approval.
+        // The budget is a grant boundary: human authorization does not
+        // lift it, and a denied reserve draws nothing.
         assert!(matches!(
-            g.reserve_send(RECIPIENT, &req(5_000, 100), DIGEST, Some(&mut a), NOW),
+            g.reserve_send(RECIPIENT, &req(5_000, 100), NOW),
             Err(DenyReason::OverBudget { .. })
         ));
         assert_eq!(g.spent_sat, 0, "denied reserve must not draw down");
-        assert_eq!(a.consumed_at, None, "denied reserve must not consume");
-        // The same approval still authorizes an in-budget proposal with
-        // the same digest.
-        g.reserve_send(RECIPIENT, &req(800, 100), DIGEST, Some(&mut a), NOW)
-            .unwrap();
+        g.reserve_send(RECIPIENT, &req(800, 100), NOW).unwrap();
         assert_eq!(g.spent_sat, 900);
         assert_eq!(g.remaining_sat(), 100);
-        assert_eq!(a.consumed_at, Some(NOW));
     }
 
     #[test]
-    fn refund_after_approved_reserve_restores_spent() {
-        let mut g = grant(1_000, 0, None, None);
-        let mut a = approval();
-        let r = req(800, 100);
-        g.reserve_send(RECIPIENT, &r, DIGEST, Some(&mut a), NOW)
-            .unwrap();
-        g.refund(&r);
-        assert_eq!(g.spent_sat, 0);
-        assert_eq!(g.tx_count, 0);
-        // The approval stays consumed: refund restores budget, not the
-        // authorization. Re-arming takes a fresh human approval.
-        assert_eq!(a.consumed_at, Some(NOW));
-    }
-
-    #[test]
-    fn wrapped_decision_agrees_with_authorize_intent_when_no_approval() {
-        let g = grant(50_000, 45_412, Some(10_000), Some(1_000));
-        for (amount, fee) in [(4_500, 88), (4_500, 89), (10_001, 0), (0, 1_001), (0, 0)] {
-            let plain = authorize_intent(&g, &IntentRequest::Send(req(amount, fee)), NOW);
-            let wrapped = decide(&g, amount, fee, None);
-            match plain {
-                Decision::Deny(reason) => {
-                    assert_eq!(
-                        wrapped,
-                        ApprovalDecision::Deny(reason),
-                        "diverged for amount {amount} fee {fee}"
-                    );
-                }
-                Decision::Allow => panic!("the ladder allowed a spend for amount {amount}"),
-            }
-        }
-    }
-
-    #[test]
-    fn approval_json_round_trip() {
-        let a = approval();
-        let json = serde_json::to_value(&a).unwrap();
-        assert!(json.get("consumed_at").is_none(), "None fields are omitted");
-        let back: IntentApproval = serde_json::from_value(json).unwrap();
-        assert_eq!(back, a);
-    }
-
-    #[test]
-    fn observe_mode_denies_sends_and_swaps() {
+    fn observe_mode_denies_sends() {
         let mut g = grant(50_000, 0, None, None);
         g.mode = GrantMode::Observe;
-        assert_eq!(
-            evaluate_send(&g, RECIPIENT, &req(1, 1), NOW),
-            Decision::Deny(DenyReason::ObserveOnly)
-        );
-        assert!(matches!(
-            authorize_intent(&g, &swap(1, 1), NOW),
-            Decision::Deny(DenyReason::ObserveOnly),
-        ));
+        assert_eq!(decide(&g, 1, 1), Decision::Deny(DenyReason::ObserveOnly));
+        assert!(g.reserve_send(RECIPIENT, &req(1, 1), NOW).is_err());
+        assert_eq!(g.spent_sat, 0);
     }
 
     /// The intra-ladder order is deliberate: the specific boundary
@@ -1328,13 +775,13 @@ mod tests {
     fn caps_speak_before_the_terminal_ask() {
         let g = grant(50_000, 0, Some(10_000), None);
         assert_eq!(
-            evaluate_send(&g, RECIPIENT, &req(1_000, 10), NOW),
-            Decision::Deny(DenyReason::AskRequired),
+            decide(&g, 1_000, 10),
+            Decision::Ask,
             "in-envelope: the routine ask"
         );
         assert!(
             matches!(
-                evaluate_send(&g, RECIPIENT, &req(20_000, 10), NOW),
+                decide(&g, 20_000, 10),
                 Decision::Deny(DenyReason::OverMaxTx { .. })
             ),
             "over the cap: the specific hard refusal"
@@ -1349,11 +796,11 @@ mod tests {
         let mut g = grant(u64::MAX, 0, Some(10_000), None);
         g.allowed_recipients = Some(vec!["tb1pother".into()]);
         assert!(matches!(
-            evaluate_send(&g, RECIPIENT, &req(u64::MAX, u64::MAX), NOW),
+            decide(&g, u64::MAX, u64::MAX),
             Decision::Deny(DenyReason::AmountOverflow { .. })
         ));
         assert!(matches!(
-            evaluate_send(&g, RECIPIENT, &req(30_000, 10), NOW),
+            decide(&g, 30_000, 10),
             Decision::Deny(DenyReason::RecipientNotAllowed { .. })
         ));
     }
@@ -1363,8 +810,8 @@ mod tests {
         let mut g = grant(50_000, 0, None, None);
         g.allowed_recipients = Some(vec![RECIPIENT.to_string(), "tb1pother".into()]);
         assert_eq!(
-            evaluate_send(&g, RECIPIENT, &req(1_000, 10), NOW),
-            Decision::Deny(DenyReason::AskRequired),
+            decide(&g, 1_000, 10),
+            Decision::Ask,
             "a listed recipient is a routine ask"
         );
         assert_eq!(
@@ -1376,94 +823,19 @@ mod tests {
         // An empty allowlist means no recipient may be proposed.
         g.allowed_recipients = Some(vec![]);
         assert!(matches!(
-            evaluate_send(&g, RECIPIENT, &req(1_000, 10), NOW),
+            decide(&g, 1_000, 10),
             Decision::Deny(DenyReason::RecipientNotAllowed { .. })
         ));
-        // The recipient-blind view skips the rule (it has nothing to
-        // judge) and falls through to the terminal ask; only the
-        // daemon's evaluate_send enforces the allowlist.
-        assert_eq!(
-            authorize_spend(&g, &req(1_000, 10), NOW),
-            Decision::Deny(DenyReason::AskRequired)
-        );
+        assert!(g.reserve_send(RECIPIENT, &req(1_000, 10), NOW).is_err());
+        assert_eq!(g.spent_sat, 0);
     }
 
-    /// The approvable predicate is total and frozen: every variant has an
-    /// explicit expected answer here, so adding a variant forces a
-    /// decision. Exactly one refusal is approvable — the terminal ask.
-    #[test]
-    fn approvable_truth_table() {
-        let cases: Vec<(DenyReason, bool)> = vec![
-            (DenyReason::Expired { expired_at: 1 }, false),
-            (
-                DenyReason::OverMaxTx {
-                    requested_sat: 2,
-                    max_tx_sat: 1,
-                },
-                false,
-            ),
-            (
-                DenyReason::OverMaxFee {
-                    fee_sat: 2,
-                    max_fee_sat: 1,
-                },
-                false,
-            ),
-            (
-                DenyReason::OverBudget {
-                    requested_sat: 2,
-                    remaining_sat: 1,
-                },
-                false,
-            ),
-            (
-                DenyReason::IntentNotGranted {
-                    intent: "swap".into(),
-                },
-                false,
-            ),
-            (
-                DenyReason::AmountOverflow {
-                    amount_sat: u64::MAX,
-                    fee_sat: 1,
-                },
-                false,
-            ),
-            (DenyReason::AskRequired, true),
-            (DenyReason::ObserveOnly, false),
-            (
-                DenyReason::RecipientNotAllowed {
-                    recipient: "tb1p".into(),
-                },
-                false,
-            ),
-        ];
-        let approvable = cases
-            .iter()
-            .filter(|(reason, _)| reason.approvable())
-            .count();
-        assert_eq!(approvable, 1, "exactly one approvable refusal");
-        for (reason, expected) in cases {
-            assert_eq!(
-                reason.approvable(),
-                expected,
-                "approvable({}) changed",
-                reason.code()
-            );
-        }
-    }
-
+    /// Every deny reason has a stable wire tag; the set is frozen here so
+    /// adding one forces a decision about its code.
     #[test]
     fn deny_reasons_serialize_with_stable_tags() {
-        for (reason, code) in [
-            (DenyReason::AskRequired, "ask_required"),
-            (DenyReason::ObserveOnly, "observe_only"),
-            (
-                DenyReason::RecipientNotAllowed {
-                    recipient: "tb1p".into(),
-                },
-                "recipient_not_allowed",
-            ),
+        let cases = [
+            (DenyReason::Expired { expired_at: 9 }, "expired"),
             (
                 DenyReason::OverMaxTx {
                     requested_sat: 2,
@@ -1478,8 +850,30 @@ mod tests {
                 },
                 "over_max_fee",
             ),
-            (DenyReason::Expired { expired_at: 9 }, "expired"),
-        ] {
+            (
+                DenyReason::OverBudget {
+                    requested_sat: 2,
+                    remaining_sat: 1,
+                },
+                "over_budget",
+            ),
+            (
+                DenyReason::AmountOverflow {
+                    amount_sat: u64::MAX,
+                    fee_sat: 1,
+                },
+                "amount_overflow",
+            ),
+            (DenyReason::ObserveOnly, "observe_only"),
+            (
+                DenyReason::RecipientNotAllowed {
+                    recipient: "tb1p".into(),
+                },
+                "recipient_not_allowed",
+            ),
+        ];
+        assert_eq!(cases.len(), 7, "every variant is listed");
+        for (reason, code) in cases {
             let json = serde_json::to_value(&reason).unwrap();
             assert_eq!(json["reason"], code);
             assert_eq!(reason.code(), code);
@@ -1535,54 +929,24 @@ mod tests {
             ..grant(50_000, 0, None, None)
         };
         let capped = grant(50_000, 0, Some(10_000), None);
+        let fee_capped = grant(50_000, 0, None, Some(100));
         let listed = Grant {
             allowed_recipients: Some(vec!["tb1pother".into()]),
             ..grant(50_000, 0, None, None)
         };
-        let cases: Vec<(Grant, SpendRequest, u64, Option<IntentApproval>)> = vec![
-            // Unapproved terminal ask.
-            (grant(50_000, 0, None, None), req(1_000, 10), NOW, None),
-            // Expired, even with a matching approval in hand.
-            (expired, req(1_000, 10), 2_000, Some(approval())),
-            // Observe-only, approval in hand.
-            (observe, req(1_000, 10), NOW, Some(approval())),
-            // Over the hard amount cap, approval in hand.
-            (capped, req(10_001, 10), NOW, Some(approval())),
-            // Recipient outside the allowlist, approval in hand.
-            (listed, req(1_000, 10), NOW, Some(approval())),
-            // Consumed approval on an identical retry.
-            (
-                grant(50_000, 0, None, None),
-                req(1_000, 10),
-                NOW,
-                Some(IntentApproval {
-                    consumed_at: Some(NOW - 1),
-                    ..approval()
-                }),
-            ),
-            // Approval bound to a different digest.
-            (
-                grant(50_000, 0, None, None),
-                req(1_000, 10),
-                NOW,
-                Some(IntentApproval {
-                    intent_digest: "other".into(),
-                    ..approval()
-                }),
-            ),
-            // Arithmetic overflow, approval in hand.
-            (
-                grant(u64::MAX, 0, None, None),
-                req(u64::MAX, u64::MAX),
-                NOW,
-                Some(approval()),
-            ),
+        let cases: Vec<(Grant, SpendRequest, u64)> = vec![
+            (expired, req(1_000, 10), 2_000),
+            (observe, req(1_000, 10), NOW),
+            (capped, req(10_001, 10), NOW),
+            (fee_capped, req(1_000, 101), NOW),
+            (listed, req(1_000, 10), NOW),
+            (grant(1_000, 0, None, None), req(1_000, 1), NOW),
+            (grant(u64::MAX, 0, None, None), req(u64::MAX, u64::MAX), NOW),
         ];
-        for (mut g, r, now, approval) in cases {
+        for (mut g, r, now) in cases {
             let spent_before = g.spent_sat;
             let tx_before = g.tx_count;
-            let mut holder = approval;
-            let result = g.reserve_send(RECIPIENT, &r, DIGEST, holder.as_mut(), now);
+            let result = g.reserve_send(RECIPIENT, &r, now);
             assert!(result.is_err(), "expected a denial for {r:?} at {now}");
             assert_eq!(g.spent_sat, spent_before, "denied send drew budget");
             assert_eq!(g.tx_count, tx_before, "denied send counted a tx");

@@ -2,7 +2,8 @@
 //!
 //! There is exactly one way to turn a password into signing material, and
 //! it is here. Agent grants carry no key material at all: they name a
-//! policy that `satsd` enforces against a seed it unsealed itself.
+//! policy; the human's password at approval time is what unseals a key
+//! for an agent-originated request.
 
 use anyhow::{Context, Result};
 use bdk_wallet::bip39::Mnemonic;

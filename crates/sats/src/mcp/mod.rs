@@ -1,8 +1,8 @@
 //! `sats agent serve` — serve wallet tools to an agent over MCP stdio.
 //!
-//! This process is a shim: it prepares and broadcasts transactions, and
-//! carries a bearer token naming the grant it acts under. It holds no key
-//! material, so nothing here can sign. `satsd` does that.
+//! This process reads the wallet and files requests under the grant its
+//! bearer token names. It holds no key material and never prepares,
+//! signs, or broadcasts: a human's approval executes a request.
 //!
 //! The only tokio in the binary lives here (rmcp requires a runtime);
 //! every human-facing command stays synchronous.
@@ -16,7 +16,6 @@ use sats_core::fmt::format_sats;
 use zeroize::Zeroizing;
 
 use crate::config::{Config, network_name};
-use crate::daemon;
 use crate::store::{Store, now_checked, unix_now};
 use crate::ui;
 use crate::walletd;
@@ -63,18 +62,6 @@ pub fn run(
     // The wallet must exist, and the provider config must resolve.
     walletd::open(store, network)?;
     crate::provider::resolve(config, &providers, network)?;
-    // Availability is operational, not authentication. Keep discovery and
-    // read-only tools usable while a human starts or unlocks the daemon.
-    match daemon::Client::probe(store, net_name) {
-        Ok(status) if status.locked => eprintln!(
-            "sats agent serve: satsd is locked — sends will refuse until a human runs: sats daemon unlock"
-        ),
-        Err(_) => eprintln!(
-            "sats agent serve: satsd unavailable — sends will refuse until a human starts it; use get_status for guidance"
-        ),
-        Ok(_) => {}
-    }
-
     // stdout is the MCP transport; all logging goes to stderr.
     eprintln!(
         "sats agent serve: agent {agent:?} on {net_name} — {} sat remaining, expires in {}",

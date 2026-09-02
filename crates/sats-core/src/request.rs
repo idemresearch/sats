@@ -1,15 +1,26 @@
-//! Durable agent request records.
+//! Durable agent request records: the first-class workflow object.
 //!
-//! One record per agent send request, created at receipt and rewritten
-//! through the lifecycle. It is the source of truth for idempotent
-//! retries (the recorded outcome answers a repeated request key) and for
-//! the human review queue (a denied request is what `sats agent approve`
-//! acts on). The append-only event log in [`crate::event`] is the causal
-//! audit beside it; the two share the request id.
+//! An agent creates a request; a human authorizes or dismisses it; sats
+//! executes it. One record per request, created at receipt and
+//! rewritten through the lifecycle. It is the source of truth for the
+//! human review queue and for what the agent observes. The append-only
+//! event log in [`crate::event`] is the causal audit beside it; the two
+//! share the request id.
+//!
+//! The state machine, with the signature boundary explicit:
+//!
+//! ```text
+//! create ─► pending_approval ─approve─► executing ─► sent
+//!                 │                        ├─► broadcast_pending  (signed; never signs again)
+//!                 │                        ├─► failed             (nothing signed; refunded)
+//!                 │                        └─► denied             (real-fee ladder)
+//!                 ├─dismiss─► dismissed
+//!                 └─(hard boundary at creation)─► denied
+//! ```
 
 use serde::{Deserialize, Serialize};
 
-use crate::authz::{DenyReason, IntentApproval};
+use crate::authz::DenyReason;
 
 pub const REQUEST_FORMAT_VERSION: u32 = 1;
 
@@ -36,37 +47,88 @@ pub struct AgentRequest {
     pub intent_digest: String,
     pub created_at: u64,
     pub updated_at: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<RequestOutcome>,
-    /// The one-time human approval for exactly this intent, when granted.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approval: Option<IntentApproval>,
-    /// Set when a human dismissed the request from the review queue.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dismissed_at: Option<u64>,
+    /// Where the request is in its lifecycle. Flattened, so the record's
+    /// JSON carries a top-level `status`.
+    #[serde(flatten)]
+    pub state: RequestState,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The lifecycle states. Whether a signed transaction exists is
+/// structural: only `Sent` and `BroadcastPending` carry a txid, and a
+/// request in either state must never be signed again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub enum RequestOutcome {
-    /// Signed and broadcast.
-    Sent {
-        txid: String,
+pub enum RequestState {
+    /// Inside every grant boundary; awaiting a human decision.
+    PendingApproval,
+    /// A grant boundary refused it — at creation (fee unknown) or at
+    /// execution (real fee). Terminal: no approval lifts a boundary.
+    Denied { deny: DenyReason, at: u64 },
+    /// The human declined. Terminal.
+    Dismissed { at: u64 },
+    /// A human authorized it and the budget is reserved; a signature is
+    /// in progress. Carries what the reservation drew and which grant
+    /// it drew from, so an interrupted execution can be reconciled.
+    Executing {
+        approved_at: u64,
+        /// The fee the reservation was made with (amount is on the record).
         fee_sat: u64,
-        resolved_at: u64,
+        /// `token_id` of the grant the reservation was drawn from.
+        grant_token_id: String,
     },
-    /// The deterministic policy decision said no. Side-effect free: a
-    /// retry under the same key re-evaluates instead of replaying.
-    Denied { deny: DenyReason, resolved_at: u64 },
-    /// An operational failure. With a txid, a signature exists (broadcast
-    /// failed) and the outcome is replayed verbatim on retry; without
-    /// one, nothing was signed and budget was refunded.
-    Failed {
-        message: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        txid: Option<String>,
-        resolved_at: u64,
-    },
+    /// Signed and broadcast. Terminal.
+    Sent { txid: String, fee_sat: u64, at: u64 },
+    /// Signed, persisted, not broadcast. The reservation is final and
+    /// the signer is never invoked again; only rebroadcasting the
+    /// existing transaction settles it to `Sent`.
+    BroadcastPending { txid: String, fee_sat: u64, at: u64 },
+    /// Execution stopped before a durable signature existed. Nothing was
+    /// signed and the reservation was refunded; a human may authorize
+    /// again or dismiss.
+    Failed { message: String, at: u64 },
+}
+
+impl RequestState {
+    /// The wire status, matching the serde tag.
+    pub fn status(&self) -> &'static str {
+        match self {
+            RequestState::PendingApproval => "pending_approval",
+            RequestState::Denied { .. } => "denied",
+            RequestState::Dismissed { .. } => "dismissed",
+            RequestState::Executing { .. } => "executing",
+            RequestState::Sent { .. } => "sent",
+            RequestState::BroadcastPending { .. } => "broadcast_pending",
+            RequestState::Failed { .. } => "failed",
+        }
+    }
+
+    /// Whether a signed transaction exists for this request. Once true
+    /// it stays true: such a request is never signed again and its
+    /// reservation is never refunded.
+    pub fn has_signature(&self) -> bool {
+        matches!(
+            self,
+            RequestState::Sent { .. } | RequestState::BroadcastPending { .. }
+        )
+    }
+
+    /// The signed transaction's id, when one exists.
+    pub fn txid(&self) -> Option<&str> {
+        match self {
+            RequestState::Sent { txid, .. } | RequestState::BroadcastPending { txid, .. } => {
+                Some(txid)
+            }
+            _ => None,
+        }
+    }
+
+    /// The typed refusal, when the request was denied.
+    pub fn deny_reason(&self) -> Option<&DenyReason> {
+        match self {
+            RequestState::Denied { deny, .. } => Some(deny),
+            _ => None,
+        }
+    }
 }
 
 impl AgentRequest {
@@ -74,19 +136,29 @@ impl AgentRequest {
         self.format_version == REQUEST_FORMAT_VERSION
     }
 
-    /// Awaiting human review: denied and not dismissed.
-    pub fn is_pending(&self) -> bool {
-        matches!(self.outcome, Some(RequestOutcome::Denied { .. })) && self.dismissed_at.is_none()
+    /// Awaiting a human decision right now.
+    pub fn is_pending_approval(&self) -> bool {
+        matches!(self.state, RequestState::PendingApproval)
     }
 
-    /// Whether executing this request left something irreversible — a
-    /// signature. Such outcomes replay verbatim on a keyed retry; the
-    /// rest re-evaluate.
-    pub fn has_side_effect(&self) -> bool {
+    /// Whether a human may authorize execution from this state: a
+    /// pending request, or one whose earlier execution stopped before
+    /// any signature existed.
+    pub fn is_approvable(&self) -> bool {
         matches!(
-            self.outcome,
-            Some(RequestOutcome::Sent { .. }) | Some(RequestOutcome::Failed { txid: Some(_), .. })
+            self.state,
+            RequestState::PendingApproval | RequestState::Failed { .. }
         )
+    }
+
+    /// Whether a human may dismiss it: anything still awaiting a decision
+    /// or safely re-approvable.
+    pub fn is_dismissable(&self) -> bool {
+        self.is_approvable()
+    }
+
+    pub fn status(&self) -> &'static str {
+        self.state.status()
     }
 }
 
@@ -94,7 +166,7 @@ impl AgentRequest {
 mod tests {
     use super::*;
 
-    fn request(outcome: Option<RequestOutcome>) -> AgentRequest {
+    fn request(state: RequestState) -> AgentRequest {
         AgentRequest {
             format_version: REQUEST_FORMAT_VERSION,
             id: "k-job-1".into(),
@@ -106,97 +178,140 @@ mod tests {
             intent_digest: "d".repeat(64),
             created_at: 1_000,
             updated_at: 1_000,
-            outcome,
-            approval: None,
-            dismissed_at: None,
+            state,
         }
     }
 
-    fn denied() -> RequestOutcome {
-        RequestOutcome::Denied {
+    fn denied() -> RequestState {
+        RequestState::Denied {
             deny: DenyReason::OverMaxTx {
                 requested_sat: 25_000,
                 max_tx_sat: 10_000,
             },
-            resolved_at: 1_001,
+            at: 1_001,
         }
     }
 
     #[test]
-    fn json_round_trip_with_nested_denial() {
-        let req = request(Some(denied()));
+    fn status_flattens_into_the_record_with_nested_denial() {
+        let req = request(denied());
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["outcome"]["status"], "denied");
-        assert_eq!(json["outcome"]["deny"]["reason"], "over_max_tx");
-        assert!(json.get("approval").is_none(), "None fields are omitted");
+        assert_eq!(json["status"], "denied");
+        assert_eq!(json["deny"]["reason"], "over_max_tx");
+        assert!(json.get("state").is_none(), "the state is flattened");
         let back: AgentRequest = serde_json::from_value(json).unwrap();
         assert_eq!(back.id, "k-job-1");
-        assert!(back.is_pending());
+        assert_eq!(back.state, denied());
+        assert!(!back.is_pending_approval());
+        assert!(!back.is_approvable());
     }
 
     #[test]
-    fn side_effect_truth_table() {
-        let sent = RequestOutcome::Sent {
+    fn pending_serializes_as_a_bare_status() {
+        let json = serde_json::to_value(request(RequestState::PendingApproval)).unwrap();
+        assert_eq!(json["status"], "pending_approval");
+        let back: AgentRequest = serde_json::from_value(json).unwrap();
+        assert!(back.is_pending_approval());
+        assert!(back.is_approvable());
+        assert!(back.is_dismissable());
+    }
+
+    #[test]
+    fn signature_boundary_is_structural() {
+        let sent = RequestState::Sent {
             txid: "ab".into(),
             fee_sat: 100,
-            resolved_at: 1,
+            at: 1,
         };
-        let failed_signed = RequestOutcome::Failed {
-            message: "broadcast failed".into(),
-            txid: Some("ab".into()),
-            resolved_at: 1,
+        let pending_broadcast = RequestState::BroadcastPending {
+            txid: "ab".into(),
+            fee_sat: 100,
+            at: 1,
         };
-        let failed_unsigned = RequestOutcome::Failed {
+        let failed = RequestState::Failed {
             message: "signing failed".into(),
-            txid: None,
-            resolved_at: 1,
+            at: 1,
         };
-        assert!(request(Some(sent)).has_side_effect());
-        assert!(request(Some(failed_signed)).has_side_effect());
-        assert!(!request(Some(failed_unsigned)).has_side_effect());
-        assert!(!request(Some(denied())).has_side_effect());
-        assert!(!request(None).has_side_effect());
+        let executing = RequestState::Executing {
+            approved_at: 1,
+            fee_sat: 100,
+            grant_token_id: "t".into(),
+        };
+        assert!(sent.has_signature());
+        assert!(pending_broadcast.has_signature());
+        assert_eq!(pending_broadcast.txid(), Some("ab"));
+        assert!(!failed.has_signature());
+        assert!(!executing.has_signature());
+        assert!(!denied().has_signature());
+        assert!(!RequestState::PendingApproval.has_signature());
+        // Only the no-signature stop is re-approvable.
+        assert!(request(failed).is_approvable());
+        assert!(!request(sent).is_approvable());
+        assert!(!request(pending_broadcast).is_approvable());
+        assert!(!request(executing).is_approvable());
+        assert!(!request(RequestState::Dismissed { at: 2 }).is_approvable());
     }
 
     #[test]
-    fn pending_requires_denial_and_no_dismissal() {
-        assert!(request(Some(denied())).is_pending());
-        let mut dismissed = request(Some(denied()));
-        dismissed.dismissed_at = Some(2_000);
-        assert!(!dismissed.is_pending());
-        assert!(!request(None).is_pending());
+    fn every_status_round_trips() {
+        let states = [
+            RequestState::PendingApproval,
+            denied(),
+            RequestState::Dismissed { at: 2 },
+            RequestState::Executing {
+                approved_at: 3,
+                fee_sat: 100,
+                grant_token_id: "t".into(),
+            },
+            RequestState::Sent {
+                txid: "ab".into(),
+                fee_sat: 100,
+                at: 4,
+            },
+            RequestState::BroadcastPending {
+                txid: "ab".into(),
+                fee_sat: 100,
+                at: 4,
+            },
+            RequestState::Failed {
+                message: "m".into(),
+                at: 5,
+            },
+        ];
+        for state in states {
+            let json = serde_json::to_value(request(state.clone())).unwrap();
+            assert_eq!(json["status"], state.status());
+            let back: AgentRequest = serde_json::from_value(json).unwrap();
+            assert_eq!(back.state, state);
+        }
     }
 
     #[test]
     fn unknown_format_version_is_detected() {
-        let mut req = request(None);
+        let mut req = request(RequestState::PendingApproval);
         req.format_version = 99;
         assert!(!req.version_supported());
-        // Old files without the field default to the current version.
+        // Files without the field default to the current version.
         let json = serde_json::json!({
             "id": "r-abc", "network": "signet", "agent": "a",
             "recipient": "tb1p", "amount_sat": 1,
             "intent_digest": "d", "created_at": 0, "updated_at": 0,
+            "status": "pending_approval",
         });
         let back: AgentRequest = serde_json::from_value(json).unwrap();
         assert!(back.version_supported());
     }
 
+    /// Pre-release contract: a record in the retired outcome/approval
+    /// shape does not parse, and is never migrated.
     #[test]
-    fn outcome_statuses_serialize_snake_case() {
-        let sent = RequestOutcome::Sent {
-            txid: "ab".into(),
-            fee_sat: 100,
-            resolved_at: 1,
-        };
-        assert_eq!(serde_json::to_value(&sent).unwrap()["status"], "sent");
-        let failed = RequestOutcome::Failed {
-            message: "m".into(),
-            txid: None,
-            resolved_at: 1,
-        };
-        let json = serde_json::to_value(&failed).unwrap();
-        assert_eq!(json["status"], "failed");
-        assert!(json.get("txid").is_none());
+    fn retired_record_shape_does_not_parse() {
+        let json = serde_json::json!({
+            "id": "k-old", "network": "signet", "agent": "a",
+            "recipient": "tb1p", "amount_sat": 1,
+            "intent_digest": "d", "created_at": 0, "updated_at": 0,
+            "outcome": {"status": "denied", "deny": {"reason": "ask_required"}, "resolved_at": 1},
+        });
+        assert!(serde_json::from_value::<AgentRequest>(json).is_err());
     }
 }

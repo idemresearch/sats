@@ -44,6 +44,10 @@ pub fn broadcast(
     }
 
     let txid = crate::spend::broadcast_record(store, &mut ctx, services, &mut record)?;
+    // An agent request signed earlier but never broadcast settles now.
+    if let Err(err) = crate::request::settle_broadcast(store, network, &txid.to_string()) {
+        eprintln!("⚠ broadcast succeeded but the request record was not updated: {err:#}");
+    }
     report(json, &txid.to_string());
     Ok(())
 }

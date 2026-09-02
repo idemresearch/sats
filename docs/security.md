@@ -3,8 +3,10 @@
 sats separates watch-only wallet state from signing material, makes spending
 authority explicit, and treats every signature as a point of no return. Its
 core invariant: **no agent-originated spend reaches the signer without
-explicit, one-time human authorization bound to that exact action** — an
-unapproved agent send resolves to an ask or a denial, never a signature.
+explicit human authorization bound to that exact request** — an
+unapproved agent request is pending or denied, never a signature. Only a
+human-authorized execution path may invoke the signer for an
+agent-originated request; in v0.0.1 that path is `sats agent approve`.
 This document describes the implemented boundaries and their costs; the
 direction they serve is in [Direction](direction.md).
 
@@ -48,75 +50,50 @@ never persist the prepared or signed PSBT. The finalized transaction is saved
 before network broadcast, so a failure or lost response leaves an exact retry
 without retaining PSBT derivation metadata.
 
-## The signing daemon
+## Executing an agent request
 
-`satsd` is a local, per-network process that holds the unsealed mnemonic in
-memory and is the only thing that can produce a signature for an agent. It
-has no chain access: callers sync, apply guards, estimate fees, and
-broadcast; the daemon decides and signs.
+Agents create requests. Humans authorize requests. sats executes
+requests. There is no resident signer: no process holds an unsealed seed
+between executions. `sats agent approve` is the human-authorized
+execution path, and it runs in the human's own process:
 
-The daemon starts locked. `sats daemon unlock` unseals the seed into its
-memory with the wallet password; `sats daemon lock` drops it; an idle
-timeout (default 8h, `--auto-lock`) drops it unattended. While locked the
-daemon still serves, and refuses every signature with the typed error code
-`wallet_locked` — distinct from any policy denial, so an agent can tell
-"your budget said no" from "no human has unlocked the wallet".
+1. the request is claimed (a per-request lock) and its grant is
+   re-checked with the fee unknown;
+2. the transaction is prepared on current chain state through the same
+   pipeline as a human send, with no dust or guard bypass;
+3. what the prepared PSBT actually pays is derived from the wallet's own
+   descriptors and must equal the recorded request's recipient and amount;
+4. the grant's ladder re-runs with the real fee;
+5. the human sees recipient, amount, fee, total, and remaining budget, and
+   enters the wallet password — the authorization, and the only moment
+   key material is unsealed;
+6. under the grant lock the budget is reserved and persisted, then the
+   request is persisted as `executing` — grant first, so an `executing`
+   record on disk always means its draw is on the grant;
+7. the signer is constructed only now, signs, and the finalized
+   transaction is persisted before broadcast;
+8. broadcast settles the request to `sent`, or to `broadcast_pending` if
+   the provider refused.
 
-Unlock attempts are throttled: they run one at a time (so parallel
-connections cannot stack Argon2id derivations in memory), the first three
-misses are free, and further misses back off with a doubling delay capped
-at one minute. A blocked attempt is refused with the typed code
-`unlock_throttled` before the password is even tried. The window is
-monotonic, so rolling the wall clock back does not lift it; restarting the
-daemon does, which costs an attacker more than waiting. The daemon's
-status query is read-only — expired grants are pruned by `sats agent
-list`, never by an unauthenticated socket call.
+The signature boundary is structural in the request record. `failed`
+means no durable signature exists: the reservation was refunded and the
+human may authorize again. `broadcast_pending` and `sent` mean a signed
+transaction exists: the reservation is never refunded, the signer is
+never invoked again for that request, and only rebroadcasting the saved
+transaction (`sats tx broadcast <txid>`) settles it.
 
-The socket lives at `$XDG_RUNTIME_DIR/sats/<network>.sock` (or under
-`SATS_DIR`) with mode 0600, in a 0700 directory.
+An interrupted execution is reconciled from that boundary, never
+guessed: a request left `executing` by a dead process becomes
+`broadcast_pending` or `sent` when a persisted transaction attributed to
+it exists, and otherwise `failed` with its reservation refunded — on the
+grant it was drawn from, identified by the grant's token id, so a
+replaced grant never inherits a refund it did not draw. A crash can
+therefore never cause a double budget draw, a second signature for one
+authorized execution, or a refund after a signed transaction exists.
 
-A private lifetime lock is acquired before stale-socket cleanup; concurrent
-daemon launches cannot race to own the same socket. On macOS, optional
-`daemon install` supervision uses a per-user LaunchAgent, never root. The
-service definition stores executable/identity settings, not passwords or
-tokens. Login and crash recovery always start locked. Availability is separate
-from authority: MCP can remain connected while the daemon is missing, but
-signing still requires an unlocked daemon and the existing grant checks.
-
-What this boundary is, stated exactly: satsd runs as the wallet's own user,
-so it is a **process-memory** boundary, not a privilege boundary. It defeats
-reading a file, which is what a shell-capable agent actually does. It does
-not defeat root, a debugger attaching to the process, or a core dump, and it
-cannot stop the seed from paging to swap.
-
-### Agent-requested unlock dialogs
-
-On macOS an authenticated agent may call `request_unlock`, with no password
-or custom prompt text. satsd re-reads the matching, unexpired grant before
-opening a dialog and again under the grant lock before unlocking. A fixed,
-embedded AppleScript runs through `/usr/bin/osascript` as a child of satsd;
-its masked password field returns only through a private pipe to the daemon.
-The MCP process never sees that pipe or password. The helper inherits no
-secret environment, reads no `SATS_PASSWORD`, invokes no shell, and receives
-display text as a separate argument, never executable script text. Password
-buffers owned by Rust are zeroized on drop; macOS/AppleScript runtime memory
-is not under Rust's zeroization control. No passwords are saved to disk or
-logged by this flow.
-
-The dialog displays the agent, network, escaped canonical wallet path and
-idle auto-lock interval. Unlocking enables all valid grants for that daemon,
-not just the requesting agent or a particular payment. Limits, approvals,
-and accounting are unchanged. There is one prompt per daemon, a 30-second
-cooldown after it completes, and a two-minute deadline. Caller cancellation
-or disconnect kills the helper; human lock/unlock changes invalidate pending
-consent, including at the final seed installation boundary. Cancelling after
-an unlock has already committed does not retroactively lock the daemon.
-
-This dialog is not a privilege boundary or an unspoofable OS authentication
-surface. A process with the same user's UI/debugging access can still attack
-it. Humans should enter the wallet password only in a dialog they requested,
-check its wallet/network, and never paste it into chat. Headless or non-macOS
-users keep using the terminal unlock command.
+Because execution happens in the approving process with the human's
+password, an approval is not a durable token another process trusts: a
+forged "approved" record on disk gains nothing without the password.
 
 ## Agent grants
 
@@ -125,9 +102,9 @@ sign. A grant defines what an agent is allowed to propose; every boundary
 it carries is hard, and human approval authorizes one valid proposal
 inside the grant, never past it. A grant carries:
 
-- an authority mode — `ask` (the default: every send terminates in a
-  one-time approvable ask) or `observe` (read-only) — switchable live
-  with `sats agent mode`, where tightening never needs the password and
+- an authority mode — `ask` (the default: every request waits for the
+  human) or `observe` (read-only) — switchable live with
+  `sats agent mode`, where tightening never needs the password and
   widening always does. There is no autonomous mode;
 - total budget, including transaction fees;
 - an optional per-transaction amount cap — an amount above it is the
@@ -150,7 +127,7 @@ inside the grant, never past it. A grant carries:
 
 Agent names are path components on disk, so they are restricted to 1-32
 characters of `a-z`, `0-9`, `-` or `_` — enforced at grant creation, at
-the daemon's socket boundary, and again inside the store.
+the MCP boundary, and again inside the store.
 
 Creating the grant requires the human's wallet password, but nothing derived
 from it enters the grant: **the grant file holds no key material.** A random
@@ -178,7 +155,7 @@ never touches the seed, and never reaches any other network. Use small
 budgets and short expiries; revoke when not needed.
 
 Hardware- or passkey-backed `Signer` implementations can strengthen the
-daemon's own boundary further without changing transaction planning.
+executor's signing boundary further without changing transaction planning.
 
 ### Grant format
 
@@ -197,7 +174,7 @@ that stored the master seed re-sealed under a key in the same file, so
 any process that could read it could sign without asking. Those records
 are read well enough to name themselves and are then **refused**, with
 the commands that replace them; honoring one would preserve exactly the
-weakness the daemon removes. `sats agent list` reports them rather than
+weakness the grant model removes. `sats agent list` reports them rather than
 showing an empty table.
 
 If an agent with shell access ever ran on a machine while such a
@@ -207,49 +184,45 @@ to a fresh wallet rather than only revoking.
 ## Authorization order
 
 The authorization engine is deterministic and pure, and every refusal is
-typed. A send never reaches an allow on the grant alone: the only allow a
-spend can obtain rides a one-time human approval, so "no unapproved
-agent-originated spend may reach the signer" is a structural property of
-the ladder, not a policy setting. Every rung is a hard grant boundary —
-none of them can be lifted by an approval:
+typed. The ladder never allows a spend on the grant alone: a proposal
+inside every boundary is the verdict `ask`, which becomes a
+`pending_approval` request, so "no unapproved agent-originated request
+may reach the signer" is a structural property of the ladder, not a
+policy setting. Every rung is a hard grant boundary — none of them can
+be lifted by an approval:
 
 1. expiry;
 2. observe mode;
-3. intent authority (only send is grantable today);
-4. arithmetic sanity — an amount + fee that overflows is the typed denial
+3. arithmetic sanity — an amount + fee that overflows is the typed denial
    `amount_overflow`, never a saturated number a budget could pass;
-5. the recipient allowlist (`recipient_not_allowed`), when the grant
+4. the recipient allowlist (`recipient_not_allowed`), when the grant
    carries one;
-6. per-transaction amount cap (`over_max_tx`);
-7. per-transaction fee cap (`over_max_fee`);
-8. remaining total budget (`over_budget`);
-9. the terminal ask (`ask_required`): a proposal inside every boundary
-   still asks — the one refusal a one-time human approval lifts, and
-   the only approvable reason in the system.
+5. per-transaction amount cap (`over_max_tx`);
+6. per-transaction fee cap (`over_max_fee`);
+7. remaining total budget (`over_budget`);
+8. the terminal verdict, ask: a proposal inside every boundary still
+   waits for a human. It is not a denial — the request is
+   `pending_approval` — and it is the only non-denial the ladder has.
 
 The order is deliberate and frozen by tests: the specific boundary
 answers before the terminal ask, so a refusal names what was crossed
-instead of the generic ask. `DenyReason::approvable()` is the one
-predicate every surface keys off to decide whether a refusal may carry
-an approval path at all, and it is true only for `ask_required`. A valid
-digest-bound approval lifts exactly that terminal ask for exactly its
-intent — the digest pins recipient and amount, and the fee stays bounded
-by the grant's own fee cap — while every boundary stands regardless.
+instead of the generic ask. Every denial is a grant boundary; there is no
+approvable denial and no denial a human is asked about.
 
-Budget drawdown is amount plus fee, and only an approved, signed send
-draws it: a denial — including the terminal ask — consumes nothing. The
-MCP server performs a cheap amount-only precheck through the same full
-ladder — recipient rule included — so a novel proposal is recorded and
-denied before any network access; an approved retry prepares the
-transaction to learn the real fee, then the daemon makes the final
-decision. The reserve re-runs the full ladder with every boundary hard,
-so a draw can never exceed the remaining budget: an approval authorizes
-a valid proposal inside the grant, never an overdraw.
+Budget drawdown is amount plus fee, and only an authorized, signed
+execution draws it: a denial consumes nothing, and so does a pending
+request. Filing runs the full ladder — recipient rule included — with
+the fee unknown, so a proposal outside the grant is recorded as denied
+before any network access. Execution prepares the transaction to learn
+the real fee and re-runs the ladder with it, under the grant lock, before
+the reservation: a draw can never exceed the remaining budget, and a fee
+above the cap is the denial `over_max_fee` even for a request a human
+just authorized.
 
-The engine takes the current time as an input, and the daemon's clock
-fails closed: if the system clock cannot be read, sends refuse with the
-typed error `clock_unavailable` rather than evaluating expiry against a
-1970 fallback that would treat every grant as live.
+The engine takes the current time as an input, and the clock fails
+closed: if the system clock cannot be read, filing and execution refuse
+with the typed error `clock_unavailable` rather than evaluating expiry
+against a 1970 fallback that would treat every grant as live.
 
 After approval, sats reserves and persists the budget before signing. If
 signing fails and no signature exists, the reservation is refunded. Once a
@@ -268,123 +241,102 @@ with `sats agent revoke` therefore takes effect on the next send call, even
 in an existing MCP session, and a grant replaced mid-flight refuses the older
 token.
 
-## Agent requests, idempotency, and the event log
+## Agent requests and the event log
 
-Every agent send is recorded as a durable request under
+Every agent request is a durable record under
 `<network>/agent-requests/<agent>/`, keyed by the agent's optional
 `request_id`, carrying the canonical intent digest (network, agent,
-normalized recipient, amount — never the fee) and the resolved outcome.
-Retrying a key whose earlier execution signed a transaction replays the
-recorded outcome; it can never sign twice. Reusing a key for a different
-intent is a typed error that mutates nothing. Denials are side-effect
-free, so a keyed retry after a denial re-evaluates the same request.
+normalized recipient, amount — never the fee) and its state:
+`pending_approval`, `denied`, `dismissed`, `executing`, `sent`,
+`broadcast_pending`, or `failed`. Filing the same key with the same
+intent returns the existing record without writing; reusing a key for a
+different intent is a typed error that mutates nothing. The agent never
+executes and never retries to make a payment happen: it observes.
 
-Only authenticated callers write: a send for an agent with no grant on
-file — a name that never had one, or one already revoked — is denied
+Only authenticated callers write: a filing for an agent with no grant on
+file — a name that never had one, or one already revoked — is refused
 without creating a request record or a journal line, exactly like a wrong
-token. Recorded truth still outranks revocation, read-only: a keyed retry
-of a send that signed before the revocation replays its recorded txid
-from the existing record without writing anything new.
+token.
 
-Each state transition of the agent path — request received, denial,
+Each state transition — request received, denial, approval, dismissal,
 reservation, refund, signature, broadcast — appends one line to the
-per-network event log at `<network>/events/log.jsonl`, linked by request id
-and intent digest. Finalized transaction records carry an `origin` field
-naming the surface, agent, request, and digest, so an agent-signed
-transaction is attributable after the fact. Request records and the event
-log contain recipients and amounts; both are written owner-only (0600),
-like the transaction records beside them. The log is append-only and never
-pruned by sats.
+per-network event log at `<network>/events/log.jsonl`, linked by request
+id and intent digest. Finalized transaction records carry an `origin`
+field naming the surface, agent, request, and digest, so an agent-
+originated transaction is attributable after the fact, and so an
+interrupted execution can be reconciled from the record. Request records
+and the event log contain recipients and amounts; both are written
+owner-only (0600), like the transaction records beside them. The log is
+append-only and never pruned by sats.
 
 The log is also read tolerantly: a syntactically valid line whose event
 kind or format version this build does not understand — written by a newer
 sats — is shown raw by `sats agent log` with a warning, never hidden and
 never fatal to the listing. The audit must survive the future.
 
-Discovery of pending asks does not depend on the agent's own channel:
-`sats agent requests --watch` streams each newly pending approvable
-request from the local store, so an agent that misrepresents, downplays,
-or simply never relays a denial cannot keep the human from seeing it.
-The watch is read-only — no provider access, no grant writes, no events —
-and approval itself stays in `sats agent approve`, which re-reads and
-renders the exact durable request before the password prompt.
+Discovery of pending requests does not depend on the agent's own channel:
+`sats agent requests --watch` streams each newly pending request from the
+local store, so an agent that misrepresents, downplays, or simply never
+relays its status cannot keep the human from seeing it. The watch is
+read-only — no provider access, no grant writes, no events — and
+authorization stays in `sats agent approve`, which prepares and renders
+the exact transaction before the password prompt.
 
-The event log also makes the one irreducible crash window visible: a
-`reserved` event with no following `signed` or `refunded` means the process
-died between persisting the budget draw and signing — budget is held for a
-transaction that never existed, and a human resolves it by re-granting or
-accepting the drawdown.
+## Human authorization
 
-## One-time approvals
+`sats agent approve` is the one place an agent-originated request reaches
+the signer. Its trust model:
 
-`sats agent approve` converts one asked request into a single-use
-authorization. Its trust model:
-
-- the approval binds the request's canonical intent digest — network,
-  agent, normalized recipient, amount — so it authorizes exactly the send
-  the human reviewed, nothing adjacent;
-- the fee is not part of the digest (it varies per preparation), and the
-  approval carries no fee bound of its own: the grant's always-present
-  fee cap bounds the fee when the send executes, like every other grant
-  boundary;
-- creating an approval requires the wallet password — the prompt is the
-  authorization, exactly as for grant creation. Verification is a trial
-  unseal, so key material is derived briefly in the approving process and
-  discarded; the signature itself is only ever produced later, inside
-  `satsd`, when the agent's identical retry authorizes. Dismissing a
-  request and revoking its approval (`sats agent deny`) needs no
-  password: reducing authority stays cheap;
-- an approval lifts only the terminal `ask_required` — the single
-  refusal whose `DenyReason::approvable()` is true. It never lifts a
-  grant boundary: not expiry or revocation (the kill switches that
-  withdraw all authority at once — mechanically it cannot, because the
-  signing key lives behind the grant file), not observe mode, not the
-  recipient allowlist, and not the amount, fee, or budget bounds, which
-  are the human's pre-commitments that no amount of asking can move;
-- approval creation rechecks the current grant before prompting and
-  under the grant lock before writing; a missing grant or a current hard
-  refusal cannot arm an approval from an older recorded ask.
-  Read-only polling checks the same hard envelope before reporting an
-  approval ready, without changing the recorded outcome or authorizing
-  a signature;
-- consumption is single-use and persisted before the budget draw, under
-  the same per-network lock as every grant write. A crash between the two
-  writes burns the approval without signing — the failing direction is
-  always toward less authority. A signing failure refunds budget but never
-  re-arms the approval; only a fresh `sats agent approve` does.
-
-A stolen approval file entry is inert: it names no key material, binds one
-exact intent, and spends nothing without a live grant. A replayed approval
-is refused by its `consumed_at` mark under the grant lock.
+- the request's canonical intent digest — network, agent, normalized
+  recipient, amount — is what the human reviews, and the executor refuses
+  to sign a PSBT whose derived payment differs from it, so the human
+  authorizes exactly the send they saw, nothing adjacent;
+- the fee is not part of the digest (it varies per preparation): the
+  human sees the real fee before authorizing, and the grant's
+  always-present fee cap bounds it like every other boundary;
+- the wallet password is the authorization, exactly as for grant
+  creation, and it is also what unseals the key: there is no resident
+  signer for a forged approval record to exploit. Dismissing a request
+  (`sats agent dismiss`) needs no password: reducing authority stays
+  cheap;
+- authorization executes only a proposal inside the grant. It never lifts
+  a grant boundary: not expiry or revocation (the kill switches that
+  withdraw all authority at once), not observe mode, not the recipient
+  allowlist, and not the amount, fee, or budget bounds, which are the
+  human's pre-commitments that no amount of asking can move. The grant is
+  re-read at staging and again under the grant lock before the
+  reservation, so a boundary tightened between the review and the
+  password still refuses;
+- an authorization executes at most once: a request that signed is
+  terminal, and a request whose execution stopped before any signature
+  must be authorized again by a fresh human decision.
 
 ## MCP boundary
 
-The served process is a shim. It prepares transactions and broadcasts them,
-and carries a bearer token naming the grant it acts under; it holds no key
-material, so nothing in it can sign.
+The served process reads the wallet and files requests under the grant
+its bearer token names. It holds no key material, never prepares or signs
+a transaction, and never broadcasts; nothing in it can move money.
 
-It starts only when the named agent has a non-expired grant, `SATS_AGENT_TOKEN`
-matches that grant, the wallet and provider configuration are valid, and satsd
-is reachable. Each failure names its own remedy at `claude mcp add` time
-rather than mid-conversation. A daemon that is running but locked is a
-warning at startup, not a refusal — a human can unlock it later.
+It starts only when the named agent has a non-expired grant,
+`SATS_AGENT_TOKEN` matches that grant, and the wallet and provider
+configuration are valid. Each failure names its own remedy at
+`claude mcp add` time rather than mid-conversation.
 
 It exposes only:
 
 - balance lookup;
 - fresh receive address;
 - the caller's grant status;
-- read-only status of the caller's own send requests, so an agent can
-  wait for a human decision without retrying sends;
-- a bounded send *proposal*: the one spending tool, and it cannot cause a
-  signature — a novel send terminates in the recorded ask a human decides.
+- filing a send request — the one tool that touches authority, and it
+  cannot cause a signature: a request inside the grant waits for a human;
+- read-only status of the caller's own requests, so an agent can observe
+  a human decision without doing anything.
 
 Agents never receive the password, mnemonic, raw signer, arbitrary PSBT
-signing tool, or the CLI's UTXO-safety bypass flags. Expected policy denials
-are machine-readable results, not errors that invite a retry. Operational
-conditions carry a typed `error_code` instead of a denial `reason`:
-`wallet_locked` when no human has unlocked satsd, `daemon_unavailable` when
-it cannot be reached.
+signing tool, an unlock tool, or the CLI's UTXO-safety bypass flags.
+Expected policy denials are machine-readable `denied` requests, not
+errors that invite a retry. Operational conditions carry a typed
+`error_code` instead.
 
 MCP uses stdout as its protocol transport. Diagnostic information goes to
 stderr so logs cannot corrupt protocol frames.
@@ -469,15 +421,15 @@ That is reported as partial rather than treated as a broadcastable success.
 | Stolen watch-only database | No private descriptors in SQLite | Address history and balances may be exposed |
 | Stolen sealed seed | Argon2id plus authenticated encryption | Password strength and offline guessing |
 | Read grant file | Holds a budget and a token hash, no key material | Reveals amounts and expiry |
-| Stolen agent token | Every send needs a one-time human approval; caps and expiry enforced by satsd | Files asks in your review queue and reads what the grant exposes, until revoked or expired |
+| Stolen agent token | Every request waits for a human's password-gated approval; caps and expiry enforced at filing and execution | Files requests in your review queue and reads what the grant exposes, until revoked or expired |
 | Lied-about send amount or fee | Recomputed from the PSBT against the wallet's descriptors | An understated input burns the caller's own budget on an unrelayable transaction |
-| Compromised served process | Holds a token, never a key | Same as a stolen token |
-| Debugger attached to satsd | Process memory only; same-user | Seed recoverable where ptrace is permitted |
+| Compromised served process | Holds a token, never a key; a forged approval record cannot sign without the password | Same as a stolen token |
+| Debugger attached to an approving process | Key material exists only for the duration of one approve | Seed recoverable during that window where ptrace is permitted |
 | Pre-daemon wrapped-seed grant on disk | Read, reported, and refused for signing | The file itself is a seed disclosure until the wallet is rotated |
-| Revoked agent session | Grant reloaded on every send | A transaction signed before revocation remains valid |
+| Revoked agent session | Grant reloaded at every filing and under the lock at execution | A transaction signed before revocation remains valid |
 | Provider outage | Planning and configured guards fail closed | Loss of availability |
 | Malicious asset guard | Restrictive-only result | Can hide funds; incomplete results can miss assets |
-| Broadcast failure | Finalized raw transaction saved before the attempt; agent budget remains reserved | Manual retry or reconciliation is required |
+| Broadcast failure | Finalized raw transaction saved before the attempt; the request is `broadcast_pending` with budget reserved | `sats tx broadcast` retries it |
 | Wrong Bitcoin network | Address and provider network validation | Misconfigured third-party responses remain possible |
 | Malicious alkanes view endpoint | Advisory display only; local encoding; mainnet refused | Can mislead the human reviewing a signet call |
 
@@ -489,10 +441,9 @@ That is reported as partial rather than treated as a broadcastable success.
 - Run sats only on a machine and user account you trust.
 - Keep grant budgets small, set fee caps, and prefer short expiries.
 - Keep `sats agent requests --watch` running while an agent works, and
-  review each ask before approving it.
+  review each request — recipient, amount, and the real fee — before
+  entering your password.
 - Review `sats agent list` regularly and revoke unused grants.
-- Lock satsd (`sats daemon lock`) when no agent needs to spend, and keep
-  `--auto-lock` no longer than the work actually requires.
 - Treat an agent token like the budget it unlocks: re-issue the grant to
   rotate it, and never commit one to a repository.
 - Treat provider endpoints and their responses as part of your trust model.
