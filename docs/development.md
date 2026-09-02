@@ -91,32 +91,6 @@ Report exactly which commands ran. If the environment cannot exercise a
 required path, state that limitation rather than declaring unverified behavior
 complete.
 
-The macOS service lifecycle test is opt-in because it registers an isolated
-user LaunchAgent and deliberately crashes only that test daemon. It requires
-a logged-in GUI session and permission to write `~/Library/LaunchAgents`:
-
-```sh
-cargo test -p sats --test daemon managed_service_lifecycle -- --ignored
-```
-
-Set `SATS_TEST_BINARY` to an absolute release-binary path to exercise that
-build. The test uses a disposable wallet, verifies MCP reconnection, locked
-crash recovery, explicit stop, idempotent install, and uninstall preservation,
-and removes its own service afterward. It never sends a payment or changes a
-real wallet service.
-
-### Native unlock dialog
-
-The macOS unlock-dialog smoke test is opt-in because it opens a real native
-dialog for a disposable, unfunded signet wallet. Enter `integration-test-pw`
-only in that test dialog. It checks MCP unlock, unchanged grants, and absence
-of transactions; the normal suite tests auth failures, cancellation, cooldown,
-revocation races, and helper deadlines without UI or runtime test hooks.
-
-```sh
-SATS_TEST_BINARY="$PWD/target/release/sats" cargo test -p sats --test mcp native_unlock_dialog --locked -- --ignored --nocapture
-```
-
 ## Documentation
 
 Repository prose documents shipped behavior only:

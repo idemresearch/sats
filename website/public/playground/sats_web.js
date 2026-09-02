@@ -15,57 +15,21 @@ export class Playground {
         wasm.__wbg_playground_free(ptr, 0);
     }
     /**
-     * @param {string} agent
-     * @param {string} recipient
-     * @param {string} amount
+     * The human control plane: authorize one pending request, which
+     * executes it.
+     * @param {string} id
      * @param {number} fee_rate
      * @param {number} now
      * @returns {string}
      */
-    agent_send(agent, recipient, amount, fee_rate, now) {
-        let deferred5_0;
-        let deferred5_1;
-        try {
-            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            const ptr0 = passStringToWasm0(agent, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
-            const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(recipient, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
-            const len1 = WASM_VECTOR_LEN;
-            const ptr2 = passStringToWasm0(amount, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
-            const len2 = WASM_VECTOR_LEN;
-            wasm.playground_agent_send(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, fee_rate, now);
-            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
-            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
-            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
-            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
-            var ptr4 = r0;
-            var len4 = r1;
-            if (r3) {
-                ptr4 = 0; len4 = 0;
-                throw takeObject(r2);
-            }
-            deferred5_0 = ptr4;
-            deferred5_1 = len4;
-            return getStringFromWasm0(ptr4, len4);
-        } finally {
-            wasm.__wbindgen_add_to_stack_pointer(16);
-            wasm.__wbindgen_export4(deferred5_0, deferred5_1, 1);
-        }
-    }
-    /**
-     * The human control plane: approve one exact pending ask, once.
-     * @param {string} id
-     * @param {number} now
-     * @returns {string}
-     */
-    approve(id, now) {
+    approve(id, fee_rate, now) {
         let deferred3_0;
         let deferred3_1;
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passStringToWasm0(id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            wasm.playground_approve(retptr, this.__wbg_ptr, ptr0, len0, now);
+            wasm.playground_approve(retptr, this.__wbg_ptr, ptr0, len0, fee_rate, now);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -173,19 +137,19 @@ export class Playground {
         }
     }
     /**
-     * The human control plane: dismiss a pending ask.
+     * The human control plane: dismiss a pending request.
      * @param {string} id
      * @param {number} now
      * @returns {string}
      */
-    deny(id, now) {
+    dismiss(id, now) {
         let deferred3_0;
         let deferred3_1;
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passStringToWasm0(id, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            wasm.playground_deny(retptr, this.__wbg_ptr, ptr0, len0, now);
+            wasm.playground_dismiss(retptr, this.__wbg_ptr, ptr0, len0, now);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
@@ -455,16 +419,53 @@ export class Playground {
         }
     }
     /**
-     * The human review queue of pending asks.
+     * The agent surface: file a request. Nothing is planned or signed.
+     * @param {string} agent
+     * @param {string} recipient
+     * @param {string} amount
      * @param {number} now
      * @returns {string}
      */
-    requests(now) {
+    request_send(agent, recipient, amount, now) {
+        let deferred5_0;
+        let deferred5_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(agent, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(recipient, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+            const len1 = WASM_VECTOR_LEN;
+            const ptr2 = passStringToWasm0(amount, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+            const len2 = WASM_VECTOR_LEN;
+            wasm.playground_request_send(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, now);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr4 = r0;
+            var len4 = r1;
+            if (r3) {
+                ptr4 = 0; len4 = 0;
+                throw takeObject(r2);
+            }
+            deferred5_0 = ptr4;
+            deferred5_1 = len4;
+            return getStringFromWasm0(ptr4, len4);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export4(deferred5_0, deferred5_1, 1);
+        }
+    }
+    /**
+     * The human review queue of pending requests.
+     * @returns {string}
+     */
+    requests() {
         let deferred2_0;
         let deferred2_1;
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-            wasm.playground_requests(retptr, this.__wbg_ptr, now);
+            wasm.playground_requests(retptr, this.__wbg_ptr);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);

@@ -72,6 +72,21 @@ impl MockProvider {
     }
 
     pub fn broadcast(&self, tx: &Transaction) -> Result<Txid, ProviderError> {
+        let marker = self.dir.join("broadcast-fail");
+        if marker.exists() {
+            let message = std::fs::read_to_string(&marker)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            return Err(ProviderError::Broadcast {
+                url: self.display.clone(),
+                message: if message.is_empty() {
+                    "mock broadcast error".into()
+                } else {
+                    message
+                },
+            });
+        }
         let txid = tx.compute_txid();
         let log = self.dir.join("broadcasts.log");
         let mut lines = std::fs::read_to_string(&log).unwrap_or_default();

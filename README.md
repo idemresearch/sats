@@ -83,62 +83,54 @@ and machine-readable output.
 
 ## Let an agent ask
 
-Start the signing daemon, then grant an agent the authority to propose:
+Grant an agent the authority to file requests:
 
 ```sh
-sats daemon start
-sats daemon unlock
-
 sats agent grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
 # prints, once: SATS_AGENT_TOKEN=<token>
 
 claude mcp add sats --env SATS_AGENT_TOKEN=<token> -- sats agent serve claude
 ```
 
-On macOS, use `sats daemon install` instead of `start` to opt into a user
-service that starts locked at login and restarts locked after a crash. Stop
-an existing unmanaged daemon before installing. Grants and unlocking remain
-explicit; closing Claude stops its MCP adapter, not the managed daemon.
-
-The agent receives seven tools: `get_balance`, `get_receive_address`,
-`get_grant`, `get_status`, `request_unlock`, `check_request`, and `send`.
-Only `send` can move money, and it cannot cause a signature by itself: the
-normal result of a novel send is a recorded ask —
+The rule: **agents create requests, humans authorize requests, sats
+executes requests.** The agent receives five tools: `get_balance`,
+`get_receive_address`, `get_grant`, `request_send`, and `check_request`.
+It can read the wallet and file a request; it cannot approve, unlock,
+sign, or broadcast, and it takes no action after filing. The normal
+result of `request_send` is a pending request —
 
 ```json
 {
-  "status": "denied",
-  "reason": "ask_required",
-  "approvable": true,
-  "message": "human authorization required: every agent send needs a one-time human approval — a human can approve exactly this request once with: sats agent approve k-invoice-7012",
-  "request_id": "k-invoice-7012"
+  "status": "pending_approval",
+  "request_id": "r-8c1f0a2b9d3e4f57a1b2c3d4e5f60718",
+  "recipient": "tb1p...",
+  "amount_sat": 4500,
+  "message": "filed for human review — the human approves with: sats agent approve r-8c1f0a2b9d3e4f57a1b2c3d4e5f60718; poll check_request to observe the result, and do not file it again"
 }
 ```
 
-You review asks with `sats agent requests` (or stream them with
+You review requests with `sats agent requests` (or stream them with
 `--watch`, a trusted channel that does not rely on the agent relaying its
-own denials), and `sats agent approve <id>` authorizes exactly that send
-once — digest-bound, single-use, password-gated. The agent polls
-`check_request` and retries the identical send; `satsd` re-checks policy
-and the real fee, signs, and the shim broadcasts. Sends carry an
-idempotency key, so a retried request can never pay twice, and `sats
-agent log` keeps the full causal chain from request through decision to
-transaction.
+own status), and `sats agent approve <id>` executes exactly that one:
+it prepares the transaction, shows you the real fee, takes your password,
+reserves the budget, signs, saves, and broadcasts. The agent observes the
+result with `check_request`. `sats agent dismiss <id>` declines a request.
+`sats agent log` keeps the full causal chain from request through decision
+to transaction.
 
 The grant's boundaries are hard, and approval works only inside them:
-within `--max-tx` a proposal is a routine ask; above it — or over the
-fee cap or budget — it is refused outright with no approval path, and
-only changing the grant escalates. A `--to` allowlist refuses recipients
+within `--max-tx` a request waits for you; above it — or over the fee cap
+or budget — it is refused outright with no approval path, and only
+changing the grant escalates. A `--to` allowlist refuses recipients
 outside it; `--mode observe` makes a grant read-only.
-On macOS, with your consent, `request_unlock` opens a local password
-dialog without exposing the password to the agent.
 
-The token names a policy; it opens nothing. The seed lives only in `satsd`,
-which decides and signs, and which derives what a transaction actually pays
-from the PSBT rather than believing what it was told.
+The token names a policy; it opens nothing. No process holds an unsealed
+seed: your password at approval time unseals it for one execution, and
+sats derives what the transaction actually pays from the PSBT rather than
+believing what it was told.
 
-`sats agent list` shows current authority. `sats agent revoke claude` takes
-effect on the agent's next send call, including during an existing MCP
+`sats agent list` shows current authority. `sats agent revoke claude`
+takes effect on the agent's next call, including during an existing MCP
 session. See the [MCP guide](docs/mcp.md) for tool contracts and
 integration details, and [Direction](docs/direction.md) for the trust
 model this implements.
@@ -149,17 +141,21 @@ model this implements.
   database is watch-only and never contains private keys.
 - A grant file holds a budget and the SHA-256 of a bearer token. It contains
   no key material: reading it gets you nothing that can spend.
-- No agent-originated spend reaches the signer without a one-time human
-  approval bound to exactly that payment. There is no autonomous mode;
-  grants from older releases that carried one are enforced — and rewritten
-  on disk — as ask.
-- Agent signatures happen only inside `satsd`, which starts locked, auto-locks
-  when idle, and refuses with a typed `wallet_locked` rather than a denial.
-- The daemon recomputes a transaction's payment and fee from the PSBT against
-  the wallet's own descriptors. An extra output raises the amount charged to
-  the budget; a foreign input is refused outright.
-- Agent authorization is deterministic. Budget is reserved and persisted
-  before signing because a signed transaction is already spendable.
+- No agent-originated request reaches the signer without your explicit
+  authorization bound to exactly that request. There is no autonomous
+  mode and no resident unlocked signer; a grant file in a retired
+  development shape fails closed with a recreate hint and is never
+  rewritten.
+- The approving process recomputes a transaction's payment and fee from
+  the PSBT against the wallet's own descriptors and refuses on
+  disagreement with the recorded request; a foreign input is refused
+  outright.
+- Agent authorization is deterministic. Budget is reserved and persisted,
+  and the request recorded as signing, before the signer is invoked,
+  because a signed transaction is already spendable. A request that
+  signed, or may have signed, is never signed again and never refunded;
+  one the signer reports unsigned is refunded. A request executes only
+  under the grant that created it.
 - Finalized transactions are written privately before broadcast, by the
   process that signed them, so a crash or lost response cannot strand the
   only retry copy.
@@ -167,11 +163,9 @@ model this implements.
   those exclusions with every configured asset guard.
 - A configured guard fails closed. Agents cannot use `--allow-dust` or
   `--no-guards`.
-- A stolen agent token cannot spend: it can only file asks you will see in
-  `sats agent requests`, bounded by the grant until it expires — and never
-  touch the seed. Keep budgets small and expiries short anyway.
-- satsd runs as your own user, so it is a process boundary, not a privilege
-  boundary: it defeats reading a file, not root or a debugger.
+- A stolen agent token cannot spend: it can only file requests you will
+  see in `sats agent requests`, bounded by the grant until it expires —
+  and never touch the seed. Keep budgets small and expiries short anyway.
 
 Read the full [security and trust model](docs/security.md) before using
 mainnet.
@@ -184,12 +178,11 @@ network, clock, or async-runtime dependencies. `crates/sats` supplies native
 storage, providers, terminal output, the CLI, and the MCP server.
 
 PSBTs are the preparation and signer contract. They stay in memory for normal
-sends and leave the wallet only as explicit `--export-psbt` file artifacts —
-and, for an agent send, as the request the shim hands `satsd`. Once fully
-signed, sats persists private raw transaction hex instead; a provider then
-broadcasts it. Agents use the same preparation and safety path as humans,
-with the grant check and a one-time human approval required before signing,
-in a process they cannot read.
+sends and leave the wallet only as explicit `--export-psbt` file artifacts.
+Once fully signed, sats persists private raw transaction hex instead; a
+provider then broadcasts it. An approved agent request uses the same
+preparation and safety path as a human send, in the human's process, with
+the grant re-checked against the real fee before signing.
 
 See [Architecture](docs/architecture.md) for module ownership and end-to-end
 flows, or [AGENTS.md](AGENTS.md) for the implementation rules used by coding

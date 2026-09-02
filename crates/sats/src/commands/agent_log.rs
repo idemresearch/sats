@@ -113,13 +113,7 @@ fn detail(event: &AgentEvent) -> String {
             amount_sat,
         } => format!("{} sat → {recipient}", format_sats(*amount_sat)),
         EventKind::Denied { deny, stage } => format!("{} at {stage}", deny.code()),
-        EventKind::Approved {
-            approval_expires_at: _,
-        } => String::new(),
-        EventKind::ApprovalRevoked => String::new(),
-        EventKind::ApprovalConsumed {
-            consumed_by_request,
-        } => format!("by {consumed_by_request}"),
+        EventKind::Approved | EventKind::Dismissed => String::new(),
         EventKind::Reserved {
             total_sat,
             remaining_sat,
@@ -132,7 +126,11 @@ fn detail(event: &AgentEvent) -> String {
         EventKind::Signed { txid } | EventKind::Broadcast { txid } => txid.clone(),
         EventKind::BroadcastFailed { txid, message } => format!("{txid}: {message}"),
         EventKind::Failed { message } => message.clone(),
-        EventKind::Replayed | EventKind::Conflicted => String::new(),
+        EventKind::Unresolved { message, txid } => match txid {
+            Some(txid) => format!("{txid}: {message}"),
+            None => message.clone(),
+        },
+        EventKind::Conflicted => String::new(),
         EventKind::ModeChanged { from, to, widened } => {
             format!("{from} → {to}{}", if *widened { " (widened)" } else { "" })
         }

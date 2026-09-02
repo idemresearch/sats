@@ -1,13 +1,14 @@
-//! The human review queue: agent send requests and their outcomes.
+//! The human review queue: agent requests and their states.
 
 use std::collections::BTreeSet;
 
 use anyhow::Result;
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
-use sats_core::request::{AgentRequest, RequestOutcome};
+use sats_core::request::{AgentRequest, RequestState};
 
 use crate::config::network_name;
+use crate::request::list_reconciled;
 use crate::store::{Store, unix_now};
 use crate::ui;
 
@@ -18,12 +19,12 @@ pub fn run(store: &Store, network: Network, all: bool, watch: bool, json: bool) 
     if watch {
         return watch_loop(store, network, json);
     }
-    let net_name = network_name(network);
     let now = unix_now();
-    let requests: Vec<AgentRequest> = store
-        .list_agent_requests(net_name)?
+    // Listing is a human surface: interrupted executions are settled
+    // here, so what the human sees is the durable truth.
+    let requests: Vec<AgentRequest> = list_reconciled(store, network)?
         .into_iter()
-        .filter(|request| all || request.is_pending())
+        .filter(|request| all || request.is_pending_approval())
         .collect();
 
     if json {
@@ -35,21 +36,13 @@ pub fn run(store: &Store, network: Network, all: bool, watch: bool, json: bool) 
         ui::dim(if all {
             "no agent requests"
         } else {
-            "no pending agent requests — sats agent requests --all shows resolved ones"
+            "no pending agent requests — sats agent requests --all shows settled ones"
         });
         return Ok(());
     }
 
-    let header = [
-        "Id",
-        "Agent",
-        "Recipient",
-        "Amount",
-        "Outcome",
-        "Age",
-        "Approval",
-    ];
-    let rows: Vec<[String; 7]> = requests
+    let header = ["Id", "Agent", "Recipient", "Amount", "Status", "Age"];
+    let rows: Vec<[String; 6]> = requests
         .iter()
         .map(|request| {
             [
@@ -57,12 +50,11 @@ pub fn run(store: &Store, network: Network, all: bool, watch: bool, json: bool) 
                 request.agent.clone(),
                 elide(&request.recipient),
                 format_sats(request.amount_sat),
-                outcome_cell(request),
+                status_cell(request),
                 format!(
                     "{} ago",
                     ui::human_duration(now.saturating_sub(request.created_at))
                 ),
-                approval_cell(request, now),
             ]
         })
         .collect();
@@ -87,13 +79,17 @@ pub fn run(store: &Store, network: Network, all: bool, watch: bool, json: bool) 
     for row in &rows {
         println!("{}", line(row));
     }
+    if !all && requests.iter().any(|r| r.is_pending_approval()) {
+        println!();
+        ui::dim("approve one:  sats agent approve <id>    dismiss one:  sats agent dismiss <id>");
+    }
     Ok(())
 }
 
 /// The trusted discovery channel: poll the local store and print each
-/// request once, when it newly awaits an approval. Read-only by
-/// construction — no provider, no grant writes, no events, no strikes —
-/// so the human learns about pending asks from sats itself rather than
+/// request once, when it newly awaits a decision. Read-only by
+/// construction — no provider, no grant writes, no events — so the
+/// human learns about pending requests from sats itself rather than
 /// from the agent's own retelling. Ctrl-C stops it; nothing is held.
 fn watch_loop(store: &Store, network: Network, json: bool) -> Result<()> {
     let net_name = network_name(network);
@@ -109,7 +105,7 @@ fn watch_loop(store: &Store, network: Network, json: bool) -> Result<()> {
         let mut requests = store.list_agent_requests(net_name)?;
         requests.sort_by_key(|request| request.created_at);
         for request in requests {
-            if !awaits_approval(&request, now) {
+            if !request.is_pending_approval() {
                 continue;
             }
             // Request ids are unique within an agent, not across agents.
@@ -127,38 +123,17 @@ fn watch_loop(store: &Store, network: Network, json: bool) -> Result<()> {
             }
         }
         // Forgetting settled keys means a request that *re-enters* the
-        // queue — say its approval expired unconsumed — announces again.
+        // queue announces again.
         announced = awaiting;
         std::thread::sleep(WATCH_POLL);
     }
 }
 
-/// Awaiting a human approval right now: an undismissed, approvable
-/// denial with no valid approval already armed. Hard denials are not
-/// "awaiting" anything — approval cannot move them — and stay visible
-/// in `sats agent requests --all` instead.
-fn awaits_approval(request: &AgentRequest, now: u64) -> bool {
-    let Some(RequestOutcome::Denied { deny, .. }) = &request.outcome else {
-        return false;
-    };
-    if !deny.approvable() || request.dismissed_at.is_some() {
-        return false;
-    }
-    !request
-        .approval
-        .as_ref()
-        .is_some_and(|approval| approval.is_valid_for(&request.intent_digest, now))
-}
-
-/// One line per newly pending request: what, from whom, why, and the
-/// exact command that approves it.
+/// One line per newly pending request: what, from whom, and the exact
+/// command that approves it.
 fn watch_line(request: &AgentRequest, now: u64) -> String {
-    let reason = match &request.outcome {
-        Some(RequestOutcome::Denied { deny, .. }) => deny.code(),
-        _ => "pending",
-    };
     format!(
-        "{age:>10}  {agent}  {amount} sat → {recipient}  {reason}  approve: sats agent approve {id}",
+        "{age:>10}  {agent}  {amount} sat → {recipient}  pending_approval  approve: sats agent approve {id}",
         age = format!(
             "{} ago",
             ui::human_duration(now.saturating_sub(request.created_at))
@@ -188,30 +163,13 @@ fn elide(address: &str) -> String {
     format!("{head}…{tail}")
 }
 
-fn outcome_cell(request: &AgentRequest) -> String {
-    match &request.outcome {
-        None => "in flight".into(),
-        Some(RequestOutcome::Sent { .. }) => "sent".into(),
-        Some(RequestOutcome::Denied { deny, .. }) => format!("denied {}", deny.code()),
-        Some(RequestOutcome::Failed { txid, .. }) => match txid {
-            Some(_) => "failed (signed)".into(),
-            None => "failed".into(),
-        },
-    }
-}
-
-fn approval_cell(request: &AgentRequest, now: u64) -> String {
-    let Some(approval) = &request.approval else {
-        return "—".into();
-    };
-    if approval.consumed_at.is_some() {
-        "consumed".into()
-    } else if approval.is_expired(now) {
-        "expired".into()
-    } else {
-        format!(
-            "for {}",
-            ui::human_duration(approval.expires_at.saturating_sub(now))
-        )
+fn status_cell(request: &AgentRequest) -> String {
+    match &request.state {
+        RequestState::Denied { deny, .. } => format!("denied {}", deny.code()),
+        RequestState::Sent { txid, .. } => format!("sent {}", &txid[..8.min(txid.len())]),
+        RequestState::BroadcastPending { txid, .. } => {
+            format!("broadcast_pending {}", &txid[..8.min(txid.len())])
+        }
+        other => other.status().to_string(),
     }
 }

@@ -70,25 +70,17 @@ hold the explicit advanced workflows.
 | `sats psbt inspect <FILE>` | Decode a PSBT file offline: outputs, fee, signing state |
 | `sats psbt sign <FILE> [--out FILE]` | Sign an explicit PSBT artifact |
 | `sats tx broadcast <FILE\|TXID>` | Broadcast a raw hex file, or a saved transaction by txid/prefix/id |
-| `sats daemon run [--auto-lock D]` | Run the signing daemon in the foreground (for a supervisor) |
-| `sats daemon start [--auto-lock D]` | Start the signing daemon in the background |
-| `sats daemon install [--auto-lock D]` | macOS: install and start a locked user service with login/crash supervision |
-| `sats daemon uninstall` | macOS: stop and remove the matching service, preserving wallet data |
-| `sats daemon status` | Show whether the daemon is running, and whether it can sign |
-| `sats daemon unlock` | Unseal the wallet into the daemon so agent sends can be signed |
-| `sats daemon lock` | Drop the seed from the daemon's memory, without stopping it |
-| `sats daemon stop` | Stop the daemon |
 | `sats agent grant <name>` | Create bounded authority to propose sends (never to sign) |
 | `sats agent revoke <name>` | Delete an agent grant immediately |
 | `sats agent mode <name> <mode>` | Switch ask/observe; widening needs the password |
 | `sats agent allow <name> <addr>` | Add an allowlist recipient (password required) |
 | `sats agent disallow <name> <addr>` | Remove an allowlist recipient (no password) |
 | `sats agent list` | List non-expired grants and remaining budgets |
-| `sats agent requests [--all\|--watch]` | Review agent send requests; `--watch` streams newly pending asks |
-| `sats agent approve <id>` | Authorize one denied request exactly once (password required) |
-| `sats agent deny <id>` | Dismiss a request and revoke its unconsumed approval |
+| `sats agent requests [--all\|--watch]` | Review agent requests; `--watch` streams newly pending ones |
+| `sats agent approve <id> [-y]` | Authorize and execute one pending request: prepare, review, password, sign, broadcast |
+| `sats agent dismiss <id>` | Decline a pending request |
 | `sats agent log [--limit N] [--request ID]` | Show the causal event log of agent activity |
-| `sats agent serve <name>` | Serve the bounded wallet tool surface for one granted agent over MCP stdio |
+| `sats agent serve <name>` | Serve the agent's wallet tools over MCP stdio: read, file requests, observe |
 | `sats alkanes inspect <BLOCK:TX>` | Fetch a contract's bytecode and show its sha256 code hash |
 | `sats alkanes simulate <BLOCK:TX> <INPUTS...>` | Simulate a contract call and show the interpreted result |
 | `sats alkanes execute <BLOCK:TX> <INPUTS...>` | Simulate, confirm, sign, and broadcast a contract call (refuses mainnet) |
@@ -190,76 +182,6 @@ path for multi-signer flows.
 transaction hex; anything else resolves a saved transaction by full txid
 or unique prefix.
 
-## The signing daemon
-
-Agent sends are signed by `satsd`, a local per-network process that holds the
-seed in memory. The served MCP process holds only a bearer token, so nothing
-an agent can read can produce a signature.
-
-```sh
-sats daemon start          # background; logs to <network>/satsd.log
-sats daemon unlock         # password prompt, or SATS_PASSWORD
-sats daemon status
-```
-
-The daemon starts **locked** and signs nothing until a human unlocks it.
-On macOS, an agent can also request a local password dialog with the MCP
-`request_unlock` tool after you agree. Enter the password in that dialog,
-never in chat. The dialog is launched by satsd and identifies the agent,
-wallet, network, and idle timeout. It enables all active grants for that
-daemon within their existing limits; it does not approve or send a payment.
-No terminal command is required for this path, and `SATS_PASSWORD` is ignored.
-Cancel closes the request; the agent must not automatically prompt again.
-The terminal `sats daemon unlock` command remains available on every platform.
-
-`--auto-lock` (default `8h`) drops the seed after that much inactivity;
-`sats daemon lock` drops it immediately without stopping the process. While
-locked, agent sends return the typed error code `wallet_locked` rather than a
-policy denial.
-
-Repeated failed unlocks throttle: the first three misses are free, then
-each further miss doubles a required wait (capped at one minute) during
-which every attempt — right password included — is refused with the typed
-code `unlock_throttled` and the remaining wait.
-
-For reliable operation on macOS, opt into a per-user launchd service:
-
-```sh
-sats daemon install --auto-lock 8h
-sats daemon unlock
-# To remove the service, preserving all wallet state:
-sats daemon uninstall
-```
-
-Installation requires a logged-in macOS GUI session, not root. It records the
-absolute executable path, network, wallet directory and required socket setting
-in a private `~/Library/LaunchAgents/sh.sats.satsd.<network>.<id>.plist`.
-No password or agent token is recorded. Keep the binary at that path; after
-moving it, stop the service and reinstall using the new binary.
-
-The service starts **locked** at login and restarts **locked** after unexpected
-failure. `daemon stop` exits cleanly and remains stopped until `daemon start`
-or the next login. Installation with identical settings is idempotent; changing
-a running service's settings or replacing an unmanaged daemon requires an
-explicit stop first. `daemon start` uses the installed service and its configured
-auto-lock duration; a conflicting explicit `--auto-lock` is refused. Reinstall
-after stopping to change that duration. `daemon uninstall` removes only the
-matching wallet/network service, not wallet data, grants, or logs.
-
-Without an installed service, `daemon start` retains its session-dependent
-background behavior. On Linux, run `sats daemon run` under your own supervisor;
-managed install/uninstall are macOS-only. Installing or starting a service
-does not grant authority or unlock the wallet. Closing Claude does not stop a
-managed daemon, but an in-flight MCP send is not a durable background job.
-
-The socket is `$XDG_RUNTIME_DIR/sats/<network>.sock`, mode 0600, or
-`<network>/d.sock` under `SATS_DIR`. One daemon serves one network; a second
-on the same socket is refused. A private lifetime lock prevents concurrent
-starts from racing during stale-socket recovery.
-
-Human commands never use the daemon. `sats send`, `sats psbt sign`, and
-`sats init` unseal the seed for the duration of one command, as before.
-
 ## Agent grants
 
 ```sh
@@ -285,15 +207,16 @@ authorizes the grant and is not otherwise used: the grant file holds a
 budget and a token hash, never key material.
 
 `--mode` sets how much standing authority the grant carries — and no mode
-lets a send execute without you. `ask` (the default) proposes everything:
-every send — however small — terminates in the approvable denial
-`ask_required`, executed only through `sats agent approve`, one request
-at a time. `observe` is read-only: balance, addresses, grant status, and
-request polling keep working, but no send can be authorized and no
-approval can lift `observe_only`. Revocation remains the off switch.
+lets a request execute without you. `ask` (the default) lets the agent
+file requests: every one — however small — waits as `pending_approval`
+until you run `sats agent approve`, one request at a time. `observe` is
+read-only: balance, addresses, grant status, and request polling keep
+working, but every request is refused with `observe_only`. Revocation
+remains the off switch.
 
-There is no autonomous mode: an agent-originated spend can never reach
-the signer without a one-time human approval.
+There is no autonomous mode and no resident unlocked signer: an
+agent-originated request reaches the signer only through your approval,
+which unseals the seed with your password for exactly that execution.
 
 `sats agent mode` switches a live grant between the modes, mid-session,
 and carries the attenuation rule mechanically: tightening authority
@@ -305,12 +228,11 @@ direction.
 Repeatable `--to` gives the grant a standing recipient allowlist — a
 hard boundary. Each address is parsed and network-checked at the
 boundary and stored in the same normalized spelling the intent digest
-hashes. With a finite list, sends to listed recipients are routine asks
-(`ask_required`); any other recipient is the hard refusal
-`recipient_not_allowed`: no hint is offered, `sats agent approve`
-refuses to arm one, and only editing the list changes it — never
-payment history or an approval, so an agent cannot launder an address
-into "known" by paying it. Without `--to` every recipient may be
+hashes. With a finite list, requests to listed recipients are routine
+(`pending_approval`); any other recipient is the hard refusal
+`recipient_not_allowed`: `sats agent approve` refuses it, and only
+editing the list changes it — never payment history or an approval, so an
+agent cannot launder an address into "known" by paying it. Without `--to` every recipient may be
 proposed. `sats agent allow` adds an entry (widening — password
 required); `sats agent disallow` removes one (no password), and
 emptying the list means no recipient may be proposed. A grant without
@@ -319,10 +241,10 @@ an allowlist refuses `disallow` outright: a list cannot express
 restrict it.
 
 `--max-tx` splits amounts into exactly two outcomes. Up to the cap a
-send is a routine ask (`ask_required`), executed only through
+request is routine (`pending_approval`), executed only through
 `sats agent approve`. Above it the refusal is the hard `over_max_tx`:
-no hint is offered, `sats agent approve` refuses to arm one, and the
-only escalation is changing the grant itself. The cap is the
+`sats agent approve` refuses it, and the only escalation is changing the
+grant itself. The cap is the
 pre-commitment you make while calm, so that later pressure — an agent
 asking nicely fifty times — has nothing to push on.
 
@@ -353,66 +275,101 @@ refused for signing; re-issue them, and read
 `sats agent serve <name>` runs the MCP server as that agent. See
 [MCP and agent grants](mcp.md) for the tool-level contract.
 
-## Reviewing agent activity
+## Reviewing agent requests
 
-Every agent send is recorded as a durable request, and every state
-transition appends to a per-network event log:
+Every agent request is a durable record, and every state transition
+appends to a per-network event log:
 
 ```sh
-sats agent requests            # pending: asked requests awaiting a decision
+sats agent requests            # pending: requests awaiting your decision
 sats agent requests --all      # every recorded request, newest first
-sats agent requests --watch    # stay running; print each new pending ask once
+sats agent requests --watch    # stay running; print each new pending request once
 sats agent log                 # the causal event chain, oldest first
-sats agent log --request k-big-1
+sats agent log --request r-2e7d41c0a95b6f13c4d5e6f708192a3b
 ```
 
-`requests` shows each request's id, agent, recipient, amount, outcome,
-age, and approval state; `--json` returns the full records. `log` renders
-one line per event — received, denied, reserved, signed, broadcast,
-refunded, replayed — and `--request` accepts an id or unique prefix.
-Unreadable records and torn log lines are skipped with a warning; both
-surfaces are purely local and never touch a provider.
+`requests` shows each request's id, agent, recipient, amount, status, and
+age; `--json` returns the full records. Listing also settles any request
+a crashed approve left `signing` (see below). A request is in exactly
+one state:
+
+| Status | Meaning |
+|---|---|
+| `pending_approval` | Inside the grant; awaiting your decision |
+| `denied` | Outside a grant boundary, at filing or at execution; terminal |
+| `dismissed` | You declined it; terminal |
+| `signing` | You authorized it, the budget is reserved, and the signer is being invoked |
+| `sent` | Broadcast; carries the txid |
+| `broadcast_pending` | Signed and saved, not broadcast; `sats tx broadcast <txid>` settles it |
+| `unresolved` | The signer was invoked and the outcome could not be made durable: a signature may exist. Never refunded, never signed again; you resolve it |
+| `failed` | Stopped before any signature could exist; refunded; can be approved again |
+
+`log` renders one line per event — received, denied, approved, dismissed,
+reserved, signed, broadcast, refunded, failed — and `--request` accepts
+an id or unique prefix. Unreadable records and torn log lines are skipped
+with a warning; both surfaces are purely local and never touch a provider.
 
 `--watch` is the trusted discovery channel: it polls the local store and
-prints each request exactly once, when it newly awaits an approval — an
-undismissed ask with no valid approval armed — ending each line with the
-exact `sats agent approve` command. You learn about pending asks from
-sats itself instead of relying on the agent to relay (or downplay) its
-own refusals. Hard refusals never appear there — nothing is awaited —
-and stay reviewable with `--all`. A request
-whose approval expires unconsumed re-enters the queue and announces
-again. Request IDs are scoped to their agent: two agents using the same
-ID are announced independently. With `--json` the stream is JSONL, one
-full record per line. Watching is read-only; Ctrl-C stops it.
+prints each request exactly once, when it newly awaits your decision,
+ending each line with the exact `sats agent approve` command. You learn
+about pending requests from sats itself instead of relying on the agent
+to relay (or downplay) its own status. Denied requests never appear there
+— nothing is awaited — and stay reviewable with `--all`. Request ids are
+scoped to their agent: two agents using the same id are announced
+independently. With `--json` the stream is JSONL, one full record per
+line. Watching is read-only; Ctrl-C stops it.
 
 ## Approving one request
 
 ```sh
-sats agent approve <id> [--for <DURATION>]
-sats agent deny <id>
+sats agent approve <id> [--yes]
+sats agent dismiss <id>
 ```
 
-`approve` turns one asked request into a single-use authorization bound
-to exactly the intent the ask recorded — same agent, recipient, and
-amount. It shows the full recipient, the amounts, the grant's fee cap,
-and the remaining budget, then requires the wallet password: the prompt
-is the authorization, as with grant creation. The approval carries a
-lifetime (`--for`, default `1h`) and no bounds of its own: it
-authorizes one valid proposal inside the grant, whose caps and budget
-still apply when the send executes — an approval can never exceed the
-grant. The agent's next matching send consumes it; a consumed approval
-never authorizes a second signature, and approvals never survive grant
-revocation or expiry. `deny` dismisses the request and revokes an
-unconsumed approval without a password: reducing authority stays cheap.
-Both accept a request id or unique prefix and support `--json`.
+`approve` is the human-authorized execution path. It prepares the
+transaction on current chain state, derives what the prepared transaction
+actually pays from the wallet's own descriptors and refuses if that
+disagrees with the recorded request, re-runs the grant's boundaries with
+the real fee, and shows you the recipient, amount, fee, total, and
+remaining budget — with `--json`, on stderr, so the review always reaches
+you while stdout stays the machine-readable result. It then asks for
+confirmation (`--yes` skips the prompt, not the password) and for the
+wallet password: the prompt is the authorization, and the key it unseals
+exists only for this one execution. Under the grant lock it draws the
+budget on the grant's ledger under the request's id and records the
+request as `signing` *before* the signer is invoked, then signs, saves
+the finalized transaction, and broadcasts.
 
-Approval requires an existing grant whose current boundaries still
-permit the proposal. `approve` checks both the recorded outcome and the
-current policy before asking for the password, then rechecks under the
-grant lock before writing. An older ask cannot be approved after a
-switch to observe, revocation, expiry, a cap lowered below the
-request's amount, or a recipient removed from the allowlist. No
-approval is queued for a missing grant.
+A request executes only under the grant that created it. A request
+outside that grant's current boundaries — an amount above the cap, a fee
+above the fee cap, a recipient off the allowlist — or whose grant has
+been revoked, expired, or re-issued, is refused before the password and
+recorded as `denied`; the only escalation is a new request under a new
+grant. If execution stops before the signer is invoked — the audit log
+cannot be written, the signer cannot be constructed — the draw is
+returned, the request is `failed`, and you may approve it again. Once
+the signer has been invoked, any failure — an error from the signer, an
+unfinalized result, a signed transaction that could not be finalized or
+saved — leaves the request `unresolved`: a signature may exist, so the
+draw stands and sats will not sign it again; check `sats status`, then
+dismiss it. If broadcast fails after signing, the request is
+`broadcast_pending`: the signed transaction is saved, the draw is final,
+the request is never signed again, and `sats tx broadcast <txid>`
+retries it. A draw left by an approve that died before `signing`
+reached disk is returned by the next listing, approve, or dismiss of
+that request; a draw whose request did reach `signing` is never
+returned. `dismiss`
+declines a pending, failed, or unresolved request without a password:
+reducing authority stays cheap, and dismissing an unresolved request
+never refunds. Both accept a request id or unique prefix and support
+`--json`.
+
+If an approve is interrupted after `signing` was recorded, the next
+listing or approve reconciles the record from the durable truth: a saved
+transaction attributed to the request (same agent, id, and intent) means
+a signature exists and the request becomes `broadcast_pending` or
+`sent`; none means the signer may or may not have run, and the request
+becomes `unresolved` with nothing refunded.
 
 ## Alkanes contract tools
 
@@ -465,14 +422,13 @@ protects from later coin selection automatically.
 - `psbt inspect`;
 - `psbt sign`;
 - `tx broadcast`;
-- `daemon start`, `daemon status`, `daemon unlock`, `daemon lock`, `daemon stop`;
-- `daemon install`, `daemon uninstall` (macOS);
 - `agent grant`;
 - `agent revoke`;
+- `agent mode`, `agent allow`, `agent disallow`;
 - `agent list`;
 - `agent requests`;
 - `agent approve`;
-- `agent deny`;
+- `agent dismiss`;
 - `agent log`;
 - `alkanes inspect`;
 - `alkanes simulate`;
@@ -481,11 +437,8 @@ protects from later coin selection automatically.
 JSON field names are compatibility surfaces. Scripts should branch on
 documented status and reason fields rather than human-readable messages.
 
-Two shapes are worth calling out. `agent grant --json` includes `token`, the
-only time it is ever emitted; treat that output as a secret. `daemon status
---json` reports `{"running": false}` and exits 0 when no daemon is running,
-so a script can check without treating absence as failure — the text form
-fails instead, because a human asking for status wants to be told.
+One shape is worth calling out. `agent grant --json` includes `token`, the
+only time it is ever emitted; treat that output as a secret.
 
 `init` remains an interactive recovery-material flow and deliberately has no
 JSON mode: emitting the mnemonic on a machine-readable stream invites

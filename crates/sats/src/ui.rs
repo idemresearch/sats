@@ -50,9 +50,19 @@ pub fn sat_rows(rows: &[(&str, u64)]) {
 
 /// Aligned key-value rows with pre-formatted values (mixed content).
 pub fn kv_rows(rows: &[(&str, String)]) {
+    kv_rows_to(&mut std::io::stdout(), rows);
+}
+
+/// The same rows on stderr: the human review channel when stdout is a
+/// machine-readable stream.
+pub fn kv_rows_stderr(rows: &[(&str, String)]) {
+    kv_rows_to(&mut std::io::stderr(), rows);
+}
+
+fn kv_rows_to(out: &mut dyn Write, rows: &[(&str, String)]) {
     let key_w = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
     for (key, value) in rows {
-        println!("{key:<key_w$}  {value}");
+        let _ = writeln!(out, "{key:<key_w$}  {value}");
     }
 }
 
@@ -110,14 +120,28 @@ impl StatusLine {
 /// A bare `[Y/n]` confirmation. Returns the default on empty input; any
 /// non-tty stdin refuses (agents must go through grants, not prompts).
 pub fn confirm(prompt: &str, default_yes: bool) -> anyhow::Result<bool> {
+    confirm_via(prompt, default_yes, false)
+}
+
+/// Confirm with the prompt on stderr, keeping stdout for machine output.
+pub fn confirm_stderr(prompt: &str, default_yes: bool) -> anyhow::Result<bool> {
+    confirm_via(prompt, default_yes, true)
+}
+
+fn confirm_via(prompt: &str, default_yes: bool, stderr: bool) -> anyhow::Result<bool> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!(
             "cannot confirm: stdin is not a terminal (use --yes, or give an agent a budget: sats agent grant)"
         );
     }
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
-    print!("{prompt} {hint} ");
-    std::io::stdout().flush()?;
+    if stderr {
+        eprint!("{prompt} {hint} ");
+        std::io::stderr().flush()?;
+    } else {
+        print!("{prompt} {hint} ");
+        std::io::stdout().flush()?;
+    }
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     Ok(match line.trim().to_lowercase().as_str() {

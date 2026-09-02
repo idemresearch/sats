@@ -118,10 +118,10 @@ export default function Home() {
             <div className="operator-number">02</div>
             <h3>An agent that asks.</h3>
             <p>
-              MCP exposes a small read-and-request surface; only send moves
-              money, and it cannot cause a signature. Every agent payment
-              lands in your review queue, and one password-gated approval
-              executes exactly that payment, once.
+              MCP exposes a small read-and-request surface. The agent files
+              a request and cannot cause a signature. Every request lands in
+              your review queue, and one password-gated approval executes
+              exactly that payment, once — the agent does nothing further.
             </p>
             <CommandBlock commands={agentCommands} />
             <Link className="text-link" href="/docs/mcp">
@@ -139,9 +139,9 @@ export default function Home() {
           </div>
           <p>
             Agent policy is deterministic and checked before a signature is
-            produced. A valid proposal becomes an ask you approve exactly
-            once; a request outside the grant gets a stable refusal. Nothing
-            signs unattended.
+            produced. A valid request waits for your approval, once; a
+            request outside the grant gets a stable refusal. Nothing signs
+            unattended.
           </p>
         </div>
 

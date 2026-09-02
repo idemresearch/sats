@@ -2,12 +2,12 @@ use sats_core::amount;
 mod cli;
 mod commands;
 mod config;
-mod daemon;
 mod keys;
 #[cfg(feature = "mcp")]
 mod mcp;
 mod password;
 mod provider;
+mod request;
 mod spend;
 mod store;
 mod ui;
@@ -75,22 +75,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 commands::tx::broadcast(&store, network, &services(&config)?, &target, json)
             }
         },
-        Command::Daemon { command } => match command {
-            cli::DaemonCommand::Run { auto_lock } => {
-                commands::daemon::run(&store, network, &auto_lock)
-            }
-            cli::DaemonCommand::Start { auto_lock } => {
-                commands::daemon::start(&store, network, auto_lock.as_deref(), json)
-            }
-            cli::DaemonCommand::Install { auto_lock } => {
-                commands::daemon::install(&store, network, &auto_lock, json)
-            }
-            cli::DaemonCommand::Uninstall => commands::daemon::uninstall(&store, network, json),
-            cli::DaemonCommand::Status => commands::daemon::status(&store, network, json),
-            cli::DaemonCommand::Unlock => commands::daemon::unlock(&store, network, json),
-            cli::DaemonCommand::Lock => commands::daemon::lock(&store, network, json),
-            cli::DaemonCommand::Stop => commands::daemon::stop(&store, network, json),
-        },
         Command::Agent { command } => match command {
             cli::AgentCommand::Grant(args) => commands::grant::run(&store, network, &args, json),
             cli::AgentCommand::Revoke { name } => {
@@ -106,10 +90,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 commands::recipients::disallow(&store, network, &name, &address, json)
             }
             cli::AgentCommand::List => commands::grants::run(&store, network, json),
-            cli::AgentCommand::Approve { id, duration } => {
-                commands::approve::run(&store, network, &id, &duration, json)
+            cli::AgentCommand::Approve { id, yes } => {
+                commands::approve::run(&store, network, &services(&config)?, &id, yes, json)
             }
-            cli::AgentCommand::Deny { id } => commands::deny::run(&store, network, &id, json),
+            cli::AgentCommand::Dismiss { id } => commands::dismiss::run(&store, network, &id, json),
             cli::AgentCommand::Requests { all, watch } => {
                 commands::requests::run(&store, network, all, watch, json)
             }

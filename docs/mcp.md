@@ -1,24 +1,23 @@
 # MCP and agent grants
 
 `sats agent serve` exposes a deliberately small wallet surface to one named
-agent over Model Context Protocol stdio. The server does not grant authority
-by itself, and it cannot sign: it is a shim that prepares and broadcasts
-transactions, carrying a bearer token that names the grant it acts under.
-Signatures come from `satsd` (see [CLI](cli.md#the-signing-daemon)) — and
-only after a one-time human approval of exactly that payment: the normal
-result of a novel `send` is the recorded ask `ask_required`, not a
-transaction. The agent observes, prepares, and proposes; the human
-authorizes money movement.
+agent over Model Context Protocol stdio. The rule it implements:
+
+> **Agents create requests. Humans authorize requests. sats executes
+> requests.**
+
+The served process reads the wallet and files requests under the grant its
+bearer token names. It holds no key material and never prepares, signs, or
+broadcasts a transaction. A request is executed only when a human
+authorizes it with `sats agent approve`, in the human's own process, with
+the wallet password; the agent takes no action after filing and observes
+the result with `check_request`.
 
 ## Connect an agent
 
-Initialize and fund a wallet, start and unlock the daemon, then create a
-grant:
+Initialize and fund a wallet, then create a grant:
 
 ```sh
-sats daemon start
-sats daemon unlock
-
 sats agent grant claude \
   --budget 50k \
   --for 24h \
@@ -51,418 +50,179 @@ At startup the server verifies:
 - provider configuration resolves without ambiguity.
 
 Authentication, wallet, or configuration failure is reported before the client
-begins a conversation. A missing, unresponsive, or locked daemon is a warning,
-not a startup refusal: discovery and read-only tools remain available. A human
-can start/unlock satsd while the client stays connected. No MCP tool installs
-a service or starts the daemon. `request_unlock` can ask a human to unlock
-through a local macOS dialog; it cannot supply a password or unlock unattended.
-
-On macOS, `sats daemon install` opts into login/crash supervision instead of
-session-dependent `daemon start`; every launch starts locked. See
-[CLI](cli.md#the-signing-daemon) for setup and removal.
+begins a conversation, at `claude mcp add` time rather than mid-conversation.
 
 ## Tool surface
 
-### `get_status`
-
-Reports agent, network, and `daemon_state`: `unavailable`, `locked`, or
-`unlocked`. The probe uses a two-second response deadline and no chain access.
-Unavailable/locked results include `error_code: "daemon_unavailable"` or
-`"wallet_locked"` and a human-readable remedy; an unlocked result omits the
-error code. These are operational states, not policy denials. Unlocked does
-not imply the grant permits a particular spend. Subsequent calls discover
-daemon recovery without reconnecting MCP.
-
-```json
-{
-  "agent": "claude",
-  "network": "signet",
-  "daemon_state": "locked",
-  "error_code": "wallet_locked",
-  "message": "Wallet locked; with the human's consent, call request_unlock for a local macOS password dialog, or ask them to run sats daemon unlock --network signet using the same SATS_DIR. Never ask for a password in chat."
-}
-```
-
-### `request_unlock`
-
-Takes an empty object `{}`. After the human agrees, requests a native macOS
-password dialog from the signing daemon. Never pass passwords in chat or
-tool arguments; extra arguments are rejected. The dialog identifies the
-requesting agent, network, canonical wallet path, and configured idle
-auto-lock duration. It explicitly warns that unlocking enables **all active
-grants for that daemon**, within their existing limits, not one payment.
-
-The password travels from the local dialog helper directly to satsd through
-a private pipe. It never enters the MCP process or result. `SATS_PASSWORD`
-is not used by this flow. No transaction is prepared or sent, grants are not
-changed, and an already-unlocked daemon returns without prompting or extending
-its idle deadline.
-
-Results contain `status: "unlocked"`, `"cancelled"`, or `"error"`, and a
-human-readable `message`. Errors add `error_code`; throttles also include
-`retry_after_seconds`. No unlock result is a spending-policy denial.
-
-| `error_code` | Remedy |
-|---|---|
-| `daemon_unavailable` | Start/restart the daemon with the current binary and matching wallet/network |
-| `unauthorized` | Have the human check the grant/token; revoked, expired, or replaced grants cannot prompt |
-| `clock_unavailable` | Restore a working system clock so expiry can be verified |
-| `unsupported_platform` | Use `sats daemon unlock` in a terminal; dialogs require macOS |
-| `prompt_unavailable` | Use a terminal; the local desktop dialog could not run |
-| `unlock_in_progress` | Another dialog is already open for this daemon |
-| `unlock_rate_limited` | Wait for the 30-second cooldown after the previous dialog finishes |
-| `unlock_throttled` | Wait after too many incorrect passwords |
-| `unlock_failed` | The human can check their password in a new local dialog or terminal |
-| `unlock_timeout` | The dialog's two-minute deadline expired |
-
-Only one dialog runs per daemon. Cancel, MCP request cancellation, caller
-disconnect, timeout, or a subsequent human lock/unlock invalidates the pending
-request. Grant validity is checked both before prompting and before committing
-an unlock. A cancellation or timeout must not trigger automatic re-prompting;
-wait for the human to ask. An interrupted call might have completed just before
-disconnect: use `get_status` to learn the current state.
-
-A logged-in local macOS desktop is required. This is not an OS privilege
-prompt, Touch ID, Keychain storage, or remote password collection. If the
-daemon predates this tool, stop/start it with the updated binary and reconnect
-the MCP client. The existing terminal unlock command remains available.
+Five tools. The agent reads, files, and observes; it cannot approve,
+unlock, sign, execute, or broadcast.
 
 ### `get_balance`
 
-Returns:
+Syncs the wallet through the configured provider and returns:
 
 ```json
-{
-  "balance_sat": 100000,
-  "pending_sat": 0,
-  "synced": true,
-  "network": "signet"
-}
+{ "balance_sat": 118500, "pending_sat": 0, "synced": true, "network": "signet" }
 ```
 
-The server attempts chain sync. If the provider cannot be reached, it returns
-cached wallet state with `synced: false`; this read-only operation does not
-pretend the cache is current.
+`synced: false` means the chain could not be reached and the value is from
+cache.
 
 ### `get_receive_address`
 
-Returns and persists the next external receive address:
+Reveals and persists the next external receive address:
 
 ```json
-{
-  "address": "tb1p...",
-  "index": 4,
-  "network": "signet"
-}
+{ "address": "tb1p...", "index": 3, "network": "signet" }
 ```
+
+It is annotated as not read-only, because revealing an address advances
+the wallet's derivation index.
 
 ### `get_grant`
 
-Returns this server identity's current authority:
+The agent's own grant: budget, spent, remaining, per-transaction caps,
+mode, recipient allowlist, and expiry. `active: false` means the grant was
+revoked or has expired, and the message names the command a human runs to
+issue one.
+
+### `request_send`
+
+Files a request to send bitcoin.
+
+Parameters: `address`, `amount_sat`, and `idempotency_key` (required;
+1–64 characters of `A-Za-z0-9_-`). The key is the agent's retry
+handle: a repeated call with the same key and the identical address and
+amount returns the existing request instead of filing a second one, so
+a lost response or a retried tool call never files twice; reusing the
+key for a different send is a typed error. The key is scoped to the
+grant it was filed under: after a revoke and re-issue, the same key
+files a new request rather than returning the old grant's.
+
+The `request_id` the result returns is the server's request id — `r-`
+plus 32 hex characters, globally unique across agents — and is the
+handle the human approves or dismisses by and the agent observes with.
+It is never the key: passing a returned `request_id` back as an
+`idempotency_key` files a new request.
+
+The grant's full verdict ladder runs at filing, with the fee unknown. A
+proposal inside every boundary is recorded as `pending_approval` and
+returned as a successful result:
 
 ```json
 {
-  "active": true,
-  "agent": "claude",
-  "network": "signet",
-  "mode": "ask",
-  "budget_sat": 50000,
-  "spent_sat": 4781,
-  "remaining_sat": 45219,
-  "max_tx_sat": 10000,
-  "max_fee_sat": 1000,
-  "tx_count": 1,
-  "expires_at": 1787300000
+  "status": "pending_approval",
+  "request_id": "r-8c1f0a2b9d3e4f57a1b2c3d4e5f60718",
+  "recipient": "tb1p...",
+  "amount_sat": 4500,
+  "message": "filed for human review — the human approves with: sats agent approve r-8c1f0a2b9d3e4f57a1b2c3d4e5f60718; poll check_request to observe the result, and do not file it again"
 }
 ```
 
-`mode` is `ask` or `observe`; there is no autonomous mode. When the
-grant has been revoked or expired, `active` is false, limit and
-accounting fields are omitted, and `message` tells the agent to ask its
-human for a new grant. A grant with a recipient allowlist carries it as
-`allowed_recipients` — absent means any recipient may be proposed, and
-any recipient outside the list is the hard refusal
-`recipient_not_allowed`.
+That is the normal result, not a failure. A proposal outside a boundary is
+recorded as `denied`, with a `reason`:
+
+```json
+{
+  "status": "denied",
+  "request_id": "r-2e7d41c0a95b6f13c4d5e6f708192a3b",
+  "reason": "over_max_tx",
+  "recipient": "tb1p...",
+  "amount_sat": 20000,
+  "message": "outside the grant: requested 20,000 sat; max tx 10,000 sat — no approval lifts a grant boundary; only the human changing the grant can"
+}
+```
+
+Denied is terminal. No approval lifts a grant boundary; the only
+escalation is the human changing the grant.
 
 ### `check_request`
 
-The sanctioned way for an agent to wait on a human decision. Takes the
-`request_id` a send result returned (or the bare idempotency key) and
-reads the durable request record: no chain access, no events, no
-mutation of any kind — polling it is free, however often it runs.
-Lookup is scoped to the serving agent's own records; another agent's
-request answers `found: false`, exactly like one that never existed.
+Returns the state of one of this agent's own requests, by the `request_id`
+a `request_send` result returned. It deals in server request ids only:
+an idempotency key is a malformed id here. It reads the durable record
+only: no chain access, no side effects. The result has the same shape
+as `request_send`; a `sent` request carries its `txid` and `fee_sat`. An
+unknown or malformed id is `status: "not_found"`, and another agent's
+requests are never visible.
 
-Prefer the stored ID returned by `send`. Bare client keys also work,
-including keys beginning with `k-` or `r-`. If a bare key is also an
-existing stored ID, the stored ID takes precedence: after sending with
-both `job` and `k-job`, poll `k-k-job` for the latter request.
+## Request states
 
-```json
-{
-  "found": true,
-  "request_id": "k-invoice-7012",
-  "status": "denied",
-  "reason": "ask_required",
-  "approvable": true,
-  "approval_ready": false,
-  "message": "denied ask_required — awaiting the human: sats agent approve k-invoice-7012"
-}
-```
+| `status` | Meaning | What the agent does |
+|---|---|---|
+| `pending_approval` | Inside the grant; awaiting the human | Relay the id; observe |
+| `denied` | Outside a grant boundary (`reason`); terminal | Report once; stop |
+| `dismissed` | The human declined; terminal | Stop; ask the human before proposing again |
+| `signing` | The human authorized it; sats is signing and broadcasting | Observe |
+| `sent` | Broadcast; carries `txid` | Done |
+| `broadcast_pending` | Signed and persisted; the broadcast failed. The human retries it | Nothing |
+| `unresolved` | The signer was invoked and did not produce a durable, broadcastable result; a signature may exist. The human resolves it | Nothing; do not file it again |
+| `failed` | Execution stopped before the signer was invoked; the human may authorize again | Observe |
 
-`status` reuses send's vocabulary — `sent` (with `txid`), `denied` (with
-`reason` and `approvable`), `error`, or `pending` when no outcome is
-recorded yet. `reason` and `approvable` describe the recorded denial;
-they are history, not a new policy decision. `approval_ready: true` means
-an unconsumed, unexpired one-time approval is available for this unsettled
-intent under the current grant's boundaries (`approval_expires_at`
-says when that approval expires). Revocation, grant expiry, observe mode,
-or a proposal the current grant's caps or allowlist now refuse make
-readiness false; the message explains the current restriction. Polling
-never changes history.
-
-When ready, retry the identical send once with its **original client
-idempotency key**, not the stored ID returned by `send`. The daemon still
-rechecks policy and the actual prepared fee; readiness does not guarantee
-signing or broadcast success. A malformed or unknown id is a typed
-`found: false` result, never a transport error.
-
-### Tool annotations
-
-Every tool declares standard MCP annotations — the read tools and
-`check_request` as read-only and idempotent, `send` as destructive and
-open-world, address derivation and unlock as neither. They are hints for
-clients; the daemon's policy ladder is the security boundary, and a
-client that ignores them changes nothing about what can be signed.
-
-### `send`
-
-Parameters:
-
-```json
-{
-  "address": "tb1p...",
-  "amount_sat": 4500,
-  "request_id": "invoice-7012"
-}
-```
-
-`request_id` is an optional idempotency key: 1–64 characters of
-`A-Za-z0-9_-`. Every send — keyed or not — is recorded as a durable request;
-the returned `request_id` is the server-assigned record id (`k-<key>` for
-keyed requests) a human can review with `sats agent requests`.
-
-The normal result of a novel send — the request being filed for the
-human's review, not a failure:
-
-```json
-{
-  "status": "denied",
-  "reason": "ask_required",
-  "approvable": true,
-  "message": "human authorization required: every agent send needs a one-time human approval — a human can approve exactly this request once with: sats agent approve k-invoice-7012",
-  "request_id": "k-invoice-7012"
-}
-```
-
-The result of the identical retry after the human approves — the only
-way an agent-originated send is ever signed:
-
-```json
-{
-  "status": "sent",
-  "txid": "...",
-  "amount_sat": 4500,
-  "fee_sat": 281,
-  "total_sat": 4781,
-  "remaining_budget_sat": 45219,
-  "request_id": "k-invoice-7012"
-}
-```
-
-Every denied result carries `approvable`: `true` — only ever
-`ask_required` — means a human can authorize exactly this request once
-with `sats agent approve` and the message names the command; `false`
-means the refusal is a grant boundary — no approval exists for it, no
-hint is offered, and only the human changing the grant lifts it.
-
-Operational failure:
-
-```json
-{
-  "status": "error",
-  "message": "broadcast failed after signing: ... — budget reserved; a human can retry with: sats tx broadcast <txid>",
-  "request_id": "k-invoice-7012"
-}
-```
-
-Locked wallet — an error, deliberately not a denial:
-
-```json
-{
-  "status": "error",
-  "error_code": "wallet_locked",
-  "message": "the wallet is locked — a human must run: sats daemon unlock",
-  "request_id": "k-invoice-7012"
-}
-```
-
-`send` does not expose fee-rate, dust, guard, signer, PSBT, or provider-bypass
-parameters. The agent supplies only destination, integer satoshis, and
-optionally its idempotency key. Fee estimation uses the network's
-human-configured `[fee_targets]` policy; the agent cannot change it.
-
-## Idempotent retries
-
-When `tools/call` includes `_meta.progressToken`, `send` emits standard MCP
-progress notifications for actual stages: checking the request, syncing,
-protecting UTXOs, estimating fees, building, authorizing/signing, and
-broadcasting. The progress number counts stage notifications; it is not a
-percentage or time estimate. Denied/replayed calls skip work they do not do.
-Clients without a progress token receive the same final result as before.
-Notification delivery failures never change signing or budget accounting.
-
-Provider HTTP requests time out after 30 seconds each; a multi-request scan
-can take longer. If a provider hostname resolves to several IPs, an
-unreachable TCP address gets at most two seconds before the next candidate
-is tried, within the same request deadline; the last candidate retains the
-remaining time. This never switches providers or retries an HTTP broadcast.
-These limits do not make a send a durable background job.
-Closing the MCP client can interrupt preparation or broadcast. A signature
-may already exist even if the client did not receive a result; preserve the
-request ID and payment details when recovering. Do not create a new send to
-resolve an uncertain outcome.
-
-Retrying `send` with the same `request_id` and the identical address and
-amount is always safe:
-
-- if the earlier execution signed a transaction, the recorded outcome is
-  returned verbatim — the same txid for a broadcast send, the same error for
-  a signed-but-unbroadcast one. Nothing executes twice and no budget is
-  drawn again. This replay answers even after the grant was revoked: a
-  signed transaction is the truth the agent must learn.
-- if the earlier execution was denied or failed before any signature
-  existed, the retry re-evaluates the same request from scratch.
-
-Reusing a key for a different address or amount never mutates anything.
-Mechanical and operational failures are `status: "error"` results carrying a
-stable `error_code`. An `error_code` and a denial `reason` never appear
-together: a denial is a policy decision a human can approve, an error is a
-condition to fix.
+`error` is not a request state: it is a typed operational condition on the
+call itself, with an `error_code` and no record written.
 
 | `error_code` | Meaning |
 |---|---|
 | `invalid_agent` | The agent name is not 1–32 characters of `a-z0-9_-` |
-| `invalid_request_id` | The key is not 1–64 characters of `A-Za-z0-9_-` |
-| `request_id_conflict` | The key was already used for a different send |
-| `request_in_flight` | The same request is executing right now |
-| `request_incomplete` | An earlier execution recorded neither outcome nor transaction; a human should review |
-| `wallet_locked` | satsd holds no seed; ask the human to use `request_unlock` on macOS or `sats daemon unlock` |
-| `daemon_unavailable` | satsd could not be reached, or could not be told a send's outcome |
+| `invalid_idempotency_key` | The key is missing or not 1–64 characters of `A-Za-z0-9_-` |
+| `invalid_address` | The address does not parse, or is for another network |
+| `idempotency_key_conflict` | The key was already used for a different send; `request_id` names it |
+| `no_grant` | No grant on file: nothing can be authenticated, so nothing is written |
 | `unauthorized` | The presented token does not authorize this agent's grant |
-| `clock_unavailable` | The system clock cannot be read; expiry cannot be evaluated, so the send refuses |
+| `clock_unavailable` | The system clock cannot be read; expiry cannot be evaluated |
+| `store_error` | The request store could not be read or written |
 
-## Denial semantics
+## Denial reasons
 
-Denial is an expected successful tool result, not an MCP transport error.
-Supported reason codes are:
+| `reason` | Meaning |
+|---|---|
+| `expired` | The grant's expiry has been reached |
+| `over_max_tx` | Recipient amount exceeds the per-transaction cap |
+| `over_max_fee` | The real fee, at execution, exceeds the fee cap |
+| `over_budget` | Amount plus fee exceeds remaining budget |
+| `amount_overflow` | Amount plus fee overflows |
+| `observe_only` | The grant is observe-only |
+| `revoked` | The grant that created the request was revoked or re-issued; a request never executes under another grant |
+| `recipient_not_allowed` | The recipient is outside the grant's standing allowlist |
 
-| Reason | Approvable | Meaning |
-|---|---|---|
-| `ask_required` | yes | The terminal verdict for a valid proposal inside the grant: every agent send needs a one-time human approval |
-| `expired` | no | The grant's expiry has been reached |
-| `over_max_tx` | no | Recipient amount exceeds the per-transaction cap |
-| `over_max_fee` | no | Planned fee exceeds the fee cap |
-| `over_budget` | no | Amount plus fee exceeds remaining budget |
-| `revoked` | no | The grant file no longer exists |
-| `amount_overflow` | no | Amount plus fee overflows |
-| `observe_only` | no | The grant is observe-only |
-| `recipient_not_allowed` | no | The recipient is outside the grant's standing allowlist |
+Every reason is a grant boundary. An agent should report it to its human
+once and stop: re-filing the same proposal cannot expand authority.
 
-An agent should relay the denial — including its `request_id` — to its
-human and stop. Retrying the same request unchanged cannot expand
-authority; what can change the answer is a human decision, and for
-`approvable: false` refusals that decision is editing the grant, not
-approving a request.
+## What happens after filing
 
-A `revoked` denial for an agent with no grant on file carries a
-`request_id` only when an earlier authenticated execution already recorded
-the request: with no grant there is nobody to authenticate, so the daemon
-records nothing new. A keyed retry of a send that signed before the
-revocation still replays its recorded txid.
+Nothing, on the agent's side. The human sees the request in
+`sats agent requests` (or the `--watch` stream, a trusted channel that
+does not rely on the agent relaying its own status) and runs
+`sats agent approve <id>`, which:
 
-## One-time approvals
+1. prepares the transaction on current chain state, with no UTXO-safety
+   bypasses;
+2. derives what the prepared transaction pays from the wallet's own
+   descriptors and refuses if it disagrees with the recorded request;
+3. re-runs the grant's ladder with the real fee, and shows the human the
+   recipient, amount, fee, and total;
+4. takes the wallet password — the authorization — and, under the grant
+   lock, checks that the grant on file is the one that created the
+   request, draws the budget on the grant's ledger under the request's
+   id, and persists the request as `signing` before the signer is
+   invoked;
+5. signs, persists the finalized transaction, and broadcasts.
 
-The terminal ask (`approvable: true`) is not a dead end: the asked
-request persists, and its message names the exact command —
-`sats agent approve <request-id>` — that lets a human authorize precisely
-that send, once. The approval binds the request's canonical intent digest
-(network, agent, recipient, amount), carries an expiry, and is consumed
-by the first matching send; the grant's own caps and budget still bound
-that send when it executes. After the human approves, the agent retries
-the identical send — same address, same amount, ideally the same
-`request_id`.
+A failure before the signer is invoked — the audit log cannot be
+written, the signer cannot be constructed — returns the draw and leaves
+the request `failed`, which the human may authorize again. Once the
+signer has been invoked, nothing it reports is trusted to mean "no
+signature": an error, an unfinalized result, or a failure to finalize or
+save the transaction leaves the request `unresolved`, with the draw kept
+and the request never signed again. A broadcast failure after signing is
+`broadcast_pending`: the draw is final, the request is never signed
+again, and `sats tx broadcast <txid>` settles it to `sent`. `sats agent
+dismiss <id>` declines a pending request.
 
-A hard refusal (`approvable: false`) has no approval path at all:
-`sats agent approve` refuses to arm one before any password prompt, and
-the refusal names the real escalation — changing the grant.
-Approval creation checks the current grant before prompting and again
-under the grant lock before writing, so an older ask cannot bypass a
-boundary the grant has since tightened. A missing or unreadable grant
-cannot arm an approval.
-
-Approvals never override revocation or grant expiry: those are the human's
-kill switches, and an exception issued earlier does not survive them. A
-consumed approval never authorizes a second signature; re-running
-`sats agent approve` is a fresh human decision. `sats agent deny <id>`
-dismisses a request and revokes its unconsumed approval.
-
-## Send lifecycle
-
-A send spans one connection to the daemon; the request claim is released if
-that connection closes, so a caller that dies mid-send strands nothing.
-
-The shim normalizes the recipient, then the daemon executes:
-
-1. verify the bearer token against the grant, and compute the canonical
-   intent digest (network, agent, recipient, amount — the fee is excluded);
-2. resolve the request id: replay a recorded keyed outcome, reject a
-   conflicting key reuse, or claim a durable request record for execution;
-3. reload the grant so revocation is current;
-4. precheck the full ladder on the amount alone. A novel proposal stops
-   here, before any network access: the terminal ask (or the specific cap
-   refusal) is recorded for the human's queue and returned. Only a send
-   whose one-time approval is armed proceeds.
-
-The shim then runs shared safe preparation to sync, protect UTXOs, and build
-the PSBT, and hands it back. The daemon:
-
-5. derives the payment and fee **from the PSBT** against the wallet's own
-   descriptors, and refuses if they disagree with the request it claimed —
-   nothing the shim reports about the transaction is trusted;
-6. re-reads the grant under its lock, re-checks the token, and authorizes
-   the derived amount plus fee — consuming the one-time approval, the only
-   authority that can allow an agent spend;
-7. reserves and persists budget;
-8. signs with the seed held in its memory — the signer is constructed only
-   after the reservation, so no denied or unapproved request can reach it;
-9. privately saves raw finalized transaction hex — attributed to the agent,
-   request, and intent digest — before returning. A signed transaction never
-   crosses the socket.
-
-The shim broadcasts the saved transaction and reports the result back, which
-marks the record and resolves the request.
-
-Each transition is appended to the per-network event log
-(`events/log.jsonl`), and the request record is resolved to its outcome, so
-the causal chain from request through decision to transaction survives on
-disk. Denied requests remain reviewable with `sats agent requests`.
-
-If signing fails before a signature exists, the reservation is refunded. If
-broadcast fails, budget stays reserved and the saved finalized transaction
-can be retried by a human. The normal MCP path never persists the PSBT. See
-[Security](security.md) for why the boundary occurs at signing rather than
-broadcast.
+Provider HTTP requests time out after 30 seconds each; those limits apply
+to the human's approve command, not to the served process, which never
+touches the chain for a request.
 
 ## Revocation and expiry
 
@@ -471,19 +231,19 @@ sats agent list
 sats agent revoke claude
 ```
 
-Every send reloads the grant from disk. Revocation therefore takes effect on
-the next call without restarting the MCP client. An already signed
-transaction remains valid after revocation.
+Every request records the `grant_id` of the grant instance that
+created it and executes only under that instance. Revocation takes
+effect on the next call without restarting the MCP client, and a pending
+request whose grant was revoked or re-issued is `denied` with reason
+`revoked` when a human tries to approve it — a new grant for the same
+agent never inherits old requests, and a client key reused under the new
+grant files a new request. A transaction signed before revocation
+remains valid.
 
 Expired grants cannot start a new MCP server and are removed when discovered
 by grant-listing and startup paths. Re-issuing a grant mints a new token, so
-a server still holding the old one is refused on its next start.
-
-A locked daemon is not a denial. `send` returns `status: "error"` with
-`error_code: "wallet_locked"` and no `reason`, so an agent can distinguish a
-policy refusal — which a human may approve — from a wallet nobody has
-unlocked yet, which they simply need to unlock. `daemon_unavailable` means
-satsd could not be reached at all.
+a server still holding the old one is refused on its next start, and a
+running server with a superseded token can file nothing.
 
 ## Transport rules
 

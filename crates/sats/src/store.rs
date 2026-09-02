@@ -137,32 +137,6 @@ impl Store {
         self.data_dir.join(network).join("agent-requests")
     }
 
-    /// The satsd socket for a network.
-    ///
-    /// Prefers the XDG runtime directory, which is per-user, mode 0700,
-    /// and cleared at logout — the right home for a live socket. An
-    /// explicit `--dir`/`SATS_DIR` keeps everything under that directory
-    /// instead, so isolated runs and tests never collide.
-    pub fn socket_path(&self, network: &str) -> PathBuf {
-        if self.override_dir.is_none()
-            && let Some(run) = std::env::var_os("XDG_RUNTIME_DIR")
-            && !run.is_empty()
-        {
-            return PathBuf::from(run)
-                .join("sats")
-                .join(format!("{network}.sock"));
-        }
-        // Kept short: unix socket paths have a low length limit.
-        self.data_dir.join(network).join("d.sock")
-    }
-
-    /// Where a backgrounded daemon's diagnostics go. A detached process
-    /// has no terminal to write to, and silently discarding the reason it
-    /// failed to start would be worse than a file.
-    pub fn daemon_log_path(&self, network: &str) -> PathBuf {
-        self.data_dir.join(network).join("satsd.log")
-    }
-
     pub fn events_dir(&self, network: &str) -> PathBuf {
         self.data_dir.join(network).join("events")
     }
@@ -379,7 +353,7 @@ impl Store {
 
     /// All unexpired grants for a network. Purely a read: expired files
     /// are skipped, never deleted, so unauthenticated surfaces (the
-    /// daemon's status op) can call this without mutating grant state.
+    /// tool surface) can call this without mutating grant state.
     /// [`Store::prune_expired_grants`] is the explicit cleanup.
     pub fn active_grants(&self, network: &str, now_unix: u64) -> Result<Vec<Grant>> {
         let dir = self.grants_dir(network);
@@ -585,8 +559,22 @@ impl Store {
             .into_iter()
             .filter(|request| request.id.starts_with(id_or_prefix))
             .collect();
-        if let Some(exact) = matches.iter().position(|r| r.id == id_or_prefix) {
-            return Ok(matches.remove(exact));
+        // An exact id wins over longer ids it prefixes, but it must be
+        // unique: request ids are global, so two records carrying the
+        // same exact id is corruption, never a choice to make silently.
+        let exact: Vec<usize> = matches
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.id == id_or_prefix)
+            .map(|(i, _)| i)
+            .collect();
+        match exact.as_slice() {
+            [one] => return Ok(matches.remove(*one)),
+            [] => {}
+            _ => bail!(
+                "request id {id_or_prefix} is ambiguous: more than one record carries it — \
+                 pass the agent's own record, not the id"
+            ),
         }
         match matches.len() {
             0 => bail!("no agent request {id_or_prefix}"),
@@ -678,21 +666,9 @@ fn read_transaction(path: &Path, network: &str) -> Result<TransactionRecord> {
     Ok(record)
 }
 
-#[cfg(unix)]
-fn harden_path(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn harden_path(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
 /// Gate an agent name before it becomes a path component. Every store
 /// function that joins an agent name into a path must pass it through
-/// here: the daemon receives the name raw off its socket, and `join`
+/// here: the MCP process receives the name from its caller, and `join`
 /// with `..` or an absolute path escapes the data directory entirely.
 fn agent_component(agent: &str) -> Result<&str> {
     if !valid_agent_name(agent) {
@@ -701,8 +677,8 @@ fn agent_component(agent: &str) -> Result<&str> {
     Ok(agent)
 }
 
-/// Gate a request id before it becomes a path component. Daemon-minted
-/// ids (`k-<key>`, `r-<hex>`) always pass; this is the backstop for any
+/// Gate a request id before it becomes a path component. sats-minted
+/// ids (`r-` plus 32 hex) always pass; this is the backstop for any
 /// future caller handing an id straight from a wire.
 fn request_id_component(id: &str) -> Result<&str> {
     let ok = !id.is_empty()
@@ -739,12 +715,6 @@ pub fn legacy_grant_message(agent: &str, path: &Path) -> String {
     )
 }
 
-/// Restrict a file to its owner. Used for the daemon socket, where the
-/// permission bits are the whole access-control story.
-pub fn harden_file(path: &Path) -> Result<()> {
-    harden_path(path).with_context(|| format!("cannot restrict permissions on {}", path.display()))
-}
-
 /// Restrict a directory to its owner.
 #[cfg(unix)]
 pub fn harden_dir(path: &Path) -> Result<()> {
@@ -778,30 +748,6 @@ pub fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
     }
     fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))?;
     Ok(())
-}
-
-/// Exclusive daemon ownership, including the stale-socket recovery window.
-pub fn lock_daemon(socket: &Path) -> Result<fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let parent = socket.parent().context("socket has no parent")?;
-    fs::create_dir_all(parent)?;
-    harden_dir(parent)?;
-    let path = socket.with_extension("lock");
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(&path)?;
-    set_secret_perms(&file, true)?;
-    file.try_lock().map_err(|e| {
-        anyhow::anyhow!(
-            "satsd is already running or starting for {}: {e}",
-            socket.display()
-        )
-    })?;
-    Ok(file)
 }
 
 #[cfg(unix)]
@@ -877,6 +823,8 @@ mod tests {
             token_hash: token.token_hash,
             mode: Default::default(),
             allowed_recipients: None,
+            grant_id: sats_core::authz::new_grant_id().unwrap(),
+            reservations: Vec::new(),
         }
     }
 
@@ -973,7 +921,7 @@ mod tests {
             agent: "claude".into(),
             request_id: "k-job-1".into(),
             intent_digest: "d".repeat(64),
-            kind: sats_core::event::EventKind::Replayed,
+            kind: sats_core::event::EventKind::Approved,
         };
         store.append_event("signet", &event).unwrap();
         let log = store.events_dir("signet").join("log.jsonl");
@@ -1019,16 +967,49 @@ mod tests {
             id: id.into(),
             network: "signet".into(),
             agent: "claude".into(),
-            client_request_id: None,
+            grant_id: "g1".into(),
+            idempotency_key: None,
             recipient: "tb1ptest".into(),
             amount_sat: 1_000,
             intent_digest: "d".repeat(64),
             created_at: 42,
             updated_at: 42,
-            outcome: None,
-            approval: None,
-            dismissed_at: None,
+            state: sats_core::request::RequestState::PendingApproval,
         }
+    }
+
+    /// Two records with the same exact id — possible only across agents,
+    /// since ids are global — are never resolved by picking the first.
+    #[test]
+    fn find_agent_request_refuses_duplicate_exact_ids() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let mut alice = agent_request("r-0123456789abcdef0123456789abcdef");
+        alice.agent = "alice".into();
+        let mut bob = agent_request("r-0123456789abcdef0123456789abcdef");
+        bob.agent = "bob".into();
+        store
+            .create_agent_request("signet", &alice)
+            .unwrap()
+            .unwrap();
+        store.create_agent_request("signet", &bob).unwrap().unwrap();
+        let err = store
+            .find_agent_request("signet", "r-0123456789abcdef0123456789abcdef")
+            .unwrap_err();
+        assert!(err.to_string().contains("ambiguous"), "{err:#}");
+        let err = store.find_agent_request("signet", "r-0123").unwrap_err();
+        assert!(err.to_string().contains("ambiguous"), "{err:#}");
+        // A unique prefix still resolves.
+        let mut carol = agent_request("r-fedcba9876543210fedcba9876543210");
+        carol.agent = "carol".into();
+        store
+            .create_agent_request("signet", &carol)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.find_agent_request("signet", "r-fed").unwrap().id,
+            "r-fedcba9876543210fedcba9876543210"
+        );
     }
 
     #[test]
@@ -1091,7 +1072,7 @@ mod tests {
             agent: "claude".into(),
             request_id: "k-job-1".into(),
             intent_digest: "d".repeat(64),
-            kind: sats_core::event::EventKind::Replayed,
+            kind: sats_core::event::EventKind::Approved,
         };
         store.append_event("signet", &event).unwrap();
         store.append_event("signet", &event).unwrap();
@@ -1100,7 +1081,7 @@ mod tests {
         assert_eq!(contents.lines().count(), 2);
         for line in contents.lines() {
             let value: serde_json::Value = serde_json::from_str(line).unwrap();
-            assert_eq!(value["event"], "replayed");
+            assert_eq!(value["event"], "approved");
         }
         #[cfg(unix)]
         {
@@ -1169,7 +1150,7 @@ mod tests {
         }
     }
 
-    /// Agent names reach the store raw off the daemon socket, so every
+    /// Agent names reach the store raw from the MCP caller, so every
     /// path join gates them: a traversal name must fail and leave no
     /// artifact anywhere.
     #[test]
@@ -1218,7 +1199,7 @@ mod tests {
         assert!(!store.agent_requests_dir("signet").exists());
     }
 
-    /// Reading grant state must not mutate it: the daemon's status op is
+    /// Reading grant state must not mutate it: the read-only surfaces are
     /// unauthenticated, so listing leaves expired files alone and only the
     /// explicit prune removes them.
     #[test]
