@@ -13,9 +13,9 @@ use crate::provider::Services;
 use crate::store::Store;
 use crate::walletd::WalletCtx;
 
-/// Sign a prepared spend's PSBT to finality. An error here means no
-/// finalized signature exists, so callers holding a budget reservation may
-/// still refund it.
+/// Sign a prepared spend's PSBT to finality. An error does not prove that
+/// no signature exists. Agent budget reservations are handled by the request
+/// executor, which never refunds after invoking the signer.
 pub fn sign_psbt(prepared: &PreparedSpend, mnemonic: Mnemonic, network: Network) -> Result<Psbt> {
     let mut psbt = prepared.psbt().clone();
     let mut signer = LocalSigner::new(mnemonic, network);

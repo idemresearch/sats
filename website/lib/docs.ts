@@ -15,7 +15,7 @@ const PUBLIC_DOC_SLUGS = [
 const PUBLIC_DOCS_INDEX = [
   "# Documentation",
   "",
-  "Learn the wallet on signet first. Mainnet is always an explicit choice.",
+  "Testing only. sats is not mainnet-ready. Use signet or regtest with a fresh test wallet; do not use real funds.",
   "",
   "## Use sats",
   "",
@@ -67,6 +67,7 @@ export function docDescription(markdown: string, fallback: string): string {
       if (paragraph.length > 0) break;
       continue;
     }
+    if (paragraph.length === 0 && line.startsWith(">")) continue;
     if (/^(#{1,6}\s|[-*]\s|```|\||>)/.test(line)) break;
     paragraph.push(line);
   }

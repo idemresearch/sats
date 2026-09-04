@@ -11,7 +11,7 @@ export const metadata: Metadata = {
     template: "%s · sats",
   },
   description:
-    "A tiny on-chain Bitcoin wallet for humans and agents. AI asks, you approve, keys stay yours: every agent payment waits for your one-time approval.",
+    "An experimental Bitcoin wallet for testing: terminal sends, PSBT workflows, and human-approved agent requests. Signet by default. Not mainnet-ready.",
   alternates: {
     canonical: "./",
   },
@@ -75,6 +75,11 @@ export default function RootLayout({
               <a href="https://github.com/jonatns/sats">source ↗</a>
             </nav>
           </header>
+
+          <p className="release-notice">
+            <strong>Testing only. Not mainnet-ready.</strong>{" "}
+            Use signet or regtest with a fresh test wallet. Do not use real funds.
+          </p>
 
           <main>{children}</main>
 

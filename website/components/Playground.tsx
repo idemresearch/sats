@@ -1129,7 +1129,7 @@ export default function Playground() {
             <span className="term-title-mark" aria-hidden="true">$</span>
             <span>sats</span>
           </div>
-          <span className="term-status">signet · live wasm</span>
+          <span className="term-status">simulated signet · live wasm</span>
         </div>
 
         <div className="term-screen">
@@ -1166,7 +1166,7 @@ export default function Playground() {
 
       <p className="term-caption">
         <span>
-          Keys and state stay in this tab and disappear when you close it.
+          Simulation only: no network funds. Keys and state disappear when you close this tab.
         </span>
         <span>tab complete · ↑/↓ history · ctrl+l clear</span>
       </p>

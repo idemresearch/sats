@@ -1,5 +1,8 @@
 # Providers and UTXO guards
 
+> **Testing only. Not mainnet-ready.** Use signet or regtest with a fresh
+> test wallet. Do not use real funds or restore a real-funded wallet.
+
 sats treats every external Bitcoin service as a typed provider bound to one
 network. Providers advertise audited capabilities; commands ask for a
 capability rather than depending directly on a particular API.
@@ -65,12 +68,12 @@ default asset guard.
 Configure providers under `[providers.<name>]`:
 
 ```toml
-network = "mainnet"
+network = "signet"
 
 [providers.subfrost]
 driver = "subfrost"
-network = "mainnet"
-url = "https://mainnet.subfrost.io/v4/jsonrpc"
+network = "signet"
+url = "https://signet.subfrost.io/v4/jsonrpc"
 ```
 
 Provider names are local labels. Each entry must declare the one Bitcoin
@@ -98,18 +101,18 @@ authorizes or refuses the fee derived from the prepared transaction.
 Use a capability filter to split responsibilities:
 
 ```toml
-network = "mainnet"
+network = "signet"
 
 [providers.chain]
 driver = "esplora"
-network = "mainnet"
-url = "https://mempool.space/api"
+network = "signet"
+url = "https://mempool.space/signet/api"
 capabilities = ["chain"]
 
 [providers.assets]
 driver = "subfrost"
-network = "mainnet"
-url = "https://mainnet.subfrost.io/v4/jsonrpc"
+network = "signet"
+url = "https://signet.subfrost.io/v4/jsonrpc"
 capabilities = ["guard"]
 ```
 
@@ -118,13 +121,13 @@ Exact capability names allow finer splits:
 ```toml
 [providers.sync]
 driver = "esplora"
-network = "mainnet"
+network = "signet"
 url = "https://example-a.invalid/api"
 capabilities = ["chain.sync"]
 
 [providers.relay]
 driver = "esplora"
-network = "mainnet"
+network = "signet"
 url = "https://example-b.invalid/api"
 capabilities = ["chain.fees", "chain.broadcast"]
 ```
@@ -140,7 +143,7 @@ Esplora providers accept an optional bearer token:
 ```toml
 [providers.private_esplora]
 driver = "esplora"
-network = "mainnet"
+network = "signet"
 url = "https://bitcoin.example/api"
 
 [providers.private_esplora.auth]

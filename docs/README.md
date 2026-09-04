@@ -1,5 +1,8 @@
 # sats documentation
 
+> **Testing only. Not mainnet-ready.** Use signet or regtest with a fresh
+> test wallet. Do not use real funds or restore a real-funded wallet.
+
 These documents describe the behavior currently implemented in the
 repository, plus the stable design decisions behind it. Product planning,
 target dates, and speculative work live outside the public code

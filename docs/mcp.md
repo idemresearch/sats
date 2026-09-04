@@ -1,5 +1,8 @@
 # MCP and agent grants
 
+> **Testing only. Not mainnet-ready.** Use signet or regtest with a fresh
+> test wallet. Do not use real funds or restore a real-funded wallet.
+
 `sats agent serve` exposes a deliberately small wallet surface to one named
 agent over Model Context Protocol stdio. The rule it implements:
 
@@ -15,7 +18,8 @@ the result with `check_request`.
 
 ## Connect an agent
 
-Initialize and fund a wallet, then create a grant:
+Initialize a fresh signet wallet and fund it with test coins from a signet
+faucet, then create a grant:
 
 ```sh
 sats agent grant claude \
@@ -49,8 +53,9 @@ At startup the server verifies:
 - the selected network wallet exists;
 - provider configuration resolves without ambiguity.
 
-Authentication, wallet, or configuration failure is reported before the client
-begins a conversation, at `claude mcp add` time rather than mid-conversation.
+Authentication, wallet, or configuration failure is reported when the client
+starts the MCP server. Registering the command with `claude mcp add` does not
+by itself demonstrate that the server can start.
 
 ## Tool surface
 
@@ -125,7 +130,7 @@ recorded as `denied`, with a `reason`:
 ```json
 {
   "status": "denied",
-  "request_id": "r-2e7d41c0a95b6f13c4d5e6f708192a3b",
+  "request_id": "r-2e7d41c0a95b6f13c4d5e6f708192a3b4c",
   "reason": "over_max_tx",
   "recipient": "tb1p...",
   "amount_sat": 20000,

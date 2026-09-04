@@ -34,9 +34,9 @@ authority over the signer.
 > to signing.**
 
 The agent never has signing authority. An agent can read balances, derive
-receive addresses, inspect its grant, prepare transactions, and file
-spend proposals. It cannot unlock the wallet for itself, obtain the
-private key, approve its own payment, cause an unattended signature, or
+receive addresses, inspect its grant, and file spend proposals. The human's
+approval process prepares the transaction; MCP does not expose preparation.
+The agent cannot unlock the wallet for itself, obtain the private key, approve its own payment, cause an unattended signature, or
 silently modify a transaction after approval.
 
 Internal allowance *after* a valid human approval is legitimate — the
@@ -50,9 +50,9 @@ bit in the process that holds the seed.
 
 Every agent action resolves through three verdicts:
 
-- **ALLOW** — the action needs no signing authority: read balance, list
-  history, derive a receive address, inspect the grant, poll a request,
-  prepare a transaction.
+- **ALLOW** — the action needs no signing authority: read balance,
+  derive a receive address, inspect the grant, or poll a request. The shipped
+  MCP surface does not expose history or transaction preparation.
 - **ASK** — the normal verdict for a valid agent-originated request: a
   durable `pending_approval` request is filed for exactly this intent,
   and a human decides.

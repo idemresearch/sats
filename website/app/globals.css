@@ -70,7 +70,7 @@ body {
     var(--background);
   color: var(--foreground);
   font-family: var(--sans);
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1.65;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -1126,4 +1126,20 @@ footer > div:first-child {
     scroll-behavior: auto !important;
     transition: none !important;
   }
+}
+
+.release-notice {
+  padding: 14px 18px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  color: var(--foreground);
+  font-size: 0.875rem;
+}
+
+.install-note {
+  max-width: 790px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.875rem;
 }

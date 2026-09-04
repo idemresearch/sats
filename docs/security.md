@@ -1,12 +1,15 @@
 # Security and trust model
 
+> **Testing only. Not mainnet-ready.** Use signet or regtest with a fresh
+> test wallet. Do not use real funds or restore a real-funded wallet.
+
 sats separates watch-only wallet state from signing material, makes spending
 authority explicit, and treats every signature as a point of no return. Its
 core invariant: **no agent-originated spend reaches the signer without
 explicit human authorization bound to that exact request** — an
 unapproved agent request is pending or denied, never a signature. Only a
 human-authorized execution path may invoke the signer for an
-agent-originated request; in v0.0.1 that path is `sats agent approve`.
+agent-originated request; in this build that path is `sats agent approve`.
 This document describes the implemented boundaries and their costs; the
 direction they serve is in [Direction](direction.md).
 
@@ -49,6 +52,15 @@ The private descriptor is never written to the wallet database. Normal sends
 never persist the prepared or signed PSBT. The finalized transaction is saved
 before network broadcast, so a failure or lost response leaves an exact retry
 without retaining PSBT derivation metadata.
+
+### Current review limitations
+
+`psbt sign` signs the named file after unlocking, without displaying outputs
+or requesting a separate confirmation. Inspect that exact file first; the
+external-PSBT path does not use the send planner's UTXO guards or agent grants.
+For ordinary `send`, `--json` currently suppresses the pre-signing spend
+display. Use the interactive send for human review. These are limitations of
+the current testing build, not properties of the agent approval path below.
 
 ## Executing an agent request
 
@@ -182,8 +194,9 @@ expose. It cannot cause a signature (every send waits for your approval),
 never touches the seed, and never reaches any other network. Use small
 budgets and short expiries; revoke when not needed.
 
-Hardware- or passkey-backed `Signer` implementations can strengthen the
-executor's signing boundary further without changing transaction planning.
+The shipped backend is `LocalSigner`, a software signer. The `Signer` trait
+is an extension boundary; it does not provide a hardware-wallet or passkey
+backend in this build.
 
 ### Grant format
 
@@ -252,10 +265,11 @@ closed: if the system clock cannot be read, filing and execution refuse
 with the typed error `clock_unavailable` rather than evaluating expiry
 against a 1970 fallback that would treat every grant as live.
 
-After approval, sats reserves and persists the budget before signing. If
-signing fails and no signature exists, the reservation is refunded. Once a
-signature exists, the reservation remains even if saving or broadcast fails:
-the transaction is already spendable outside sats.
+After approval, sats reserves and persists the budget before signing.
+A reservation is refundable only when the signer was provably never invoked.
+Once `Signer::sign` is invoked, an error or unfinalized result is unresolved,
+not proof that no signature exists. The reservation remains even if saving
+or broadcast fails: a signature may already be spendable outside sats.
 
 The decision, reservation, and persistence happen under an advisory
 per-network grant lock, shared with grant creation and revocation.
@@ -480,7 +494,8 @@ That is reported as partial rather than treated as a broadcastable success.
 
 ## Operational guidance
 
-- Learn the flow on signet before selecting mainnet.
+- Use signet or regtest with a fresh test wallet. This release is not
+  mainnet-ready; do not use real funds.
 - Keep wallet backups and verify recovery independently.
 - Use a strong, unique wallet password.
 - Run sats only on a machine and user account you trust.

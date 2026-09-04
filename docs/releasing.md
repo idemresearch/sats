@@ -13,6 +13,23 @@ Each archive is published with an individual SHA-256 checksum plus an
 aggregate `SHA256SUMS` file. `setup.sh` consumes the stable per-target asset
 names from either the latest release or a tag selected with `SATS_VERSION`.
 
+## Testing-only release checks
+
+This release is experimental and not mainnet-ready. Before announcing it:
+
+- keep the homepage, docs, and release notes explicit about testing only;
+- verify the public installer and release assets without GitHub credentials;
+  a private repository's release assets are not a public distribution path;
+- ensure the version tag matches `Cargo.toml` (`0.1.0` in the current
+  workspace); a `v0.0.1` tag requires an intentional version change first;
+- run the website build from `website/` with `npm ci` and `npm run build`;
+- exercise a fresh signet or regtest wallet and the advertised commands;
+- include known limitations in the release notes, including the current
+  signing-review gaps documented in [Security](security.md).
+
+A teaser can precede publication, but it must not claim binaries are
+available before the installer and assets have been verified.
+
 ## Publish a release
 
 1. Update `workspace.package.version` in `Cargo.toml` and refresh `Cargo.lock`

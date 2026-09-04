@@ -16,7 +16,7 @@ const agentCommands = [
   "sats agent grant claude \\",
   "  --budget 50k --for 24h",
   "sats agent requests --watch",
-  "sats agent approve k-invoice-1",
+  "sats agent approve <request-id>",
 ];
 
 export default function Home() {
@@ -25,7 +25,7 @@ export default function Home() {
       <section className="hero" aria-labelledby="hero-title">
         <div className="eyebrow">
           <span className="status-dot" aria-hidden="true" />
-          experimental · signet by default
+          testing only · not mainnet-ready
         </div>
 
         <h1 id="hero-title">
@@ -36,14 +36,14 @@ export default function Home() {
 
         <p className="hero-copy">
           A small, native wallet that lives in your terminal. Spend directly,
-          or let an AI agent ask: it prepares payments inside a budget you
+          or let an AI agent file payment requests inside a budget you
           set, and every send waits for your approval. AI asks. You approve.
           Keys stay yours.
         </p>
 
         <div className="hero-actions">
           <Link className="button button-primary" href="#playground">
-            Try the wallet
+            Try the simulation
           </Link>
           <Link className="button button-secondary" href="/docs/cli">
             Read the CLI docs
@@ -55,6 +55,12 @@ export default function Home() {
           <code>{INSTALL_CMD}</code>
           <CopyButton text={INSTALL_CMD} />
         </div>
+
+        <p className="install-note">
+          The installer needs a published GitHub release. Until the first release
+          is available, use the simulation below; repository collaborators can
+          build from source.
+        </p>
 
         <dl className="product-facts">
           <div>
@@ -80,12 +86,12 @@ export default function Home() {
         <div className="section-heading">
           <div>
             <p className="section-kicker">Live playground</p>
-            <h2 id="playground-title">The real wallet, in your browser.</h2>
+            <h2 id="playground-title">Real signing. Simulated bitcoin.</h2>
           </div>
           <p>
             The portable engine is compiled to WebAssembly. The chain is
             simulated; the planning, signing, UTXO protection, and grant
-            authorization are not.
+            authorization are not. No funds are sent to a Bitcoin network.
           </p>
         </div>
         <Playground />
@@ -104,9 +110,10 @@ export default function Home() {
             <div className="operator-number">01</div>
             <h3>You, in a shell.</h3>
             <p>
-              Intent-first commands handle the normal path. Every send shows
-              the amount and fee before the seed is unlocked and the
-              transaction is signed.
+              Create a wallet, receive test coins, and send from your terminal.
+              The normal interactive send shows the amount and fee before
+              confirmation and signing. PSBT files offer an explicit advanced
+              workflow.
             </p>
             <CommandBlock commands={humanCommands} />
             <Link className="text-link" href="/docs/cli">
@@ -124,6 +131,7 @@ export default function Home() {
               exactly that payment, once — the agent does nothing further.
             </p>
             <CommandBlock commands={agentCommands} />
+            <p>Use the request ID shown by the review queue when approving.</p>
             <Link className="text-link" href="/docs/mcp">
               Read the agent contract <span aria-hidden="true">→</span>
             </Link>

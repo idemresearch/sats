@@ -38,7 +38,7 @@ first-class workflow object (`sats-core::request`): `pending_approval`,
 `denied`, `dismissed`, `signing`, `sent`, `broadcast_pending`,
 `unresolved`, or `failed`, bound to the grant instance that created it. The human-authorized execution path (`crates/sats/src/request/`)
 prepares, re-verifies, reserves budget, signs, persists, and broadcasts;
-in v0.0.1 that path is `sats agent approve`, which unseals the seed with
+in this build that path is `sats agent approve`, which unseals the seed with
 the human's password for exactly one execution. The agent observes the
 result and takes no action after filing.
 
@@ -112,7 +112,7 @@ These come first; everything else serves them:
 - No agent-originated request may reach the signer without explicit
   human authorization bound to that exact request.
 - Only a human-authorized execution path may invoke the signer for an
-  agent-originated request. In v0.0.1, `sats agent approve` is that path;
+  agent-originated request. In this build, `sats agent approve` is that path;
   the invariant is about the path's authorization, not the command.
 - A grant defines what an agent is allowed to propose. Human approval
   authorizes one valid proposal inside the grant — it cannot exceed the
@@ -207,8 +207,8 @@ and rendering belong to callers.
   before the signer is invoked; construct the signer only after the
   reservation is durable (`request::execute::commit` takes it as a
   factory for exactly this reason).
-- Refund only before the signer is invoked, or when it reports that no
-  signature was produced.
+- Refund only when the signer was provably never invoked. An error or
+  unfinalized result after invocation is unresolved, never refundable.
 - The human review (recipient, amount, real fee, total) precedes the
   password in every mode; `--json` moves it to stderr, never drops it.
 - Never refund a signed transaction after a broadcast failure.

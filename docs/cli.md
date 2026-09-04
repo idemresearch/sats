@@ -1,5 +1,8 @@
 # CLI reference
 
+> **Testing only. Not mainnet-ready.** Use signet or regtest with a fresh
+> test wallet. Do not use real funds or restore a real-funded wallet.
+
 The `sats` CLI manages one sealed seed and a watch-only wallet per Bitcoin
 network. Run `sats --help` or `sats <command> --help` for the exact option
 list supported by the installed version.
@@ -16,7 +19,8 @@ sats status
 ```
 
 Signet is the default. `init` prints the new mnemonic once; back it up before
-continuing. Mainnet requires `--network mainnet` explicitly.
+continuing. Network selection uses `--network` or the configuration file;
+keep this release on signet or regtest.
 
 `init` is the single setup entry point: run bare on a terminal it asks
 whether to create a new wallet or restore one from a mnemonic backup;
@@ -42,8 +46,8 @@ Behavior to know before restoring:
 - sats derives BIP-86 taproot addresses only (`bc1p…`/`tb1p…`). A phrase
   from a wallet holding funds on other address types restores successfully
   but shows those coins as invisible, not gone.
-- The wallet restores onto the selected network — signet unless
-  `--network mainnet` is given.
+- The wallet restores onto the network selected by `--network` or the
+  configuration file, falling back to signet.
 - Mainnet restore turns the backup into hot key material that agent grants
   can draw on, so it requires typing an explicit confirmation phrase. To
   only watch funds, do not restore a seed onto an online machine.
@@ -142,6 +146,10 @@ The three send modes:
   owner-only artifact and signs nothing. The change address it reserves is
   persisted so the artifact stays valid.
 
+In the current build, `send --json` omits the pre-signing amount/fee display
+and the confirmation prompt uses stdout. Prefer the normal interactive send
+for human review; `--json` is not a separate approval interface.
+
 If broadcast fails after signing, the transaction is already saved:
 `sats status` lists it and `sats tx broadcast <txid>` retries it.
 
@@ -170,7 +178,13 @@ sats psbt sign spend.psbt
 sats tx broadcast <txid>
 ```
 
-`psbt sign FILE` accepts base64 text or binary. When the wallet's signature
+`psbt sign FILE` accepts base64 text or binary. It currently unlocks and
+signs without displaying the outputs or asking for a separate confirmation.
+Inspect the exact file first; this command is a signing escape hatch and does
+not apply the send planner's coin-selection guards or agent grant policy.
+Use only test wallets and test PSBTs.
+
+When the wallet's signature
 finalizes the transaction, sats privately saves raw finalized transaction hex
 (ready for `sats tx broadcast`); it does not retain the signed PSBT. A PSBT
 that still needs other signers is written back beside the input as
@@ -267,7 +281,7 @@ Expired grants are removed while listing. Revocation deletes the grant file;
 an active MCP server observes the deletion on its next send call. Re-issuing
 a grant replaces its token, so rotation and revocation are the same act.
 
-Grants written by releases before the daemon stored recoverable signing
+Development-era grants created before the daemon stored recoverable signing
 material in the grant file. They are reported by `sats agent list` and
 refused for signing; re-issue them, and read
 [Security](security.md) about rotating the wallet.
@@ -464,12 +478,12 @@ signet = 1008
 Typed providers are configured under `[providers.<name>]`:
 
 ```toml
-network = "mainnet"
+network = "signet"
 
 [providers.subfrost]
 driver = "subfrost"
-network = "mainnet"
-url = "https://mainnet.subfrost.io/v4/jsonrpc"
+network = "signet"
+url = "https://signet.subfrost.io/v4/jsonrpc"
 api_key = "replace-with-key"
 ```
 

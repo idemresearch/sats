@@ -16,8 +16,9 @@ request can never reach the signer, even if the agent misbehaves.
 [Architecture](docs/architecture.md) · [Security](docs/security.md)
 
 > [!WARNING]
-> sats is experimental. Signet is the default; use small amounts and short
-> agent grants while evaluating it.
+> **Testing only. Not mainnet-ready. Do not use real funds.**
+> Signet is the default; use signet or regtest with a fresh test wallet.
+> Mainnet code paths exist, but they are not suitable for real funds.
 >
 > Grants created before the signing daemon stored recoverable key material in
 > the grant file. They are now refused rather than honored. If an agent with
@@ -26,7 +27,10 @@ request can never reach the signer, even if the agent misbehaves.
 
 ## Install
 
-Prebuilt binaries are available for macOS and Linux on x86_64 and ARM64:
+The release workflow builds macOS and Linux binaries for x86_64 and ARM64.
+The installer below requires a published, accessible GitHub release; it will
+not work before the first release is published. Until then, repository
+collaborators can build from a checkout with the command below.
 
 ```sh
 curl -fsSL https://sats.sh/setup.sh | sh
@@ -135,6 +139,19 @@ session. See the [MCP guide](docs/mcp.md) for tool contracts and
 integration details, and [Direction](docs/direction.md) for the trust
 model this implements.
 
+## Current feature boundaries
+
+The native build includes the CLI, PSBT inspection/signing, and MCP requests
+that a human executes with `sats agent approve`. Signing uses the local
+software signer; hardware wallets and passkeys are not implemented backends.
+There is no signing daemon, resident unlocked session, autonomous spending
+mode, desktop approval app, or mobile signer.
+
+The CLI also includes experimental `sats alkanes inspect`, `simulate`, and
+`execute` commands. They require an explicitly configured Alkanes view
+provider; execution refuses mainnet and is not exposed through MCP. See the
+[CLI reference](docs/cli.md) for their limits.
+
 ## Safety model
 
 - The seed is sealed with Argon2id and XChaCha20-Poly1305. The SQLite wallet
@@ -153,8 +170,9 @@ model this implements.
 - Agent authorization is deterministic. Budget is reserved and persisted,
   and the request recorded as signing, before the signer is invoked,
   because a signed transaction is already spendable. A request that
-  signed, or may have signed, is never signed again and never refunded;
-  one the signer reports unsigned is refunded. A request executes only
+  signed, or may have signed, is never signed again and never refunded.
+  A reservation is refundable only when the signer was provably never
+  invoked, even if it returns an error. A request executes only
   under the grant that created it.
 - Finalized transactions are written privately before broadcast, by the
   process that signed them, so a crash or lost response cannot strand the
@@ -167,8 +185,8 @@ model this implements.
   see in `sats agent requests`, bounded by the grant until it expires —
   and never touch the seed. Keep budgets small and expiries short anyway.
 
-Read the full [security and trust model](docs/security.md) before using
-mainnet.
+Read the full [security and trust model](docs/security.md) before testing.
+This experimental release is not mainnet-ready.
 
 ## One engine, two native surfaces
 
@@ -191,8 +209,9 @@ agents and contributors.
 ## Networks and providers
 
 Wallets are namespaced by network and share one sealed seed. Supported
-networks are `mainnet`, `signet`, `testnet4`, and `regtest`; mainnet is always
-an explicit choice.
+network identifiers are `mainnet`, `signet`, `testnet4`, and `regtest`.
+Use signet or regtest for this testing-only release. Accepting `mainnet` as
+an explicit configuration value is not a mainnet-readiness claim.
 
 Chain access and optional asset protection come from typed providers.
 With no provider configuration, sats uses the appropriate mempool.space
@@ -201,12 +220,12 @@ never enabled implicitly.
 
 ```toml
 # ~/.config/sats/config.toml
-network = "mainnet"
+network = "signet"
 
 [providers.subfrost]
 driver = "subfrost"
-network = "mainnet"
-url = "https://mainnet.subfrost.io/v4/jsonrpc"
+network = "signet"
+url = "https://signet.subfrost.io/v4/jsonrpc"
 ```
 
 See [Providers and guards](docs/providers.md) for capabilities, resolution
