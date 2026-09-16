@@ -71,7 +71,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         },
         Command::Tx { command } => match command {
             cli::TxCommand::Broadcast { target } => {
-                commands::tx::broadcast(&store, network, &services(&config)?, &target, json)
+                commands::tx::broadcast(&store, network, || Ok(services(&config)?), &target, json)
             }
         },
         Command::Agent { command } => match command {

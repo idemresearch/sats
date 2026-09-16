@@ -1575,7 +1575,7 @@ mod tests {
         );
         let again = approve(&fx, &id, &probe).unwrap_err();
         assert!(
-            again.to_string().contains("signed but not broadcast"),
+            again.to_string().contains("signed; broadcast unconfirmed"),
             "{again:#}"
         );
         assert_eq!(probe.counts(), (1, 1), "never signs again");
@@ -2020,7 +2020,7 @@ mod tests {
             "never refund a signature"
         );
         let again = approve(&fx, &id, &probe).unwrap_err();
-        assert!(again.to_string().contains("signed but not broadcast"));
+        assert!(again.to_string().contains("signed; broadcast unconfirmed"));
         assert_eq!(probe.counts(), (1, 1));
 
         // The same record marked broadcast reconciles to `sent`.
@@ -2322,5 +2322,218 @@ mod tests {
             assert_eq!(fx.request(&id).status(), "pending_approval");
             assert_eq!(fx.count_events("failed"), 0);
         }
+    }
+    #[test]
+    fn broadcast_receipt_write_failure_recovers_repeatedly_without_resigning_or_redrawing() {
+        for via_listing in [false, true] {
+            let fx = Fixture::new(&[100_000]);
+            let token = fx.grant(50_000, 5_000);
+            let id = fx.create(&token, "pay", 10_000).id;
+            let probe = SignerProbe::default();
+            std::fs::write(fx.mockdata.join("broadcast-fail"), "response lost").unwrap();
+            let Outcome::BroadcastPending { txid, .. } = approve(&fx, &id, &probe).unwrap() else {
+                panic!("expected broadcast_pending");
+            };
+            let before = fx.store.load_transaction("signet", &txid).unwrap();
+            let budget = fx.grant_state().spent_sat;
+            std::fs::remove_file(fx.mockdata.join("broadcast-fail")).unwrap();
+            // Block only the atomic receipt write, after successful broadcast.
+            let blocker = fx
+                .store
+                .agent_requests_dir("signet")
+                .join("claude")
+                .join(format!("{id}.tmp"));
+            std::fs::create_dir(&blocker).unwrap();
+            crate::commands::tx::broadcast(
+                &fx.store,
+                Network::Signet,
+                || Ok(fx.services()),
+                &txid,
+                true,
+            )
+            .unwrap();
+            assert_eq!(fx.request(&id).status(), "broadcast_pending");
+            let saved = fx.store.load_transaction("signet", &txid).unwrap();
+            assert_eq!(saved.status, TransactionStatus::Broadcast);
+            assert_eq!(saved.tx_hex, before.tx_hex);
+            std::fs::remove_dir(&blocker).unwrap();
+            for _ in 0..2 {
+                if via_listing {
+                    list_reconciled(&fx.store, Network::Signet).unwrap();
+                } else {
+                    crate::commands::tx::broadcast(
+                        &fx.store,
+                        Network::Signet,
+                        || panic!("receipt repair must not resolve providers"),
+                        &txid,
+                        true,
+                    )
+                    .unwrap();
+                }
+                assert_eq!(fx.request(&id).status(), "sent");
+                assert_eq!(fx.grant_state().spent_sat, budget);
+                assert_eq!(fx.grant_state().tx_count, 1);
+                assert_eq!(probe.counts(), (1, 1));
+                assert_eq!(fx.count_events("broadcast"), 1);
+            }
+            assert_eq!(
+                std::fs::read_to_string(fx.mockdata.join("broadcasts.log"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                1
+            );
+            assert!(approve(&fx, &id, &probe).is_err());
+            fx.assert_ledger_consistent();
+        }
+    }
+
+    #[test]
+    fn receipt_recovery_requires_broadcast_status_and_the_exact_transaction() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let probe = SignerProbe::default();
+        std::fs::write(fx.mockdata.join("broadcast-fail"), "response lost").unwrap();
+        let Outcome::BroadcastPending { txid, .. } = approve(&fx, &id, &probe).unwrap() else {
+            panic!("expected pending");
+        };
+        crate::request::settle_broadcast(&fx.store, Network::Signet, &txid).unwrap();
+        assert_eq!(fx.request(&id).status(), "broadcast_pending");
+        let mut record = fx.store.load_transaction("signet", &txid).unwrap();
+        record.mark_broadcast();
+        fx.store.save_transaction("signet", &record).unwrap();
+        let mut request = fx.request(&id);
+        request.state = RequestState::BroadcastPending {
+            txid: "wrong-transaction".into(),
+            fee_sat: record.fee_sat,
+            at: 1,
+        };
+        fx.store.save_agent_request("signet", &request).unwrap();
+        crate::request::settle_broadcast(&fx.store, Network::Signet, &txid).unwrap();
+        list_reconciled(&fx.store, Network::Signet).unwrap();
+        assert_eq!(fx.request(&id).state, request.state);
+        assert_eq!(fx.count_events("broadcast"), 0);
+        request.state = RequestState::Signing {
+            approved_at: 1,
+            fee_sat: record.fee_sat,
+        };
+        fx.store.save_agent_request("signet", &request).unwrap();
+        let claim = fx
+            .store
+            .claim_agent_request("signet", "claude", &id)
+            .unwrap()
+            .unwrap();
+        assert!(crate::request::settle_broadcast(&fx.store, Network::Signet, &txid).is_err());
+        assert_eq!(fx.request(&id).state, request.state);
+        drop(claim);
+        // A file at the expected path is insufficient: embedded identity must match.
+        let path = fx
+            .store
+            .agent_requests_dir("signet")
+            .join("claude")
+            .join(format!("{id}.json"));
+        let mut wrong_identity = request.clone();
+        wrong_identity.agent = "other".into();
+        std::fs::write(&path, serde_json::to_vec(&wrong_identity).unwrap()).unwrap();
+        assert!(crate::request::settle_broadcast(&fx.store, Network::Signet, &txid).is_err());
+        assert_eq!(fx.request(&id).agent, "other");
+        std::fs::write(path, serde_json::to_vec(&request).unwrap()).unwrap();
+        crate::request::settle_broadcast(&fx.store, Network::Signet, &txid).unwrap();
+        assert_eq!(fx.request(&id).status(), "sent");
+    }
+
+    #[test]
+    fn lost_broadcast_response_recovers_the_exact_bytes_with_one_signature_and_draw() {
+        use std::io::{BufRead, BufReader, Read};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let probe = SignerProbe::default();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "broadcast never reached fixture");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("{err}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("POST /tx "));
+            let mut length = 0;
+            loop {
+                line.clear();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut bytes = vec![0; length];
+            reader.read_exact(&mut bytes).unwrap();
+            // The fixture accepted these bytes, then lost the response.
+            String::from_utf8(bytes).unwrap()
+        });
+        let config_path = fx.dir.path().join("config.toml");
+        let original = std::fs::read_to_string(&config_path).unwrap();
+        let mut config: toml::Value = toml::from_str(&original).unwrap();
+        config["providers"]["mock"].as_table_mut().unwrap().insert(
+            "capabilities".into(),
+            toml::Value::try_from(vec!["chain.sync", "chain.fees", "guard.native"]).unwrap(),
+        );
+        config["providers"].as_table_mut().unwrap().insert("broadcast".into(),
+            toml::Value::try_from(serde_json::json!({"network":"signet","driver":"esplora","url":url,"capabilities":["chain.broadcast"]})).unwrap());
+        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+        let Outcome::BroadcastPending { txid, .. } = approve(&fx, &id, &probe).unwrap() else {
+            panic!("response must be uncertain");
+        };
+        let received_hex = server.join().unwrap();
+        let saved = fx.store.load_transaction("signet", &txid).unwrap();
+        assert_eq!(saved.tx_hex, received_hex);
+        assert_eq!(saved.status, TransactionStatus::Pending);
+        let spent = fx.grant_state().spent_sat;
+        std::fs::write(&config_path, original).unwrap();
+        crate::commands::tx::broadcast(
+            &fx.store,
+            Network::Signet,
+            || Ok(fx.services()),
+            &txid,
+            true,
+        )
+        .unwrap();
+        crate::commands::tx::broadcast(
+            &fx.store,
+            Network::Signet,
+            || panic!("already broadcast"),
+            &txid,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            fx.store.load_transaction("signet", &txid).unwrap().tx_hex,
+            received_hex
+        );
+        assert_eq!(fx.request(&id).status(), "sent");
+        assert_eq!(probe.counts(), (1, 1));
+        assert_eq!(fx.grant_state().spent_sat, spent);
+        assert_eq!(fx.grant_state().tx_count, 1);
+        fx.assert_ledger_consistent();
     }
 }

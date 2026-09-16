@@ -485,10 +485,15 @@ pub fn observe_execution(
 /// the record's status. No transaction means the signer may or may not
 /// have run: the request becomes `unresolved`, nothing is refunded, and
 /// nothing is signed again — a human resolves it. A request whose
-/// execution is still live (its claim is held) is left alone.
+/// execution is still live (its claim is held) is left alone. A
+/// `broadcast_pending` receipt is also repaired when the exact attributed
+/// transaction already records successful broadcast.
 pub fn reconcile(store: &Store, network: Network, request: AgentRequest) -> Result<AgentRequest> {
     let net_name = network_name(network);
-    if !matches!(request.state, RequestState::Signing { .. }) {
+    if !matches!(
+        request.state,
+        RequestState::Signing { .. } | RequestState::BroadcastPending { .. }
+    ) {
         return Ok(request);
     }
     let Some(_claim) = store.claim_agent_request(net_name, &request.agent, &request.id)? else {
@@ -501,6 +506,26 @@ pub fn reconcile(store: &Store, network: Network, request: AgentRequest) -> Resu
     let mut fresh = store
         .load_agent_request(net_name, &request.agent, &request.id)?
         .with_context(|| format!("request {} disappeared", request.id))?;
+    if !fresh.version_supported()
+        || fresh.id != request.id
+        || fresh.agent != request.agent
+        || fresh.network != net_name
+        || fresh.grant_id != request.grant_id
+        || fresh.intent_digest != request.intent_digest
+    {
+        bail!("request changed during reconciliation; refusing to overwrite the record");
+    }
+    if let RequestState::BroadcastPending { txid, .. } = &fresh.state {
+        // A successful broadcast can outlive its receipt write. Only the
+        // exact attributed saved transaction can repair that bookkeeping.
+        if let Some(record) = attributed_transaction(store, net_name, &fresh)?
+            && record.txid == *txid
+            && record.status == TransactionStatus::Broadcast
+        {
+            record_broadcast_receipt(store, net_name, &mut fresh, &record, now)?;
+        }
+        return Ok(fresh);
+    }
     if !matches!(fresh.state, RequestState::Signing { .. }) {
         return Ok(fresh);
     }
@@ -574,8 +599,8 @@ pub fn list_reconciled(store: &Store, network: Network) -> Result<Vec<AgentReque
     Ok(requests)
 }
 
-/// Settle a `broadcast_pending` request once its transaction has been
-/// broadcast by another path (`sats tx broadcast`). The transaction's
+/// Settle a `broadcast_pending` or abandoned `signing` request once its
+/// transaction has been durably recorded as broadcast by another path (`sats tx broadcast`). The transaction's
 /// full attribution — agent, request id, intent digest — must match.
 pub fn settle_broadcast(store: &Store, network: Network, txid: &str) -> Result<()> {
     let net_name = network_name(network);
@@ -586,6 +611,9 @@ pub fn settle_broadcast(store: &Store, network: Network, txid: &str) -> Result<(
     else {
         return Ok(());
     };
+    if record.status != TransactionStatus::Broadcast {
+        return Ok(());
+    }
     let Some(origin) = record.origin.as_ref() else {
         return Ok(());
     };
@@ -596,30 +624,53 @@ pub fn settle_broadcast(store: &Store, network: Network, txid: &str) -> Result<(
     ) else {
         return Ok(());
     };
+    // Recovery must not race the process that still owns execution: it
+    // could otherwise overwrite a repaired receipt with a stale outcome.
+    let Some(_claim) = store.claim_agent_request(net_name, agent, request_id)? else {
+        bail!("request {request_id} is still executing; wait before recovering its receipt");
+    };
     let now = unix_now();
     let _lock = store.lock_grants(net_name)?;
     let Some(mut request) = store.load_agent_request(net_name, agent, request_id)? else {
         return Ok(());
     };
-    if request.intent_digest != digest {
-        return Ok(());
+    if !request.version_supported()
+        || request.id != request_id
+        || request.agent != agent
+        || request.network != net_name
+        || request.intent_digest != digest
+    {
+        bail!("saved transaction attribution does not match the request record");
     }
-    let RequestState::BroadcastPending { fee_sat, .. } = request.state else {
-        return Ok(());
-    };
+    match &request.state {
+        RequestState::BroadcastPending { txid, .. } if *txid == record.txid => {}
+        RequestState::Signing { .. } => {}
+        _ => return Ok(()),
+    }
+    record_broadcast_receipt(store, net_name, &mut request, &record, now)
+}
+
+/// The caller holds the grant lock and has verified exact attribution.
+fn record_broadcast_receipt(
+    store: &Store,
+    net_name: &str,
+    request: &mut AgentRequest,
+    record: &TransactionRecord,
+    now: u64,
+) -> Result<()> {
     request.state = RequestState::Sent {
-        txid: txid.to_string(),
-        fee_sat,
+        txid: record.txid.clone(),
+        fee_sat: record.fee_sat,
         at: now,
     };
     request.updated_at = now;
-    store.save_agent_request(net_name, &request)?;
+    store.save_agent_request(net_name, request)?;
     journal_soft(
         store,
         net_name,
-        &request,
+        request,
         EventKind::Broadcast {
-            txid: txid.to_string(),
+            txid: record.txid.clone(),
         },
     );
     Ok(())
@@ -642,7 +693,7 @@ pub fn describe_settled(request: &AgentRequest) -> String {
         ),
         RequestState::Sent { txid, .. } => format!("already sent ({txid})"),
         RequestState::BroadcastPending { txid, .. } => {
-            format!("signed but not broadcast — retry with: sats tx broadcast {txid}")
+            format!("signed; broadcast unconfirmed — recover with: sats tx broadcast {txid}")
         }
         RequestState::Failed { .. } => "failed before any signature".into(),
     }

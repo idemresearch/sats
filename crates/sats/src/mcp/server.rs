@@ -193,7 +193,7 @@ impl RequestView {
                 None,
                 Some(*fee_sat),
                 Some(txid.clone()),
-                "signed but not yet broadcast — the human retries the broadcast; nothing \
+                "signed; broadcast unconfirmed — the human recovers the saved transaction; nothing \
                  for you to do"
                     .into(),
             ),
