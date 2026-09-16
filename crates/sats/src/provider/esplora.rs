@@ -13,7 +13,7 @@ use bdk_wallet::KeychainKind;
 use bdk_wallet::chain::spk_client::{FullScanRequest, FullScanResponse, SyncRequest, SyncResponse};
 use sats_core::bitcoin::{BlockHash, Network, Transaction, Txid, constants};
 
-use super::error::ProviderError;
+use super::error::{ProviderError, redact_url, transport_error};
 
 const STOP_GAP: usize = 20;
 const PARALLEL_REQUESTS: usize = 4;
@@ -24,12 +24,13 @@ const PARALLEL_REQUESTS: usize = 4;
 #[path = "../../../../vendor/minreq/src/connect.rs"]
 mod connection_tests;
 
-/// One Esplora endpoint. The URL is display-safe (esplora auth travels in a
-/// header, never the URL), so errors may show it in full.
+/// Keep the configured endpoint private; arbitrary deployments may carry
+/// credentials in any URL component as well as the Authorization header.
 #[derive(Clone)]
 pub struct EsploraProvider {
     name: String,
     url: String,
+    display_url: String,
     bearer: Option<String>,
 }
 
@@ -38,17 +39,28 @@ impl std::fmt::Debug for EsploraProvider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EsploraProvider")
             .field("name", &self.name)
-            .field("url", &self.url)
+            .field("url", &self.display_url)
             .finish_non_exhaustive()
     }
 }
 
 impl EsploraProvider {
     pub fn new(name: String, url: String, bearer: Option<String>) -> Self {
-        EsploraProvider { name, url, bearer }
+        let display_url = redact_url(&url);
+        EsploraProvider {
+            name,
+            url,
+            display_url,
+            bearer,
+        }
     }
 
-    pub fn url(&self) -> &str {
+    pub fn display_url(&self) -> &str {
+        &self.display_url
+    }
+
+    #[cfg(test)]
+    pub(super) fn url(&self) -> &str {
         &self.url
     }
 
@@ -62,10 +74,10 @@ impl EsploraProvider {
         builder.build_blocking()
     }
 
-    fn unreachable(&self, err: impl std::fmt::Display) -> ProviderError {
+    fn unreachable(&self, err: &esplora_client::Error) -> ProviderError {
         ProviderError::Sync {
-            url: self.url.clone(),
-            message: format!("esplora unreachable: {err}"),
+            url: self.display_url.clone(),
+            message: format!("esplora: {}", error_message(err)),
         }
     }
 
@@ -75,11 +87,11 @@ impl EsploraProvider {
         let genesis: BlockHash = self
             .client()
             .get_block_hash(0)
-            .map_err(|e| self.unreachable(e))?;
+            .map_err(|e| self.unreachable(&e))?;
         if genesis != constants::genesis_block(network).block_hash() {
             return Err(ProviderError::WrongNetwork {
                 name: self.name.clone(),
-                url: self.url.clone(),
+                url: self.display_url.clone(),
                 expected: crate::config::network_name(network),
             });
         }
@@ -92,7 +104,7 @@ impl EsploraProvider {
     ) -> Result<FullScanResponse<KeychainKind>, ProviderError> {
         self.client()
             .full_scan(request, STOP_GAP, PARALLEL_REQUESTS)
-            .map_err(|e| self.unreachable(e))
+            .map_err(|e| self.unreachable(&e))
     }
 
     pub fn sync(
@@ -101,15 +113,15 @@ impl EsploraProvider {
     ) -> Result<SyncResponse, ProviderError> {
         self.client()
             .sync(request, PARALLEL_REQUESTS)
-            .map_err(|e| self.unreachable(e))
+            .map_err(|e| self.unreachable(&e))
     }
 
     pub fn fee_estimates(&self) -> Result<HashMap<u16, f64>, ProviderError> {
         match self.client().get_fee_estimates() {
             Ok(estimates) => Ok(estimates),
             Err(err) => fee_estimates_from_2xx(&err).ok_or_else(|| ProviderError::Fees {
-                url: self.url.clone(),
-                message: format!("esplora unreachable: {err}"),
+                url: self.display_url.clone(),
+                message: format!("esplora: {}", error_message(&err)),
             }),
         }
     }
@@ -120,10 +132,33 @@ impl EsploraProvider {
             Ok(()) => Ok(()),
             Err(err) if broadcast_succeeded_via_2xx(&err, &txid) => Ok(()),
             Err(e) => Err(ProviderError::Broadcast {
-                url: self.url.clone(),
-                message: e.to_string(),
+                url: self.display_url.clone(),
+                message: format!("esplora: {}", error_message(&e)),
             }),
         }
+    }
+}
+
+/// Do not format the library's Display/Debug: both can include credentials
+/// echoed in HTTP responses, header validation or nested transport errors.
+fn error_message(error: &esplora_client::Error) -> String {
+    use esplora_client::Error;
+    match error {
+        Error::Minreq(error) => transport_error(error),
+        Error::HttpResponse { status, .. } => format!("http {status}"),
+        Error::Parsing(_) => "invalid numeric response".into(),
+        Error::StatusCode(_) => "invalid HTTP status".into(),
+        Error::BitcoinEncoding(_) | Error::HexToArray(_) | Error::HexToBytes(_) => {
+            "invalid Bitcoin response data".into()
+        }
+        Error::TransactionNotFound(_) => "transaction not found".into(),
+        Error::HeaderHeightNotFound(_) | Error::HeaderHashNotFound(_) => {
+            "block header not found".into()
+        }
+        Error::InvalidHttpHeaderName(_) | Error::InvalidHttpHeaderValue(_) => {
+            "invalid HTTP header configuration".into()
+        }
+        Error::InvalidResponse => "invalid HTTP response".into(),
     }
 }
 
@@ -147,7 +182,10 @@ fn broadcast_succeeded_via_2xx(err: &esplora_client::Error, txid: &Txid) -> bool
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead, Read, Write};
+    use std::net::TcpListener;
     use std::str::FromStr;
+    use std::sync::mpsc;
 
     use super::*;
     use crate::provider::pick_fee_rate;
@@ -157,6 +195,122 @@ mod tests {
         esplora_client::Error::HttpResponse {
             status,
             message: message.into(),
+        }
+    }
+
+    fn local_server(responses: Vec<(u16, String)>) -> (String, mpsc::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (send, received) = mpsc::channel();
+        std::thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                let mut content_length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    request.push_str(&line);
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = value.trim().parse().unwrap();
+                    }
+                }
+                reader.read_exact(&mut vec![0; content_length]).unwrap();
+                send.send(request).unwrap();
+                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        (origin, received)
+    }
+
+    #[test]
+    fn raw_library_errors_never_survive_wrapping() {
+        let secrets = [
+            "USERSECRET",
+            "PASSSECRET",
+            "PATHSECRET",
+            "QUERYSECRET",
+            "FRAGMENTSECRET",
+            "BEARERSECRET",
+        ];
+        let provider = EsploraProvider::new(
+            "fixture".into(),
+            "https://USERSECRET:PASSSECRET@host.invalid/PATHSECRET?unknown=QUERYSECRET#FRAGMENTSECRET".into(),
+            Some("BEARERSECRET".into()),
+        );
+        for secret in secrets {
+            assert!(!format!("{provider:#?}").contains(secret));
+        }
+        let echo = format!("{} Authorization: Bearer BEARERSECRET", provider.url);
+        for error in [
+            http_err(401, &echo),
+            esplora_client::Error::InvalidHttpHeaderValue(echo.clone()),
+            esplora_client::Error::Minreq(minreq::Error::IoError(std::io::Error::other(
+                echo.clone(),
+            ))),
+            esplora_client::Error::Minreq(minreq::Error::SerdeJsonError(
+                serde_json::from_value::<u64>(serde_json::json!(echo)).unwrap_err(),
+            )),
+        ] {
+            super::super::error::assert_safe_error(provider.unreachable(&error), &secrets);
+        }
+    }
+
+    #[test]
+    fn endpoint_and_read_bearer_are_used_but_never_echoed_from_http_failures() {
+        let echo = "PATHSECRET QUERYSECRET BEARERSECRET USERSECRET";
+        let (origin, requests) = local_server(vec![
+            (200, r#"{"2":3.0}"#.into()),
+            (401, echo.into()),
+            (401, echo.into()),
+            (401, echo.into()),
+        ]);
+        let provider = EsploraProvider::new(
+            "fixture".into(),
+            format!("{origin}/arbitrary/PATHSECRET?unknown=QUERYSECRET"),
+            Some("BEARERSECRET".into()),
+        );
+        assert_eq!(provider.fee_estimates().unwrap().get(&2), Some(&3.0));
+        let tx = Transaction {
+            version: sats_core::bitcoin::transaction::Version::TWO,
+            lock_time: sats_core::bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+        for error in [
+            provider.check_network(Network::Signet).unwrap_err(),
+            provider.fee_estimates().unwrap_err(),
+            provider.broadcast(&tx).unwrap_err(),
+        ] {
+            super::super::error::assert_safe_error(
+                error,
+                &echo.split_whitespace().collect::<Vec<_>>(),
+            );
+        }
+        let requests: Vec<_> = requests.into_iter().collect();
+        assert_eq!(requests.len(), 4);
+        for (request, operation) in
+            requests
+                .iter()
+                .zip(["fee-estimates", "block-height/0", "fee-estimates", "tx"])
+        {
+            assert!(request.lines().next().unwrap().contains(&format!(
+                "/arbitrary/PATHSECRET?unknown=QUERYSECRET/{operation}"
+            )));
+            if operation != "tx" {
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains("authorization: bearer bearersecret")
+                );
+            }
         }
     }
 

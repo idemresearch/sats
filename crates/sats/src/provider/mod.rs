@@ -156,10 +156,19 @@ impl DriverKind {
 }
 
 /// One CLI `--provider KIND=URL` override.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CliProvider {
     pub kind: DriverKind,
     pub url: String,
+}
+
+impl std::fmt::Debug for CliProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CliProvider")
+            .field("kind", &self.kind)
+            .field("url", &error::redact_url(&self.url))
+            .finish()
+    }
 }
 
 /// clap value parser for `--provider KIND=URL`. Splits on the first `=`
@@ -169,7 +178,7 @@ pub fn parse_cli_provider(s: &str) -> Result<CliProvider, String> {
         .split_once('=')
         .ok_or_else(|| "expected KIND=URL (e.g. esplora=https://mempool.space/api)".to_string())?;
     let kind = DriverKind::from_str(kind)
-        .ok_or_else(|| format!("unknown provider kind {kind:?} (use esplora or subfrost)"))?;
+        .ok_or_else(|| "unknown provider kind (use esplora or subfrost)".to_string())?;
     if url.is_empty() {
         return Err("expected KIND=URL with a non-empty url".to_string());
     }
@@ -523,15 +532,15 @@ impl Services {
                     let update = e.full_scan(ctx.wallet.start_full_scan())?;
                     ctx.wallet
                         .apply_update(update)
-                        .map_err(|err| sync_err(e.url(), err.to_string()))?;
+                        .map_err(|err| sync_err(e.display_url(), err.to_string()))?;
                 } else {
                     let update = e.sync(ctx.wallet.start_sync_with_revealed_spks())?;
                     ctx.wallet
                         .apply_update(update)
-                        .map_err(|err| sync_err(e.url(), err.to_string()))?;
+                        .map_err(|err| sync_err(e.display_url(), err.to_string()))?;
                 }
                 ctx.persist()
-                    .map_err(|err| sync_err(e.url(), format!("{err:#}")))
+                    .map_err(|err| sync_err(e.display_url(), format!("{err:#}")))
             }
             ChainSource::Subfrost(c) => {
                 c.check_network(ctx.network)?;
@@ -562,7 +571,7 @@ impl Services {
             .as_ref()
             .ok_or_else(|| self.no_provider(Capability::ChainFees))?;
         let (estimates, url) = match source {
-            FeeSource::Esplora(e) => (e.fee_estimates()?, e.url().to_string()),
+            FeeSource::Esplora(e) => (e.fee_estimates()?, e.display_url().to_string()),
             FeeSource::Subfrost(c) => (c.fee_estimates()?, c.display_url().to_string()),
             FeeSource::Mock(m) => (m.fee_estimates()?, "mock".to_string()),
         };
