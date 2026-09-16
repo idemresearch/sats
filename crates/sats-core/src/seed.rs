@@ -1,7 +1,7 @@
 //! BIP-39 mnemonic → BIP-86 single-key taproot wallet descriptors.
 //!
 //! The persisted wallet is always watch-only (public descriptors). Private
-//! keys exist only inside an ephemeral signing wallet built on demand.
+//! keys are derived in memory for an ephemeral signing wallet built on demand.
 
 use bdk_wallet::bitcoin::Network;
 use bdk_wallet::bitcoin::bip32::Xpriv;
@@ -84,6 +84,13 @@ mod tests {
 
     /// The BIP-86 reference vectors.
     const VECTOR_MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+
+    #[test]
+    fn mnemonic_supports_zeroize_on_drop() {
+        // Guard the resolved dependency feature without inspecting freed memory.
+        fn require_cleanup<T: zeroize::Zeroize + zeroize::ZeroizeOnDrop>() {}
+        require_cleanup::<Mnemonic>();
+    }
 
     #[test]
     fn bip86_mainnet_vectors() {
