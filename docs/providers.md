@@ -39,6 +39,10 @@ require an explicit capability opt-in.
 
 The Subfrost driver maps the provider's namespaced JSON-RPC methods onto the
 fixed sats capability contract, using `btc_sendrawtransaction` for broadcast.
+On a fresh wallet, Subfrost derives and queries scripts lazily, stopping after
+20 consecutive unused scripts on each of the receive and change keychains.
+Activity resets that keychain's gap; transaction-history pagination is
+completed for each script before advancing to the next one.
 Guard answers are presence-only; protocol values are not interpreted by sats.
 Like guards, `alkanes.view` never
 resolves from the legacy or built-in fallback tiers: configuring one is an

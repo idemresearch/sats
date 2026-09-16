@@ -354,10 +354,9 @@ impl SubfrostClient {
         let mut inserted_txs = HashSet::<Txid>::new();
         let mut last_active_indices = BTreeMap::<KeychainKind, u32>::new();
         for keychain in request.keychains() {
-            let spks: Vec<(u32, SpkWithExpectedTxids)> = request
-                .iter_spks(keychain)
-                .map(|(i, spk)| (i, spk.into()))
-                .collect();
+            // Descriptor iterators cover the entire derivation range. Let the
+            // scanner consume them only until it reaches the stop gap.
+            let spks = request.iter_spks(keychain).map(|(i, spk)| (i, spk.into()));
             let (update, last_active_index) =
                 self.fetch_txs_with_keychain_spks(start_time, &mut inserted_txs, spks, STOP_GAP)?;
             tx_update.extend(update);
@@ -430,7 +429,7 @@ impl SubfrostClient {
         &self,
         start_time: u64,
         inserted_txs: &mut HashSet<Txid>,
-        spks: Vec<(u32, SpkWithExpectedTxids)>,
+        spks: impl IntoIterator<Item = (u32, SpkWithExpectedTxids)>,
         stop_gap: usize,
     ) -> Result<(TxUpdate<ConfirmationBlockTime>, Option<u32>), ProviderError> {
         let mut update = TxUpdate::<ConfirmationBlockTime>::default();
@@ -762,6 +761,10 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
+    use bdk_wallet::chain::SpkIterator;
+    use sats_core::bitcoin::{ScriptBuf, absolute, transaction};
+
+    use crate::{config::Config, provider, store::Store, walletd};
 
     fn response(status: &str, headers: &str, body: &str) -> String {
         format!(
@@ -808,6 +811,308 @@ mod tests {
             }
         });
         (format!("http://{address}"), received)
+    }
+
+    fn rpc_response(result: serde_json::Value) -> String {
+        response(
+            "200 OK",
+            "",
+            &serde_json::json!({"jsonrpc": "2.0", "id": 0, "result": result}).to_string(),
+        )
+    }
+
+    fn rpc_requests(requests: &mpsc::Receiver<String>) -> Vec<serde_json::Value> {
+        requests
+            .try_iter()
+            .map(|request| {
+                let (_, body) = request.split_once("\r\n\r\n").unwrap();
+                serde_json::from_str(body).unwrap()
+            })
+            .collect()
+    }
+
+    fn test_wallet() -> bdk_wallet::Wallet {
+        let mnemonic = sats_core::seed::parse_mnemonic(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+        )
+        .unwrap();
+        sats_core::seed::signing_wallet(&mnemonic, Network::Signet).unwrap()
+    }
+
+    /// A real descriptor iterator, capped at one past the expected gap.
+    /// Eager consumption panics promptly instead of deriving billions of scripts.
+    fn bounded_scripts(
+        keychain: KeychainKind,
+        expected: u32,
+    ) -> impl Iterator<Item = (u32, ScriptBuf)> + Send {
+        let descriptor = test_wallet().public_descriptor(keychain).clone();
+        SpkIterator::new_with_range(descriptor, 0..=expected).inspect(move |(index, _)| {
+            assert!(*index < expected, "derived beyond the stop gap: {index}");
+        })
+    }
+
+    fn assert_history_requests(requests: &[serde_json::Value], keychain: KeychainKind, count: u32) {
+        assert_eq!(requests.len(), count as usize);
+        for (request, (_, script)) in requests.iter().zip(bounded_scripts(keychain, count)) {
+            assert_eq!(request["method"], dialect::SCRIPTHASH_TXS);
+            assert_eq!(
+                request["params"],
+                serde_json::json!([sha256::Hash::hash(script.as_bytes()).to_string()])
+            );
+        }
+    }
+
+    fn history_tx(index: u32) -> serde_json::Value {
+        let tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::from_consensus(index),
+            input: vec![],
+            output: vec![TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: test_wallet()
+                    .peek_address(KeychainKind::External, 0)
+                    .script_pubkey(),
+            }],
+        };
+        serde_json::json!({
+            "txid": tx.compute_txid(), "version": 2, "locktime": index,
+            "vin": [],
+            "vout": [{"value": 10_000, "scriptpubkey": tx.output[0].script_pubkey}],
+            "size": tx.total_size(), "weight": tx.weight().to_wu(), "fee": 0,
+            "status": {
+                "confirmed": true, "block_height": 1,
+                "block_hash": BlockHash::from_byte_array([1; 32]), "block_time": 1,
+            },
+        })
+    }
+
+    #[test]
+    fn full_scan_unused_keychain_stops_deriving_at_gap() {
+        let (url, requests) = local_server(vec![rpc_response(serde_json::json!([])); STOP_GAP]);
+        let request = FullScanRequest::builder_at(0).spks_for_keychain(
+            KeychainKind::External,
+            bounded_scripts(KeychainKind::External, STOP_GAP as u32),
+        );
+
+        let update = SubfrostClient::new(url, None).full_scan(request).unwrap();
+
+        assert!(update.last_active_indices.is_empty());
+        assert!(update.tx_update.is_empty());
+        assert_history_requests(
+            &rpc_requests(&requests),
+            KeychainKind::External,
+            STOP_GAP as u32,
+        );
+    }
+
+    #[test]
+    fn full_scan_activity_resets_gap() {
+        let count = 2 * STOP_GAP;
+        let mut responses = vec![rpc_response(serde_json::json!([])); count];
+        let tx = history_tx(1);
+        responses[STOP_GAP - 1] = rpc_response(serde_json::json!([tx]));
+        let (url, requests) = local_server(responses);
+        let request = FullScanRequest::builder_at(0).spks_for_keychain(
+            KeychainKind::External,
+            bounded_scripts(KeychainKind::External, count as u32),
+        );
+
+        let update = SubfrostClient::new(url, None).full_scan(request).unwrap();
+
+        assert_eq!(
+            update.last_active_indices[&KeychainKind::External],
+            STOP_GAP as u32 - 1
+        );
+        assert_eq!(update.tx_update.txs.len(), 1);
+        assert_history_requests(
+            &rpc_requests(&requests),
+            KeychainKind::External,
+            count as u32,
+        );
+    }
+
+    #[test]
+    fn full_scan_scans_both_keychains_with_independent_gaps() {
+        let external_count = STOP_GAP + 2;
+        let internal_count = STOP_GAP + 4;
+        let mut responses =
+            vec![rpc_response(serde_json::json!([])); external_count + internal_count];
+        // The same transaction can be seen on both keychains (e.g. a self-send).
+        let tx = history_tx(1);
+        responses[1] = rpc_response(serde_json::json!([tx]));
+        responses[external_count + 3] = rpc_response(serde_json::json!([tx]));
+        let (url, requests) = local_server(responses);
+        let request = FullScanRequest::builder_at(0)
+            .spks_for_keychain(
+                KeychainKind::External,
+                bounded_scripts(KeychainKind::External, external_count as u32),
+            )
+            .spks_for_keychain(
+                KeychainKind::Internal,
+                bounded_scripts(KeychainKind::Internal, internal_count as u32),
+            );
+
+        let update = SubfrostClient::new(url, None).full_scan(request).unwrap();
+
+        assert_eq!(
+            update.last_active_indices,
+            BTreeMap::from([(KeychainKind::External, 1), (KeychainKind::Internal, 3)])
+        );
+        assert_eq!(
+            update.tx_update.txs.len(),
+            1,
+            "deduplicate across keychains"
+        );
+        let requests = rpc_requests(&requests);
+        assert_history_requests(
+            &requests[..external_count],
+            KeychainKind::External,
+            external_count as u32,
+        );
+        assert_history_requests(
+            &requests[external_count..],
+            KeychainKind::Internal,
+            internal_count as u32,
+        );
+    }
+
+    #[test]
+    fn full_scan_pages_history_before_advancing_to_next_script() {
+        let txs: Vec<_> = (0..26).map(history_tx).collect();
+        let mut responses = vec![
+            rpc_response(serde_json::json!(txs[..25])),
+            rpc_response(serde_json::json!(txs[25..])),
+        ];
+        responses.extend(vec![rpc_response(serde_json::json!([])); STOP_GAP]);
+        let (url, requests) = local_server(responses);
+        let request = FullScanRequest::builder_at(0).spks_for_keychain(
+            KeychainKind::External,
+            bounded_scripts(KeychainKind::External, STOP_GAP as u32 + 1),
+        );
+
+        let update = SubfrostClient::new(url, None).full_scan(request).unwrap();
+
+        assert_eq!(update.last_active_indices[&KeychainKind::External], 0);
+        assert_eq!(update.tx_update.txs.len(), 26);
+        assert_eq!(update.tx_update.anchors.len(), 26);
+        assert!(update.tx_update.seen_ats.is_empty());
+        for (actual, expected) in update.tx_update.txs.iter().zip(&txs) {
+            assert_eq!(serde_json::json!(actual.compute_txid()), expected["txid"]);
+        }
+        let mut requests = rpc_requests(&requests);
+        assert_eq!(requests.len(), STOP_GAP + 2);
+        let page = requests.remove(1);
+        assert_eq!(page["method"], dialect::SCRIPTHASH_TXS_CHAIN);
+        assert_eq!(
+            page["params"],
+            serde_json::json!([requests[0]["params"][0], txs[24]["txid"]])
+        );
+        assert_history_requests(&requests, KeychainKind::External, STOP_GAP as u32 + 1);
+    }
+
+    fn fresh_wallet(store: &Store) -> walletd::WalletCtx {
+        // Fixed public descriptors keep this Services-level fixture bounded even
+        // if full_scan regresses. The tests above cover wildcard gap behavior.
+        let wallet = test_wallet();
+        let fixed = |keychain| {
+            wallet
+                .public_descriptor(keychain)
+                .at_derivation_index(0)
+                .unwrap()
+                .to_string()
+        };
+        walletd::create(
+            store,
+            Network::Signet,
+            fixed(KeychainKind::External),
+            fixed(KeychainKind::Internal),
+        )
+        .unwrap();
+        walletd::open(store, Network::Signet).unwrap()
+    }
+
+    fn sync_services(url: String) -> provider::Services {
+        provider::resolve(
+            &Config::default(),
+            &[provider::CliProvider {
+                kind: provider::DriverKind::Subfrost,
+                url,
+            }],
+            Network::Signet,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn sync_wallet_full_scans_fresh_wallet_and_persists_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let mut ctx = fresh_wallet(&store);
+        assert_eq!(ctx.wallet.latest_checkpoint().height(), 0);
+        let genesis = constants::genesis_block(Network::Signet).block_hash();
+        let tip = BlockHash::from_byte_array([1; 32]);
+        let blocks: Vec<_> = [(1, tip), (0, genesis)]
+            .into_iter()
+            .map(|(height, id)| {
+                serde_json::json!({
+                    "id": id, "height": height, "version": 1, "timestamp": 1,
+                    "tx_count": 0, "size": 80, "weight": 320,
+                    "merkle_root": "00".repeat(32), "mediantime": 1,
+                    "nonce": 0, "bits": 0, "difficulty": 1.0,
+                })
+            })
+            .collect();
+        let (url, requests) = local_server(vec![
+            rpc_response(serde_json::json!(genesis)),
+            rpc_response(serde_json::json!(blocks)),
+            rpc_response(serde_json::json!([])),
+            rpc_response(serde_json::json!([])),
+        ]);
+
+        sync_services(url).sync_wallet(&mut ctx).unwrap();
+
+        let requests = rpc_requests(&requests);
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0]["method"], dialect::BLOCK_HEIGHT);
+        assert_eq!(requests[0]["params"], serde_json::json!([0]));
+        assert_eq!(requests[1]["method"], dialect::BLOCKS);
+        assert_history_requests(&requests[2..3], KeychainKind::External, 1);
+        assert_history_requests(&requests[3..4], KeychainKind::Internal, 1);
+        drop(ctx);
+        let reopened = walletd::open(&store, Network::Signet).unwrap();
+        assert_eq!(
+            reopened.wallet.latest_checkpoint().block_id(),
+            BlockId {
+                height: 1,
+                hash: tip
+            }
+        );
+        assert_eq!(reopened.wallet.balance().total(), Amount::ZERO);
+    }
+
+    #[test]
+    fn sync_wallet_rejects_wrong_network_before_scanning() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let mut ctx = fresh_wallet(&store);
+        let (url, requests) = local_server(vec![rpc_response(serde_json::json!(
+            constants::genesis_block(Network::Bitcoin).block_hash()
+        ))]);
+
+        let err = sync_services(url).sync_wallet(&mut ctx).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ProviderError::WrongNetwork {
+                expected: "signet",
+                ..
+            }
+        ));
+        assert_eq!(ctx.wallet.latest_checkpoint().height(), 0);
+        let requests = rpc_requests(&requests);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["method"], dialect::BLOCK_HEIGHT);
+        assert_eq!(requests[0]["params"], serde_json::json!([0]));
     }
 
     #[test]
