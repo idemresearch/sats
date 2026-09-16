@@ -826,6 +826,113 @@ fn get_balance_reports_a_failed_sync() {
     assert_eq!(balance["balance_sat"], 100_000, "cached");
 }
 
+#[test]
+fn provider_resolution_is_deferred_until_an_mcp_chain_read() {
+    let dir = TempDir::new().unwrap();
+    run_sats(&dir, &["init"]);
+    let token = grant_token(&dir, "claude", &["--budget", "50000", "--max-tx", "10000"]);
+    let servers = common::write_ambiguous_providers(&dir);
+
+    // Deferring providers must not defer authentication.
+    let refused = Command::new(sats_bin())
+        .args(["agent", "serve", "claude"])
+        .env("SATS_DIR", dir.path())
+        .env("SATS_AGENT_TOKEN", "wrong-token")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("does not match the active grant"));
+
+    let mut mcp = McpSession::start(&dir, "claude", &token);
+    handshake(&mut mcp);
+    let grant = mcp.call_tool(2, "get_grant", serde_json::json!({}));
+    assert_eq!(grant["active"], true);
+    assert_eq!(grant["remaining_sat"], 50_000);
+    let first = mcp.call_tool(3, "get_receive_address", serde_json::json!({}));
+    let second = mcp.call_tool(4, "get_receive_address", serde_json::json!({}));
+    assert!(first["address"].as_str().unwrap().starts_with("tb1p"));
+    assert_ne!(first["address"], second["address"]);
+    assert_eq!(second["index"], 1);
+    let filed = mcp.request_send(5, 4_500, "local-request");
+    assert_eq!(filed["status"], "pending_approval");
+    let id = id_of(&filed);
+    let paths = [
+        dir.path()
+            .join(format!("signet/agent-requests/claude/{id}.json")),
+        dir.path().join("signet/grants/claude.json"),
+        dir.path().join("signet/events/log.jsonl"),
+        dir.path().join("signet/wallet.sqlite"),
+    ];
+    let before: Vec<_> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
+    assert_eq!(mcp.check_request(6, &id), filed);
+    assert_eq!(mcp.request_send(7, 4_500, "local-request"), filed);
+    for (path, bytes) in paths.iter().zip(before) {
+        assert_eq!(std::fs::read(path).unwrap(), bytes, "{}", path.display());
+    }
+    let conflict = mcp.request_send(8, 4_501, "local-request");
+    assert_eq!(conflict["error_code"], "idempotency_key_conflict");
+    // A conflicting filing keeps its existing audit event; observation and
+    // an identical retry above write nothing.
+    assert_eq!(event_kinds(&dir), ["request_received", "conflicted"]);
+    assert_eq!(spent_sat(&dir), 0);
+    assert!(!dir.path().join("signet/transactions").exists());
+
+    let balance = mcp.call_tool_raw(9, "get_balance", serde_json::json!({}));
+    assert!(
+        balance.get("error").is_some() || balance["result"]["isError"] == true,
+        "{balance}"
+    );
+    assert!(
+        balance
+            .to_string()
+            .contains("multiple chain.sync providers"),
+        "{balance}"
+    );
+    assert!(
+        balance["result"]["structuredContent"].is_null(),
+        "no cached balance on resolution failure"
+    );
+    assert_eq!(
+        mcp.check_request(10, &id),
+        filed,
+        "a chain error must not stop observation"
+    );
+
+    let denied = mcp.request_send(11, 20_000, "over-cap");
+    assert_eq!(denied["status"], "denied");
+    assert_eq!(denied["reason"], "over_max_tx");
+    common::assert_no_provider_calls(&servers);
+}
+
+#[test]
+fn provider_resolution_deferral_preserves_mcp_config_errors() {
+    let dir = TempDir::new().unwrap();
+    run_sats(&dir, &["init"]);
+    let token = grant_token(&dir, "claude", &["--budget", "50000"]);
+    for config in [
+        "network = [",
+        "network = 7",
+        "network = \"signet\"\n[fee_targets]\nsignet = 0",
+    ] {
+        std::fs::write(dir.path().join("config.toml"), config).unwrap();
+        let output = Command::new(sats_bin())
+            .args(["agent", "serve", "claude"])
+            .env("SATS_DIR", dir.path())
+            .env("SATS_AGENT_TOKEN", &token)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("invalid config"), "{stderr}");
+        assert!(
+            !stderr.contains("multiple chain.sync providers"),
+            "{stderr}"
+        );
+    }
+}
+
 // Provider failures on the approving side: a stalled chain provider
 // refuses to plan on stale state and leaves the request pending; a
 // broadcast timeout after signing is broadcast_pending with the budget

@@ -16,12 +16,12 @@ use crate::{ui, walletd};
 pub fn run(
     store: &Store,
     network: Network,
-    services: &Services,
+    resolve_services: impl FnOnce() -> Result<Services>,
     offline: bool,
     json: bool,
 ) -> Result<()> {
     let mut ctx = walletd::open(store, network)?;
-    if !offline && let Err(err) = services.sync_wallet(&mut ctx) {
+    if !offline && let Err(err) = resolve_services()?.sync_wallet(&mut ctx) {
         eprintln!("✗ sync failed — history may be stale ({err:#})");
     }
 

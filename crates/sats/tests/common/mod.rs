@@ -186,3 +186,26 @@ impl Drop for HttpServer {
         let _ = self.thread.take().unwrap().join();
     }
 }
+
+/// Individually valid Esplora entries whose chain capabilities conflict.
+/// Keep both listeners alive so tests can also assert no provider was called.
+pub fn write_ambiguous_providers(dir: &TempDir) -> [HttpServer; 2] {
+    let servers = std::array::from_fn(|_| {
+        HttpServer::start(|_| Some((400, "unexpected provider call".into())))
+    });
+    let mut config = "network = \"signet\"\n".to_string();
+    for (name, server) in ["first", "second"].into_iter().zip(&servers) {
+        config.push_str(&format!(
+            "\n[providers.{name}]\ndriver = \"esplora\"\nnetwork = \"signet\"\nurl = {:?}\n",
+            server.url
+        ));
+    }
+    std::fs::write(dir.path().join("config.toml"), config).unwrap();
+    servers
+}
+
+pub fn assert_no_provider_calls(servers: &[HttpServer; 2]) {
+    for server in servers {
+        assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}

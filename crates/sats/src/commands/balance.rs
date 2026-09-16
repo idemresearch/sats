@@ -8,13 +8,14 @@ use crate::{ui, walletd};
 pub fn run(
     store: &Store,
     network: Network,
-    services: &Services,
+    resolve_services: impl FnOnce() -> Result<Services>,
     offline: bool,
     json: bool,
 ) -> Result<()> {
     let mut ctx = walletd::open(store, network)?;
     let mut synced = false;
     if !offline {
+        let services = resolve_services()?;
         match services.sync_wallet(&mut ctx) {
             Ok(()) => synced = true,
             Err(err) => eprintln!("✗ sync failed — showing cached balance ({err:#})"),

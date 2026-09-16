@@ -357,6 +357,168 @@ fn two_chain_providers_are_ambiguous() {
 }
 
 #[test]
+fn provider_resolution_is_only_required_for_online_commands() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let txid = common::fund_wallet(&dir, &[100_000])[0].txid.to_string();
+    let servers = common::write_ambiguous_providers(&dir);
+    sats(&dir)
+        .args(["agent", "grant", "claude", "--budget", "50000"])
+        .assert()
+        .success();
+    let grants = json_stdout(
+        sats(&dir)
+            .args(["agent", "list", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(grants.as_array().unwrap().len(), 1);
+    let first = json_stdout(sats(&dir).args(["receive", "--json"]).assert().success());
+    let second = json_stdout(sats(&dir).args(["receive", "--json"]).assert().success());
+    assert_ne!(first["address"], second["address"]);
+    assert_eq!(
+        second["index"].as_u64().unwrap(),
+        first["index"].as_u64().unwrap() + 1
+    );
+    let balance = json_stdout(
+        sats(&dir)
+            .args(["balance", "--offline", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(balance["balance_sat"], 100_000);
+    assert_eq!(balance["synced"], false);
+    let history = json_stdout(
+        sats(&dir)
+            .args(["history", "--offline", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(history[0]["txid"], txid);
+    sats(&dir)
+        .args(["status", "--offline", "--json"])
+        .assert()
+        .success();
+    let status = json_stdout(
+        sats(&dir)
+            .args(["status", &txid, "--offline", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(status["seen"], "confirmed");
+
+    fabricate_pending_request(&dir, "claude", "r-pending");
+    let request_before = request_json(&dir, "r-pending");
+    let grant_path = dir.path().join("signet/grants/claude.json");
+    let grant_before = std::fs::read(&grant_path).unwrap();
+    for args in [
+        vec!["balance", "--json"],
+        vec!["history", "--json"],
+        vec!["status", "--json"],
+        vec!["status", &txid, "--json"],
+        vec!["send", common::ADDRESS, "5000", "--dry-run"],
+        vec!["tx", "broadcast", &txid],
+        vec!["agent", "approve", "r-pending", "--yes"],
+    ] {
+        sats(&dir)
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("multiple chain.sync providers"))
+            .stderr(predicate::str::contains("invalid config").not());
+    }
+    assert_eq!(request_json(&dir, "r-pending"), request_before);
+    assert_eq!(std::fs::read(grant_path).unwrap(), grant_before);
+    assert!(!dir.path().join("signet/transactions").exists());
+    common::assert_no_provider_calls(&servers);
+}
+
+#[test]
+fn provider_resolution_follows_settled_and_revoked_approval_checks() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    write_mock_provider(&dir);
+    common::fund_wallet(&dir, &[100_000]);
+    sats(&dir)
+        .args(["agent", "grant", "claude", "--budget", "50000"])
+        .assert()
+        .success();
+    fabricate_pending_request(&dir, "claude", "r-sent");
+    let sent = json_stdout(
+        sats(&dir)
+            .args(["agent", "approve", "r-sent", "--yes", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(sent["status"], "sent");
+    fabricate_pending_request(&dir, "claude", "r-revoked");
+    let servers = common::write_ambiguous_providers(&dir);
+    let record_before = request_json(&dir, "r-sent");
+    let grant_path = dir.path().join("signet/grants/claude.json");
+    let grant_before = std::fs::read(&grant_path).unwrap();
+
+    sats(&dir)
+        .env("SATS_PASSWORD", "wrong")
+        .args(["agent", "approve", "r-sent", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already sent"))
+        .stderr(predicate::str::contains("providers").not());
+    assert_eq!(request_json(&dir, "r-sent"), record_before);
+    assert_eq!(std::fs::read(&grant_path).unwrap(), grant_before);
+
+    sats(&dir)
+        .args(["agent", "revoke", "claude"])
+        .assert()
+        .success();
+    sats(&dir)
+        .env("SATS_PASSWORD", "wrong")
+        .args(["agent", "approve", "r-revoked", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("revoked"))
+        .stderr(predicate::str::contains("providers").not());
+    let revoked = request_json(&dir, "r-revoked");
+    assert_eq!(revoked["status"], "denied");
+    assert_eq!(revoked["deny"]["reason"], "revoked");
+    assert!(!grant_path.exists());
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("signet/transactions"))
+            .unwrap()
+            .count(),
+        1
+    );
+    common::assert_no_provider_calls(&servers);
+}
+
+#[test]
+fn provider_resolution_deferral_does_not_hide_malformed_config() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    for config in [
+        "network = [",
+        "network = 7",
+        "network = \"signet\"\n[fee_targets]\nsignet = 0",
+    ] {
+        std::fs::write(dir.path().join("config.toml"), config).unwrap();
+        for args in [
+            vec!["receive"],
+            vec!["agent", "list"],
+            vec!["balance", "--offline"],
+            vec!["history", "--offline"],
+            vec!["status", "--offline"],
+        ] {
+            sats(&dir)
+                .args(args)
+                .assert()
+                .failure()
+                .stderr(predicate::str::contains("invalid config"))
+                .stderr(predicate::str::contains("multiple chain.sync providers").not());
+        }
+    }
+}
+
+#[test]
 fn balance_tolerates_sync_failure_and_reports_it() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);

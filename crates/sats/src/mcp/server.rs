@@ -214,8 +214,8 @@ pub struct SatsMcp {
     dir: Option<PathBuf>,
     network: Network,
     agent: String,
-    /// CLI --provider overrides the server was launched with; every tool
-    /// call resolves providers the same way the CLI does.
+    /// CLI --provider overrides the server was launched with; chain-reading
+    /// tools resolve them when called. Local tools never resolve providers.
     providers: Vec<provider::CliProvider>,
     /// The grant's bearer token. It names a policy; it opens nothing and
     /// cannot recover the seed.

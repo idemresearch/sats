@@ -37,8 +37,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     let network = parse_network(&net_name)?;
     let json = cli.json;
 
-    // Chain access is resolved lazily per command: purely local commands
-    // (receive, sign, grants) never need provider configuration.
+    // Workflows with local branches resolve only when they reach chain work.
     let overrides = cli.provider;
     let services = |config: &Config| provider::resolve(config, &overrides, network);
 
@@ -47,19 +46,19 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             commands::init::run(&store, config, network, words, restore, &overrides)
         }
         Command::Balance { offline } => {
-            commands::balance::run(&store, network, &services(&config)?, offline, json)
+            commands::balance::run(&store, network, || Ok(services(&config)?), offline, json)
         }
         Command::Receive => commands::receive::run(&store, network, json),
         Command::Send(args) => {
             commands::send::run(&store, network, &services(&config)?, &args, json)
         }
         Command::History { offline } => {
-            commands::history::run(&store, network, &services(&config)?, offline, json)
+            commands::history::run(&store, network, || Ok(services(&config)?), offline, json)
         }
         Command::Status { txid, offline } => commands::status::run(
             &store,
             network,
-            &services(&config)?,
+            || Ok(services(&config)?),
             txid.as_deref(),
             offline,
             json,
@@ -91,7 +90,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
             cli::AgentCommand::List => commands::grants::run(&store, network, json),
             cli::AgentCommand::Approve { id, yes } => {
-                commands::approve::run(&store, network, &services(&config)?, &id, yes, json)
+                commands::approve::run(&store, network, || Ok(services(&config)?), &id, yes, json)
             }
             cli::AgentCommand::Dismiss { id } => commands::dismiss::run(&store, network, &id, json),
             cli::AgentCommand::Requests { all, watch } => {
@@ -102,7 +101,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
             #[cfg(feature = "mcp")]
             cli::AgentCommand::Serve { name } => {
-                mcp::run(&store, &config, network, &name, overrides.clone())
+                mcp::run(&store, network, &name, overrides.clone())
             }
         },
         Command::Alkanes { command } => match command {

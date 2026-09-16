@@ -15,7 +15,7 @@ use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
 use zeroize::Zeroizing;
 
-use crate::config::{Config, network_name};
+use crate::config::network_name;
 use crate::store::{Store, now_checked, unix_now};
 use crate::ui;
 use crate::walletd;
@@ -24,7 +24,6 @@ use self::server::TOKEN_ENV;
 
 pub fn run(
     store: &Store,
-    config: &Config,
     network: Network,
     agent: &str,
     providers: Vec<crate::provider::CliProvider>,
@@ -59,9 +58,9 @@ pub fn run(
              sats agent grant {agent} --budget <sats>"
         );
     }
-    // The wallet must exist, and the provider config must resolve.
+    // The wallet must exist. Provider selection belongs to chain-reading tools;
+    // local filing and observation do not need a usable chain provider.
     walletd::open(store, network)?;
-    crate::provider::resolve(config, &providers, network)?;
     // stdout is the MCP transport; all logging goes to stderr.
     eprintln!(
         "sats agent serve: agent {agent:?} on {net_name} — {} sat remaining, expires in {}",

@@ -478,8 +478,16 @@ precedence, authentication, and command-line overrides.
 
 ## Exit and failure behavior
 
+Local commands and `balance`, `history`, and `status` with `--offline` do not
+resolve providers. They remain available when provider selection is ambiguous;
+malformed configuration still fails at startup. Approval checks the request's
+state and bound grant before resolving providers, so a settled or revoked
+request is refused without requiring a usable chain provider.
+
 Command failures print a diagnostic to stderr and exit non-zero. Balance,
 status, and history are the intentionally tolerant chain-read commands: when
 sync fails without `--offline`, they report cached state with a stderr
 warning (`synced: false` for balance). Planning, signing, provider
 validation, and broadcast failures remain hard failures.
+Invalid or ambiguous provider selection is a hard failure for online operations,
+not a reason to fall back to offline output.

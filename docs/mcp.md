@@ -46,11 +46,12 @@ At startup the server verifies:
 
 - the named grant exists and has not expired;
 - `SATS_AGENT_TOKEN` is present and matches that grant;
-- the selected network wallet exists;
-- provider configuration resolves without ambiguity.
+- the selected network wallet exists.
 
-Authentication, wallet, or configuration failure is reported before the client
-begins a conversation, at `claude mcp add` time rather than mid-conversation.
+Malformed configuration, authentication, and missing-wallet errors are reported
+before serving. Provider selection is deferred until `get_balance` needs chain
+access. Ambiguous providers do not block startup, request filing or observation,
+grant inspection, or address creation.
 
 ## Tool surface
 
@@ -66,7 +67,8 @@ Syncs the wallet through the configured provider and returns:
 ```
 
 `synced: false` means the chain could not be reached and the value is from
-cache.
+cache. Invalid or ambiguous provider selection returns an error instead of a
+cached balance.
 
 ### `get_receive_address`
 

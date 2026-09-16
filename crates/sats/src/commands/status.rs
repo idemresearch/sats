@@ -85,13 +85,13 @@ fn entry_json(record: &TransactionRecord, state: &ChainState) -> serde_json::Val
 pub fn run(
     store: &Store,
     network: Network,
-    services: &Services,
+    resolve_services: impl FnOnce() -> Result<Services>,
     txid: Option<&str>,
     offline: bool,
     json: bool,
 ) -> Result<()> {
     let mut ctx = walletd::open(store, network)?;
-    if !offline && let Err(err) = services.sync_wallet(&mut ctx) {
+    if !offline && let Err(err) = resolve_services()?.sync_wallet(&mut ctx) {
         eprintln!("✗ sync failed — confirmation state may be stale ({err:#})");
     }
 

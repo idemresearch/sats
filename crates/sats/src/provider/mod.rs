@@ -236,7 +236,7 @@ pub struct Services {
 }
 
 /// Resolve the provider set for `network` from CLI overrides and config.
-/// Pure: no network IO, so it is also the startup validation path.
+/// Pure: no network IO. Call when a workflow reaches chain-dependent work.
 pub fn resolve(
     config: &Config,
     cli: &[CliProvider],

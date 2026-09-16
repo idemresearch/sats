@@ -17,12 +17,12 @@ use crate::{keys, ui};
 pub fn run(
     store: &Store,
     network: Network,
-    services: &Services,
+    resolve_services: impl FnOnce() -> Result<Services>,
     id_or_prefix: &str,
     yes: bool,
     json: bool,
 ) -> Result<()> {
-    let staged = match execute::stage(store, network, services, id_or_prefix)? {
+    let staged = match execute::stage(store, network, resolve_services, id_or_prefix)? {
         Stage::Ready(staged) => staged,
         Stage::Denied(request, reason) => return report_denied(&request.id, &reason, json),
     };
@@ -83,7 +83,7 @@ pub fn run(
     // the signer. Nothing derived from it is written anywhere.
     let mnemonic = keys::unlock(store)?;
     let request_id = staged.request.id.clone();
-    let outcome = execute::commit(store, network, services, *staged, move || {
+    let outcome = execute::commit(store, network, *staged, move || {
         Ok(Box::new(LocalSigner::new(mnemonic, network)))
     })?;
 

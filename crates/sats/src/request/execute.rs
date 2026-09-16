@@ -64,6 +64,8 @@ pub struct Staged {
     pub spend: SpendRequest,
     prepared: PreparedSpend,
     ctx: WalletCtx,
+    /// Resolved after the local prechecks; the same selection serves broadcast.
+    services: Services,
     _claim: RequestClaim,
 }
 
@@ -111,7 +113,8 @@ pub enum Outcome {
 /// `signing` record is reconciled first, and the grant's reservation
 /// ledger is settled so an orphaned draw from an earlier attempt is
 /// returned before the budget is checked. The grant on file must be the
-/// instance that created the request. Preparation runs on the human's
+/// instance that created the request. Providers are resolved only after
+/// these local checks pass. Preparation runs on the human's
 /// side of the boundary with no safety bypasses. Operational failures
 /// (sync, guards, fee estimation) leave the request untouched so the
 /// human can try again; a mismatch between the prepared transaction and
@@ -119,7 +122,7 @@ pub enum Outcome {
 pub fn stage(
     store: &Store,
     network: Network,
-    services: &Services,
+    resolve_services: impl FnOnce() -> Result<Services>,
     id_or_prefix: &str,
 ) -> Result<Stage> {
     let net_name = network_name(network);
@@ -171,7 +174,8 @@ pub fn stage(
     let mut ctx = walletd::open(store, network)?;
     let prepare_request =
         prepare::PrepareRequest::for_agent(&request.recipient, request.amount_sat);
-    let prepared = prepare::build(&mut ctx, services, &prepare_request)?;
+    let services = resolve_services()?;
+    let prepared = prepare::build(&mut ctx, &services, &prepare_request)?;
     ctx.persist()?;
 
     // What this transaction actually does, per our own descriptors. The
@@ -217,6 +221,7 @@ pub fn stage(
         spend,
         prepared,
         ctx,
+        services,
         _claim: claim,
     })))
 }
@@ -230,11 +235,10 @@ pub fn stage(
 pub fn commit(
     store: &Store,
     network: Network,
-    services: &Services,
     staged: Staged,
     make_signer: impl FnOnce() -> Result<Box<dyn Signer>>,
 ) -> Result<Outcome> {
-    commit_inner(store, network, services, staged, make_signer, &|_| Ok(()))
+    commit_inner(store, network, staged, make_signer, &|_| Ok(()))
 }
 
 /// [`commit`] with a crash seam. `crash` is consulted at each named
@@ -244,7 +248,6 @@ pub fn commit(
 fn commit_inner(
     store: &Store,
     network: Network,
-    services: &Services,
     staged: Staged,
     make_signer: impl FnOnce() -> Result<Box<dyn Signer>>,
     crash: &dyn Fn(&str) -> Result<()>,
@@ -255,6 +258,7 @@ fn commit_inner(
         spend,
         prepared,
         mut ctx,
+        services,
         _claim,
         ..
     } = staged;
@@ -438,7 +442,7 @@ fn commit_inner(
     // Broadcast outside the lock: a slow provider must not stall the
     // wallet. A failure is never a refund.
     let mut record = record;
-    match crate::spend::broadcast_record(store, &mut ctx, services, &mut record) {
+    match crate::spend::broadcast_record(store, &mut ctx, &services, &mut record) {
         Ok(txid) => {
             let txid = txid.to_string();
             settle(
@@ -933,21 +937,15 @@ mod tests {
         make_signer: impl FnOnce() -> Result<Box<dyn Signer>>,
         point: &str,
     ) -> Result<Outcome> {
-        let services = fx.services();
-        match stage(&fx.store, Network::Signet, &services, id)? {
-            Stage::Ready(staged) => commit_inner(
-                &fx.store,
-                Network::Signet,
-                &services,
-                *staged,
-                make_signer,
-                &|label| {
+        match stage(&fx.store, Network::Signet, || Ok(fx.services()), id)? {
+            Stage::Ready(staged) => {
+                commit_inner(&fx.store, Network::Signet, *staged, make_signer, &|label| {
                     if label == point {
                         bail!("simulated crash at {label}")
                     }
                     Ok(())
-                },
-            ),
+                })
+            }
             Stage::Denied(_, reason) => Ok(Outcome::Denied(reason)),
         }
     }
@@ -1699,8 +1697,8 @@ mod tests {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
         let id = fx.create(&token, "pay", 10_000).id;
-        let services = fx.services();
-        let Stage::Ready(staged) = stage(&fx.store, Network::Signet, &services, &id).unwrap()
+        let Stage::Ready(staged) =
+            stage(&fx.store, Network::Signet, || Ok(fx.services()), &id).unwrap()
         else {
             panic!("expected ready");
         };
@@ -1718,14 +1716,7 @@ mod tests {
             fx.store.save_grant("signet", &grant).unwrap();
         }
         let probe = SignerProbe::default();
-        let outcome = commit(
-            &fx.store,
-            Network::Signet,
-            &services,
-            *staged,
-            probe.factory(),
-        )
-        .unwrap();
+        let outcome = commit(&fx.store, Network::Signet, *staged, probe.factory()).unwrap();
         let (_, fee_sat) = sent(outcome);
         let grant = fx.grant_state();
         assert_eq!(grant.spent_sat, 10_000 + fee_sat);
@@ -2092,8 +2083,8 @@ mod tests {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
         let id = fx.create(&token, "pay", 10_000).id;
-        let services = fx.services();
-        let Stage::Ready(staged) = stage(&fx.store, Network::Signet, &services, &id).unwrap()
+        let Stage::Ready(staged) =
+            stage(&fx.store, Network::Signet, || Ok(fx.services()), &id).unwrap()
         else {
             panic!("expected ready");
         };
@@ -2104,14 +2095,7 @@ mod tests {
             fx.store.save_grant("signet", &grant).unwrap();
         }
         let probe = SignerProbe::default();
-        let outcome = commit(
-            &fx.store,
-            Network::Signet,
-            &services,
-            *staged,
-            probe.factory(),
-        )
-        .unwrap();
+        let outcome = commit(&fx.store, Network::Signet, *staged, probe.factory()).unwrap();
         assert_eq!(outcome, Outcome::Denied(DenyReason::ObserveOnly));
         assert_eq!(probe.counts(), (0, 0));
         assert_eq!(fx.request(&id).status(), "denied");
