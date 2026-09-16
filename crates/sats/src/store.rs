@@ -499,10 +499,13 @@ impl Store {
             .agent_requests_dir(network)
             .join(agent_component(agent)?)
             .join(format!("{}.json", request_id_component(id)?));
-        if !path.exists() {
-            return Ok(None);
-        }
-        let bytes = fs::read(&path)?;
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(err).with_context(|| format!("cannot read request {}", path.display()));
+            }
+        };
         let request: AgentRequest = serde_json::from_slice(&bytes)
             .with_context(|| format!("corrupt agent request {}", path.display()))?;
         Ok(Some(request))

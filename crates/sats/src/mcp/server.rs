@@ -519,7 +519,16 @@ fn check_request_record(
         Ok(None) => RequestView::not_found(format!(
             "no request {raw_id:?} recorded for agent {agent:?}"
         )),
-        Err(e) => RequestView::not_found(format!("cannot read request: {e:#}")),
+        Err(e) => {
+            let mut view = RequestView::error(
+                "store_error",
+                format!(
+                    "cannot read request: {e:#} — ask the human to inspect it; do not file a replacement"
+                ),
+            );
+            view.request_id = Some(raw_id.to_string());
+            view
+        }
     }
 }
 
@@ -545,5 +554,51 @@ impl ServerHandler for SatsMcp {
             self.agent,
             network_name(self.network),
         ))
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    const ID: &str = "r-0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn unreadable_request_is_a_store_error_with_its_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let requests = store.agent_requests_dir("signet").join("alice");
+        std::fs::create_dir_all(&requests).unwrap();
+        let path = requests.join(format!("{ID}.json"));
+        // Corrupt bytes and an unreadable record (directory) both remain errors.
+        std::fs::write(&path, b"{").unwrap();
+        for corrupt in [true, false] {
+            if !corrupt {
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
+            }
+            let view = check_request_record(&store, "signet", "alice", ID);
+            assert_eq!(view.status, "error");
+            assert_eq!(view.error_code.as_deref(), Some("store_error"));
+            assert_eq!(view.request_id.as_deref(), Some(ID));
+            assert!(view.message.contains("do not file a replacement"));
+            // Visibility remains scoped to the authenticated agent.
+            assert_eq!(
+                check_request_record(&store, "signet", "bob", ID).status,
+                "not_found"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_and_malformed_requests_still_have_absence_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        for id in [ID, "../../other", "my-idempotency-key"] {
+            let view = check_request_record(&store, "signet", "alice", id);
+            assert_eq!(view.status, "not_found");
+            assert!(view.error_code.is_none());
+        }
+        assert!(!store.agent_requests_dir("signet").exists());
     }
 }
