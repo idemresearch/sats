@@ -120,7 +120,7 @@ pub fn run(
     // unseals is held by this process from here until the signer is
     // dropped: captured by the factory closure, which the executor
     // invokes only after the reservation is durable, and zeroized with
-    // the signer. Nothing derived from it is written anywhere.
+    // the signer. The seed and private descriptors are never persisted.
     let mnemonic = keys::unlock(store)?;
     let request_id = staged.request.id.clone();
     let outcome = execute::commit(store, network, *staged, move || {

@@ -243,7 +243,8 @@ fn guard_failure_stops_planning() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     let mockdata = write_mock_provider(&dir);
-    // A configured guard that cannot answer must stop planning.
+    common::fund_wallet(&dir, &[100_000]);
+    // A configured guard that cannot answer must stop planning with candidates.
     std::fs::remove_file(mockdata.join("guard.json")).unwrap();
     sats(&dir)
         .args([
@@ -267,8 +268,8 @@ fn no_guards_flag_skips_the_asset_check() {
     init_wallet(&dir);
     let mockdata = write_mock_provider(&dir);
     std::fs::remove_file(mockdata.join("guard.json")).unwrap();
-    // With the explicit escape the pipeline proceeds past the guard and
-    // fails for the ordinary reason: an empty wallet.
+    common::fund_wallet(&dir, &[100_000]);
+    // With candidates and the explicit escape, preparation skips the guard.
     sats(&dir)
         .args([
             "send",
@@ -280,8 +281,7 @@ fn no_guards_flag_skips_the_asset_check() {
             "--no-guards",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("Insufficient funds"));
+        .success();
 }
 
 #[test]
@@ -417,7 +417,6 @@ fn provider_resolution_is_only_required_for_online_commands() {
         vec!["status", "--json"],
         vec!["status", &txid, "--json"],
         vec!["send", common::ADDRESS, "5000", "--dry-run"],
-        vec!["tx", "broadcast", &txid],
         vec!["agent", "approve", "r-pending", "--yes"],
     ] {
         sats(&dir)
@@ -427,7 +426,21 @@ fn provider_resolution_is_only_required_for_online_commands() {
             .stderr(predicate::str::contains("multiple chain.sync providers"))
             .stderr(predicate::str::contains("invalid config").not());
     }
-    assert_eq!(request_json(&dir, "r-pending"), request_before);
+    let attempted = request_json(&dir, "r-pending");
+    assert_eq!(attempted["status"], "failed");
+    assert_eq!(attempted["intent_digest"], request_before["intent_digest"]);
+    assert!(
+        attempted["message"]
+            .as_str()
+            .unwrap()
+            .contains("multiple chain.sync providers")
+    );
+    // An unsaved incoming txid fails locally, before provider selection.
+    sats(&dir)
+        .args(["tx", "broadcast", &txid])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no transaction"));
     assert_eq!(std::fs::read(grant_path).unwrap(), grant_before);
     assert!(!dir.path().join("signet/transactions").exists());
     common::assert_no_provider_calls(&servers);
@@ -889,7 +902,7 @@ fn agent_requests_lists_pending_requests() {
         .success()
         .stdout(predicate::str::contains("r-pay-1"))
         .stdout(predicate::str::contains("pending_approval"))
-        .stdout(predicate::str::contains("sats agent approve <id>"));
+        .stdout(predicate::str::contains("sats agent approve"));
     sats(&dir)
         .args(["agent", "requests", "--all"])
         .assert()
@@ -1756,4 +1769,53 @@ fn dismiss_declines_a_pending_request() {
     );
     assert_eq!(log.as_array().unwrap().len(), 1);
     assert_eq!(log[0]["event"], "dismissed");
+}
+
+#[test]
+fn pending_saved_transaction_requires_providers_but_receipt_repair_does_not() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    write_mock_provider(&dir);
+    common::fund_wallet(&dir, &[100_000]);
+    let artifact = dir.path().join("unsigned.psbt");
+    sats(&dir)
+        .args([
+            "send",
+            common::ADDRESS,
+            "5000",
+            "--fee-rate",
+            "2",
+            "--export-psbt",
+        ])
+        .arg(&artifact)
+        .assert()
+        .success();
+    let signed = json_stdout(
+        sats(&dir)
+            .args(["psbt", "sign"])
+            .arg(&artifact)
+            .arg("--json")
+            .assert()
+            .success(),
+    );
+    let txid = signed["txid"].as_str().unwrap();
+    let record_path = dir.path().join(format!("signet/transactions/{txid}.json"));
+    let before = std::fs::read(&record_path).unwrap();
+    let servers = common::write_ambiguous_providers(&dir);
+    sats(&dir)
+        .env_remove("SATS_PASSWORD")
+        .args(["tx", "broadcast", txid])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("multiple chain.sync providers"));
+    assert_eq!(std::fs::read(&record_path).unwrap(), before);
+    let mut record: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    record["status"] = "broadcast".into();
+    std::fs::write(&record_path, record.to_string()).unwrap();
+    sats(&dir)
+        .env_remove("SATS_PASSWORD")
+        .args(["tx", "broadcast", txid])
+        .assert()
+        .success();
+    common::assert_no_provider_calls(&servers);
 }

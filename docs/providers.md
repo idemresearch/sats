@@ -161,12 +161,15 @@ url = "https://signet.subfrost.io/v4/jsonrpc"
 api_key = "replace-with-key"
 ```
 
-Keep configuration permissions restrictive. Authentication values are never
-displayed. Subfrost URLs are redacted to their origin because older setups may
-carry a key in the path, but new configurations should use the provider's
-direct `api_key` field.
-Esplora endpoint URLs may appear in diagnostics, so put credentials in
-`auth.bearer`, never in the URL path or query.
+Keep configuration permissions restrictive. Both Esplora and Subfrost expose
+only a safe URL origin in diagnostics and Debug output: user-info, arbitrary
+paths, queries, and fragments are omitted. Untrusted response bodies and
+nested error strings are replaced with safe operation categories and HTTP/RPC
+codes. This also applies to persisted preparation diagnostics.
+
+Network requests retain the configured endpoint and credentials. Use
+`auth.bearer` for Esplora (reads and broadcast), and the direct `api_key` field
+for Subfrost. Credentials are never added to generated MCP connection commands.
 
 ## Resolution precedence
 

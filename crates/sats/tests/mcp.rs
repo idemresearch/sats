@@ -55,7 +55,7 @@ fn sats_json(dir: &TempDir, args: &[&str]) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).expect("json stdout")
 }
 
-/// The server request id a `request_send` result carries: `r-` plus 16
+/// The server request id a `request_send` result carries: `r-` plus 32
 /// hex characters, the only handle a human approves or dismisses by.
 fn id_of(view: &serde_json::Value) -> String {
     let id = view["request_id"]
@@ -980,15 +980,10 @@ fn assert_sync_timeout(driver: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("stale state"), "got: {stderr}");
     assert!(started.elapsed() < std::time::Duration::from_secs(45));
-    if driver == "subfrost" {
-        assert!(!stderr.contains("PRIVATE_PATH_KEY"), "got: {stderr}");
-    }
+    assert!(!stderr.contains("PRIVATE_PATH_KEY"), "got: {stderr}");
     assert_eq!(http.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert_eq!(event_kinds(&dir), ["request_received"]);
-    assert_eq!(
-        request_record(&dir, "claude", &id)["status"],
-        "pending_approval"
-    );
+    assert_eq!(event_kinds(&dir), ["request_received", "failed"]);
+    assert_eq!(request_record(&dir, "claude", &id)["status"], "failed");
     assert_eq!(spent_sat(&dir), 0);
 }
 
@@ -1021,10 +1016,7 @@ fn esplora_retryable_get_is_limited_to_two_retries() {
     let output = sats_output(&dir, &["agent", "approve", &id, "--yes"]);
     assert!(!output.status.success());
     assert_eq!(http.requests.load(std::sync::atomic::Ordering::SeqCst), 3);
-    assert_eq!(
-        request_record(&dir, "claude", &id)["status"],
-        "pending_approval"
-    );
+    assert_eq!(request_record(&dir, "claude", &id)["status"], "failed");
     assert_eq!(spent_sat(&dir), 0);
 }
 
@@ -1063,4 +1055,79 @@ fn broadcast_timeout_keeps_signed_transaction_and_reserved_budget() {
     assert_eq!(view["status"], "broadcast_pending");
     assert_eq!(view["txid"], txid);
     assert_eq!(http.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn preparation_receipts_redact_provider_secrets_and_observation_stays_local() {
+    for driver in ["esplora", "subfrost"] {
+        let dir = TempDir::new().unwrap();
+        let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+        let mut mcp = McpSession::start(&dir, "claude", &fx.token);
+        handshake(&mut mcp);
+        let filed = mcp.request_send(2, 1_000, "one-filing");
+        let id = id_of(&filed);
+        let http = common::HttpServer::start(|_| {
+            Some((401, "PATHSECRET QUERYSECRET BEARERSECRET USERSECRET".into()))
+        });
+        with_http_provider(
+            &dir,
+            driver,
+            &format!("{}/PATHSECRET?unknown=QUERYSECRET", http.url),
+            "chain.sync",
+        );
+        let config_path = dir.path().join("config.toml");
+        let mut config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        let provider = config["providers"]["http"].as_table_mut().unwrap();
+        if driver == "esplora" {
+            provider.insert(
+                "auth".into(),
+                toml::Value::try_from(serde_json::json!({"bearer":"BEARERSECRET"})).unwrap(),
+            );
+        } else {
+            provider.insert("api_key".into(), "BEARERSECRET".into());
+        }
+        std::fs::write(config_path, toml::to_string(&config).unwrap()).unwrap();
+        let output = sats_output(&dir, &["agent", "approve", &id, "--yes"]);
+        assert!(!output.status.success());
+        let request_path = dir
+            .path()
+            .join(format!("signet/agent-requests/claude/{id}.json"));
+        let grant_path = dir.path().join("signet/grants/claude.json");
+        let events_path = dir.path().join("signet/events/log.jsonl");
+        let before: Vec<_> = [&request_path, &grant_path, &events_path]
+            .iter()
+            .map(|p| std::fs::read(p).unwrap())
+            .collect();
+        for sequence in [3, 4] {
+            let observed = mcp.check_request(sequence, &id);
+            assert_eq!(observed["status"], "failed");
+            assert_eq!(observed["request_id"], id);
+            let rendered = format!(
+                "{} {} {} {}",
+                String::from_utf8_lossy(&output.stderr),
+                observed,
+                String::from_utf8_lossy(&before[0]),
+                String::from_utf8_lossy(&before[2])
+            );
+            for secret in ["PATHSECRET", "QUERYSECRET", "BEARERSECRET", "USERSECRET"] {
+                assert!(!rendered.contains(secret), "{rendered}");
+            }
+        }
+        for (path, contents) in [&request_path, &grant_path, &events_path]
+            .iter()
+            .zip(before)
+        {
+            assert_eq!(std::fs::read(path).unwrap(), contents);
+        }
+        assert_eq!(http.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(spent_sat(&dir), 0);
+        assert_eq!(event_kinds(&dir), ["request_received", "failed"]);
+        std::fs::write(&request_path, "{").unwrap();
+        let corrupt = mcp.check_request(5, &id);
+        assert_eq!(corrupt["status"], "error");
+        assert_eq!(corrupt["error_code"], "store_error");
+        assert_eq!(corrupt["request_id"], id);
+        assert_eq!(http.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 }

@@ -4,24 +4,38 @@
 //! dialect is the Subfrost driver's (unverified against a live endpoint —
 //! see the in-source dialect note), so results are interpreted tolerantly
 //! and always displayed verbatim. Execution is human-only: simulate,
-//! show, confirm, password-sign — and refuses mainnet in this release.
+//! show, confirm, password-sign — and refuses mainnet. Execution is excluded
+//! from default v0.0.1 builds; its source is retained for explicit development builds.
 
+#[cfg(feature = "experimental-alkanes-execute")]
 use std::collections::BTreeSet;
 
-use anyhow::{Context, Result, anyhow, bail};
+#[cfg(feature = "experimental-alkanes-execute")]
+use anyhow::{Context, bail};
+use anyhow::{Result, anyhow};
+#[cfg(feature = "experimental-alkanes-execute")]
 use sats_alkanes::build::build_execute_plan;
+#[cfg(feature = "experimental-alkanes-execute")]
 use sats_alkanes::call::AlkaneCall;
-use sats_alkanes::delta::{SimulationView, parse_simulation};
+#[cfg(feature = "experimental-alkanes-execute")]
+use sats_alkanes::delta::SimulationView;
+use sats_alkanes::delta::parse_simulation;
 use sats_alkanes::id::AlkaneId;
 use sats_alkanes::inspect::code_hash;
+#[cfg(feature = "experimental-alkanes-execute")]
 use sats_core::bitcoin::{Amount, FeeRate, Network, OutPoint};
 use sats_core::fmt::format_sats;
+#[cfg(feature = "experimental-alkanes-execute")]
 use sats_core::plan::TxOrigin;
+#[cfg(feature = "experimental-alkanes-execute")]
 use sats_core::{bdk_wallet::KeychainKind, engine};
 
 use crate::provider::Services;
+#[cfg(feature = "experimental-alkanes-execute")]
 use crate::store::{Store, unix_now};
-use crate::{keys, spend, ui, walletd};
+use crate::ui;
+#[cfg(feature = "experimental-alkanes-execute")]
+use crate::{keys, spend, walletd};
 
 fn parse_id(id: &str) -> Result<AlkaneId> {
     id.parse::<AlkaneId>().map_err(|e| anyhow!(e))
@@ -100,6 +114,7 @@ pub fn simulate(services: &Services, id: &str, inputs: &[u128], json: bool) -> R
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "experimental-alkanes-execute")]
 pub fn execute(
     store: &Store,
     network: Network,
@@ -242,6 +257,7 @@ pub fn execute(
     }
 }
 
+#[cfg(feature = "experimental-alkanes-execute")]
 fn print_transfers(view: &SimulationView) {
     for transfer in &view.transfers {
         println!("  → {} of alkane {}", transfer.value, transfer.id);

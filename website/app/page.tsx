@@ -16,7 +16,7 @@ const agentCommands = [
   "sats agent grant claude \\",
   "  --budget 50k --for 24h",
   "sats agent requests --watch",
-  "sats agent approve k-invoice-1",
+  "sats agent approve",
 ];
 
 export default function Home() {
@@ -36,7 +36,7 @@ export default function Home() {
 
         <p className="hero-copy">
           A small, native wallet that lives in your terminal. Spend directly,
-          or let an AI agent ask: it prepares payments inside a budget you
+          or let an AI agent ask: it proposes payments inside a budget you
           set, and every send waits for your approval. AI asks. You approve.
           Keys stay yours.
         </p>
@@ -161,8 +161,8 @@ export default function Home() {
           <article>
             <h3>Watch-only at rest</h3>
             <p>
-              SQLite stores public descriptors. The seed stays sealed with
-              Argon2id and XChaCha20-Poly1305.
+              SQLite stores public descriptors. The seed is sealed at rest with
+              Argon2id and XChaCha20-Poly1305; human operations temporarily decrypt it.
             </p>
           </article>
           <article>
@@ -189,7 +189,7 @@ export default function Home() {
       <section className="engine" aria-labelledby="engine-title">
         <p className="section-kicker">Portable core</p>
         <h2 id="engine-title">
-          The same transaction engine runs the CLI, the MCP server, and this
+          One portable core supports the CLI, the MCP request tools, and this
           playground.
         </h2>
         <p>

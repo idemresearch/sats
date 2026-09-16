@@ -41,13 +41,39 @@ def write_record(record):
 
 
 def grant():
-    return cli_json("agent", "grant", "claude", "--budget", "50000")["token"]
+    output = cli("agent", "grant", "claude", "--budget", "50000").stdout.decode()
+    return next(line.strip() for line in output.splitlines()
+                if line.strip().startswith("claude mcp add "))
+
+
+# Execute the exact printed POSIX connection through a minimal Claude launcher.
+# Its environment and cwd deliberately disagree with the grant's wallet.
+LAUNCHERS = ROOT / "fixture launchers"
+LAUNCHERS.mkdir()
+(LAUNCHERS / "sats").symlink_to(BINARY)
+(LAUNCHERS / "claude").write_text("""#!/bin/sh
+set -eu
+test "$1" = mcp && test "$2" = add && test "$3" = sats
+shift 3
+test "$1" = --env
+shift
+export "$1"
+shift
+test "$1" = --
+shift
+exec "$@"
+""")
+(LAUNCHERS / "claude").chmod(0o700)
+OTHER_CWD = ROOT / "another working directory"
+OTHER_CWD.mkdir()
 
 
 class MCP:
-    def __init__(self, token):
-        self.proc = subprocess.Popen([BINARY, "agent", "serve", "claude"],
-                                     env=dict(ENV, SATS_AGENT_TOKEN=token),
+    def __init__(self, connection_command):
+        self.proc = subprocess.Popen(["/bin/sh", "-c", "exec " + connection_command],
+                                     cwd=OTHER_CWD,
+                                     env=dict(ENV, SATS_DIR=str(OTHER_CWD),
+                                              PATH=str(LAUNCHERS) + os.pathsep + ENV.get("PATH", "")),
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.PIPE)
         self.sequence = 0
@@ -160,6 +186,7 @@ def unchanged(request_id, status="pending_approval"):
     assert policy["spent_sat"] == 0 and policy.get("reservations", []) == [], policy
 
 
+assert cli_json("receive")["address"].startswith("tb1p")
 mcp = MCP(grant())
 try:
     # Empty, refresh, bounded wait, and cancellation remain provider-free even
@@ -316,16 +343,16 @@ try:
         stale_grant.wait_for("q cancel: ")
         cli("agent", "revoke", "claude")
         if replacement:
-            next_token = grant()
+            next_connection = grant()
         stale_grant.choose(pending_id)
         denied = json.loads(stale_grant.finish())
         assert denied["status"] == "denied", denied
         assert "password:" not in stale_grant.transcript()
         if not replacement:
-            next_token = grant()
+            next_connection = grant()
         mcp.close()
-        mcp = MCP(next_token)
-    print("terminal approval scenarios passed")
+        mcp = MCP(next_connection)
+    print("generated connection and terminal approval scenarios passed; one signature and one budget draw")
 finally:
     for terminal in TERMINALS:
         if terminal.proc.poll() is None:

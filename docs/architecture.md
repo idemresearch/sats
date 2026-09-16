@@ -23,8 +23,9 @@ flowchart TD
 ```
 
 A human send unlocks the seed for the duration of one command. An agent
-cannot sign at all: the served process writes a request record and
-nothing else. `sats agent approve` prepares the transaction, derives what
+cannot sign at all: for a payment, the served process files a request. Its
+other tools read or sync watch-only state and reveal receive addresses.
+`sats agent approve` prepares the transaction, derives what
 it pays from the wallet's descriptors, re-checks the grant with the real
 fee, takes the human's password, reserves the budget, signs, persists, and
 broadcasts — in the human's process, for exactly one request.
@@ -84,7 +85,8 @@ Pure Alkanes protocol composition: alkane ids, LEB128 varints, cellpack
 call encoding, the protostone/runestone OP_RETURN envelope, bytecode
 code-hashing, and tolerant simulation-result views. Byte encodings are
 derived from the published alkanes-rs reference and frozen by unit
-vectors. Environment-agnostic like `sats-core`: chain access, funding,
+vectors. The default v0.0.1 CLI exposes inspection and simulation only;
+execution source is gated behind a non-default development feature. Environment-agnostic like `sats-core`: chain access, funding,
 and signing stay with the `sats` crate.
 
 ### `sats-web`
@@ -146,10 +148,11 @@ sequenceDiagram
     C->>S: mark transaction broadcast
 ```
 
-The shared preparation pipeline validates the address before network I/O, syncs
-the wallet, builds the union of dust and configured-guard exclusions,
-estimates the fee when none was supplied, and asks `sats-core` to build the
-PSBT. Preparation fails rather than using stale state after a sync failure.
+The shared preparation pipeline validates the address before network I/O and
+freshly syncs the wallet. An empty wallet returns funding guidance before
+guard or fee calls. Otherwise it builds the union of dust and configured-guard
+exclusions; fully protected funds stop before fee estimation. Remaining
+candidates receive fee estimation and `sats-core` PSBT preparation. Preparation fails rather than using stale state after a sync failure.
 
 The prepared PSBT stays in memory during a normal send. After finalization,
 sats writes private raw transaction hex before any broadcast attempt. A
@@ -166,11 +169,11 @@ sequenceDiagram
     participant M as MCP server
     participant S as Store
     participant H as Human (CLI)
-    A->>M: request_send(address, amount, request_id)
+    A->>M: request_send(address, amount_sat, idempotency_key)
     M->>S: verify token, canonical intent, ladder (fee unknown)
     S-->>M: pending_approval (or denied)
     M-->>A: request_id + status
-    H->>H: sats agent requests --watch shows the request
+    H->>H: sats agent approve selects the request for review
     A->>M: check_request until it settles
 ```
 
@@ -183,11 +186,11 @@ sequenceDiagram
     participant P as Providers
     participant E as Core
     participant S as Store
-    H->>C: sats agent approve <id>
+    H->>C: sats agent approve (or an explicit id)
     C->>S: claim the request, re-check the grant (fee unknown)
     C->>P: sync, guards, fee estimate
     C->>E: prepare PSBT; derive what it pays; ladder with the real fee
-    C-->>H: recipient, amount, fee, total; password
+    C-->>H: wallet, network, recipient, amount, fee, total; confirmation and password
     C->>S: under the grant lock: check the grant instance, reserve budget, then record signing
     C->>E: construct the signer, sign, finalize
     C->>S: save the attributed transaction (before broadcast)
@@ -212,14 +215,26 @@ A `signing` record left by a dead process is reconciled by the next
 listing or approve from the durable truth: a transaction attributed to
 the request (`origin` agent, request id, and intent digest all match)
 means `broadcast_pending` or `sent`; none means `unresolved`, with
-nothing refunded. The ledger is reconciled the same way: a draw whose
+nothing refunded. MCP observation only probes the existing execution lock:
+it reports active execution or required human reconciliation without changing
+records or contacting a provider. The ledger is reconciled the same way: a draw whose
 request is `pending_approval`, `failed`, or `denied` was orphaned by a
 crash before `signing` or before the refund reached disk and is
 returned once; every other draw stays.
 
-Every transition — received, denied, approved, dismissed, reserved,
-signed, broadcast, refunded, failed — appends to the per-network event
-log. Finalized transactions carry an `origin` naming the surface, agent,
+Preparation failures are recorded as `failed` before any signer invocation,
+with a locked reread that cannot overwrite an uncertain or settled execution.
+A successful broadcast whose receipt write failed can be repaired by human
+listing or `sats tx broadcast <txid>`. An already-broadcast saved record needs
+no provider, second signature, or additional budget draw for that repair.
+Transaction status reports chain observations even for locally pending records,
+and JSON distinguishes fresh, offline, and failed synchronization.
+
+Transitions — received, denied, approved, dismissed, reserved, signed,
+broadcast, refunded, failed — are journaled to the per-network event log.
+Some recovery and post-signing journal failures produce warnings; recovery
+uses durable request, grant, and transaction records rather than assuming
+the event log is complete. Finalized transactions carry an `origin` naming the surface, agent,
 request, and canonical intent digest.
 
 ## Provider model

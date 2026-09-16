@@ -13,9 +13,11 @@ path = "src/main.rs"
 
 [features]
 default = ["mcp"]
-# The `sats mcp` agent server (rmcp + tokio). Disable for a smaller
+# The `sats agent serve` MCP server (rmcp + tokio). Disable for a smaller
 # human-only binary: cargo install --no-default-features
 mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
+# Development-only execution path; excluded from default v0.0.1 binaries.
+experimental-alkanes-execute = []
 
 [dependencies]
 sats-core = { workspace = true }
@@ -39,7 +41,7 @@ minreq = { workspace = true }
 humantime = { workspace = true }
 hex = { workspace = true }
 zeroize = { workspace = true }
-# Random ids for keyless agent requests.
+# Random grant-instance ids and capability tokens.
 getrandom = { workspace = true }
 
 [dev-dependencies]

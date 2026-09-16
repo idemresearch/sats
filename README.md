@@ -7,8 +7,8 @@
 Run an on-chain wallet from your terminal, or let an AI agent use it
 without giving it your keys: the agent can read the wallet and propose
 payments inside a budget you set, and every agent send waits for your
-one-time approval before a separate process — the only one holding the
-key — signs it. There is no autonomous spend mode: an unapproved agent
+one-time approval. The approving CLI process temporarily unseals the seed
+and signs that request. There is no autonomous spend mode: an unapproved agent
 request can never reach the signer, even if the agent misbehaves.
 
 [Docs](docs/README.md) · [Direction](docs/direction.md) ·
@@ -19,14 +19,15 @@ request can never reach the signer, even if the agent misbehaves.
 > sats is experimental. Signet is the default; use small amounts and short
 > agent grants while evaluating it.
 >
-> Grants created before the signing daemon stored recoverable key material in
-> the grant file. They are now refused rather than honored. If an agent with
+> An obsolete pre-release grant format stored recoverable key material in
+> the grant file. Those grants are refused. If an agent with
 > shell access ever ran while one existed, move the funds to a fresh wallet —
 > see [Security](docs/security.md).
 
 ## Install
 
-Prebuilt binaries are available for macOS and Linux on x86_64 and ARM64:
+For a published release, the installer selects a binary for macOS or Linux
+on x86_64 or ARM64:
 
 ```sh
 curl -fsSL https://sats.sh/setup.sh | sh
@@ -38,7 +39,7 @@ Pin a release or choose another install directory with environment variables:
 
 ```sh
 curl -fsSL https://sats.sh/setup.sh \
-  | SATS_VERSION=0.1.0 SATS_INSTALL_DIR="$HOME/bin" sh
+  | SATS_VERSION=0.0.1 SATS_INSTALL_DIR="$HOME/bin" sh
 ```
 
 To build from a checkout instead:
@@ -89,7 +90,7 @@ Grant an agent the authority to file requests:
 sats agent grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
 # prints, once: SATS_AGENT_TOKEN=<token>
 
-claude mcp add sats --env SATS_AGENT_TOKEN=<token> -- sats agent serve claude
+# Copy the printed claude mcp add command; it pins this wallet and network.
 ```
 
 The rule: **agents create requests, humans authorize requests, sats
@@ -97,7 +98,8 @@ executes requests.** The agent receives five tools: `get_balance`,
 `get_receive_address`, `get_grant`, `request_send`, and `check_request`.
 It can read the wallet and file a request; it cannot approve, unlock,
 sign, or broadcast, and it takes no action after filing. The normal
-result of `request_send` is a pending request —
+result of `request_send(address, amount_sat, idempotency_key)` is a pending
+request. The idempotency key is required —
 
 ```json
 {
@@ -111,9 +113,11 @@ result of `request_send` is a pending request —
 
 You review requests with `sats agent requests` (or stream them with
 `--watch`, a trusted channel that does not rely on the agent relaying its
-own status), and `sats agent approve <id>` executes exactly that one:
-it prepares the transaction, shows you the real fee, takes your password,
-reserves the budget, signs, saves, and broadcasts. The agent observes the
+own status). Run `sats agent approve` in a terminal to select one for review;
+selection alone authorizes nothing. The CLI prepares that exact request and
+shows its recipient, amount, real fee, total, wallet, and network. After
+confirmation and your password, it reserves the budget, signs, saves, and
+broadcasts. The agent observes the
 result with `check_request`. `sats agent dismiss <id>` declines a request.
 `sats agent log` keeps the full causal chain from request through decision
 to transaction.
@@ -124,14 +128,16 @@ or budget — it is refused outright with no approval path, and only
 changing the grant escalates. A `--to` allowlist refuses recipients
 outside it; `--mode observe` makes a grant read-only.
 
-The token names a policy; it opens nothing. No process holds an unsealed
-seed: your password at approval time unseals it for one execution, and
+The token names a policy; it opens nothing. No resident process retains an
+unsealed seed between operations. Human commands can temporarily decrypt it;
+approval unseals it for one execution, and
 sats derives what the transaction actually pays from the PSBT rather than
 believing what it was told.
 
 `sats agent list` shows current authority. `sats agent revoke claude`
-takes effect on the agent's next call, including during an existing MCP
-session. See the [MCP guide](docs/mcp.md) for tool contracts and
+stops new filings in an existing MCP session and blocks approval of requests
+under that grant. Existing sessions retain their read tools; stop the session
+to end those reads. See the [MCP guide](docs/mcp.md) for tool contracts and
 integration details, and [Direction](docs/direction.md) for the trust
 model this implements.
 
@@ -154,11 +160,13 @@ model this implements.
   and the request recorded as signing, before the signer is invoked,
   because a signed transaction is already spendable. A request that
   signed, or may have signed, is never signed again and never refunded;
-  one the signer reports unsigned is refunded. A request executes only
+  a reservation is refunded only when the signer provably was never invoked.
+  A request executes only
   under the grant that created it.
 - Finalized transactions are written privately before broadcast, by the
-  process that signed them, so a crash or lost response cannot strand the
-  only retry copy.
+  process that signed them, so a lost response can be recovered by
+  rebroadcasting saved bytes. Filesystem and power-loss limits are described
+  in the security guide.
 - Planning excludes common inscription postage outputs by default and unions
   those exclusions with every configured asset guard.
 - A configured guard fails closed. Agents cannot use `--allow-dust` or

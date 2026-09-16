@@ -13,6 +13,20 @@ Each archive is published with an individual SHA-256 checksum plus an
 aggregate `SHA256SUMS` file. `setup.sh` consumes the stable per-target asset
 names from either the latest release or a tag selected with `SATS_VERSION`.
 
+## Local release verification
+
+The v0.0.1 package version, CLI `--version`, MCP implementation version, and
+playground version all derive from workspace metadata. Default binaries include
+MCP and exclude Alkanes execution; development feature builds are not release
+artifacts. Run the complete [development gate](development.md), regenerate the
+playground after core changes, and exercise the local request/recovery fixtures
+before publishing.
+
+Local tests use disposable wallets and mock/localhost providers. They do not
+verify live provider dialects, a real Claude installation, or the four packaged
+release archives. Archive contents, per-target checksums, `SHA256SUMS`, and a
+tagged installation must be checked after the workflow produces artifacts.
+
 ## Publish a release
 
 1. Update `workspace.package.version` in `Cargo.toml` and refresh `Cargo.lock`
@@ -23,8 +37,8 @@ names from either the latest release or a tag selected with `SATS_VERSION`.
    ```sh
    git switch main
    git pull --ff-only
-   git tag -a v0.1.0 -m "sats v0.1.0"
-   git push origin v0.1.0
+   git tag -a v0.0.1 -m "sats v0.0.1"
+   git push origin v0.0.1
    ```
 
 The workflow rejects malformed tags and tags whose version does not match
@@ -33,8 +47,9 @@ the four archives.
 
 Re-running a release workflow replaces existing assets, allowing a partially
 failed upload to recover without creating another release. A manual workflow
-dispatch builds and verifies every archive without publishing a GitHub
-release.
+dispatch builds each archive and its individual checksum without publishing a
+GitHub release. Download and verify those artifacts before tagging; aggregate
+checksum verification runs in the publishing job.
 
 ## Verify assets
 

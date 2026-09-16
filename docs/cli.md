@@ -65,7 +65,7 @@ hold the explicit advanced workflows.
 | `sats send <address> <amount>` | Prepare, confirm, sign, privately persist raw finalized transaction hex, then broadcast |
 | `sats send ... --dry-run` | Prepare and price the send, persist nothing |
 | `sats send ... --export-psbt <FILE>` | Write the unsigned PSBT to a private file artifact instead of signing |
-| `sats status [TXID] [--offline]` | Show signed-but-unbroadcast and broadcast transactions with confirmation state |
+| `sats status [TXID] [--offline]` | Show saved transactions with local broadcast status, chain observations, and sync freshness |
 | `sats history [--offline]` | List the wallet's transactions, newest first |
 | `sats psbt inspect <FILE>` | Decode a PSBT file offline: outputs, fee, signing state |
 | `sats psbt sign <FILE> [--out FILE]` | Sign an explicit PSBT artifact |
@@ -76,14 +76,13 @@ hold the explicit advanced workflows.
 | `sats agent allow <name> <addr>` | Add an allowlist recipient (password required) |
 | `sats agent disallow <name> <addr>` | Remove an allowlist recipient (no password) |
 | `sats agent list` | List non-expired grants and remaining budgets |
-| `sats agent requests [--all\|--watch]` | Review agent requests; `--watch` streams newly pending ones |
-| `sats agent approve <id> [-y]` | Authorize and execute one pending request: prepare, review, password, sign, broadcast |
+| `sats agent requests [--all\|--watch]` | Review pending/failed requests and recovery cases; `--watch` streams newly pending ones |
+| `sats agent approve [id] [-y]` | Select a request in a terminal, or supply an explicit id; review, authorize, sign, persist, broadcast |
 | `sats agent dismiss <id>` | Decline a pending request |
 | `sats agent log [--limit N] [--request ID]` | Show the causal event log of agent activity |
 | `sats agent serve <name>` | Serve the agent's wallet tools over MCP stdio: read, file requests, observe |
 | `sats alkanes inspect <BLOCK:TX>` | Fetch a contract's bytecode and show its sha256 code hash |
 | `sats alkanes simulate <BLOCK:TX> <INPUTS...>` | Simulate a contract call and show the interpreted result |
-| `sats alkanes execute <BLOCK:TX> <INPUTS...>` | Simulate, confirm, sign, and broadcast a contract call (refuses mainnet) |
 
 ## Global flags
 
@@ -120,10 +119,13 @@ sats send <address> <amount> [--fee-rate <SAT_VB>] \
 Every send — human or agent — runs the shared preparation path:
 
 1. validates the address against the selected network;
-2. syncs the watch-only wallet;
+2. freshly syncs the watch-only wallet; no unspent outputs returns funding
+   guidance before any guard or fee call;
 3. excludes common inscription postage outputs unless `--allow-dust`;
-4. queries and unions configured guards unless `--no-guards`;
-5. estimates a roughly two-block fee unless `--fee-rate` is supplied;
+4. queries and unions configured guards unless `--no-guards`; if all outputs
+   are protected, explains that unprotected funding is needed and skips fees;
+5. estimates the fee for the configured target (two blocks by default), unless
+   `--fee-rate` is supplied;
 6. builds the unsigned PSBT in memory.
 
 Sync or configured-guard failure stops preparation. Both bypass flags apply only
@@ -148,7 +150,7 @@ If broadcast fails after signing, the transaction is already saved:
 ## Transaction visibility
 
 ```sh
-sats status                # pending (signed, unbroadcast) + broadcast with confirmations
+sats status                # saved transactions and chain observations
 sats status <txid>         # one transaction by txid or unique prefix
 sats history               # every wallet transaction, unconfirmed first
 ```
@@ -156,7 +158,11 @@ sats history               # every wallet transaction, unconfirmed first
 Both commands sync first and tolerate sync failure with a stderr warning;
 `--offline` skips sync entirely. `status <txid>` falls back to the wallet's
 canonical chain view for transactions the store never saw, such as incoming
-payments.
+payments. A locally pending record is labeled "signed; broadcast unconfirmed":
+it may already be in the mempool or confirmed after a lost response. Those
+chain observations are shown even while local bookkeeping remains pending.
+JSON includes `synced` and `sync_status` (`fresh`, `offline`, or `failed`);
+cached observations after failed sync are never labeled fresh.
 
 ## Explicit PSBT workflow
 
@@ -180,7 +186,9 @@ path for multi-signer flows.
 
 `tx broadcast` takes exactly one target: an existing file is read as raw
 transaction hex; anything else resolves a saved transaction by full txid
-or unique prefix.
+or unique prefix. It rebroadcasts the saved bytes without preparing or signing
+again. Repeating the command for an already-broadcast saved record repairs its
+request receipt locally, without resolving providers or drawing budget again.
 
 ## Agent grants
 
@@ -255,7 +263,7 @@ mint a new one. Pass it to the served process as `SATS_AGENT_TOKEN`:
 ```sh
 sats agent grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
 # SATS_AGENT_TOKEN=<token>
-claude mcp add sats --env SATS_AGENT_TOKEN=<token> -- sats agent serve claude
+# Copy the exact claude mcp add command printed by grant.
 ```
 
 ```sh
@@ -263,14 +271,20 @@ sats agent list
 sats agent revoke claude
 ```
 
+The printed command supports POSIX shells and pins the effective network and
+wallet/configuration locations. Relative overrides become absolute, and shell
+metacharacters stay literal. Conflicting ambient defaults cannot select a
+different wallet. It copies no provider credentials; the server reads the
+original wallet configuration.
+
 Expired grants are removed while listing. Revocation deletes the grant file;
 an active MCP server observes the deletion on its next send call. Re-issuing
 a grant replaces its token, so rotation and revocation are the same act.
 
-Grants written by releases before the daemon stored recoverable signing
-material in the grant file. They are reported by `sats agent list` and
-refused for signing; re-issue them, and read
-[Security](security.md) about rotating the wallet.
+An obsolete pre-release grant shape stored recoverable signing material in
+the grant file. It is reported and refused with wallet-rotation guidance;
+reissuing that grant alone cannot repair possible seed disclosure. See
+[Security](security.md).
 
 `sats agent serve <name>` runs the MCP server as that agent. See
 [MCP and agent grants](mcp.md) for the tool-level contract.
@@ -281,7 +295,7 @@ Every agent request is a durable record, and every state transition
 appends to a per-network event log:
 
 ```sh
-sats agent requests            # pending: requests awaiting your decision
+sats agent requests            # requests awaiting review or recovery
 sats agent requests --all      # every recorded request, newest first
 sats agent requests --watch    # stay running; print each new pending request once
 sats agent log                 # the causal event chain, oldest first
@@ -300,9 +314,9 @@ one state:
 | `dismissed` | You declined it; terminal |
 | `signing` | You authorized it, the budget is reserved, and the signer is being invoked |
 | `sent` | Broadcast; carries the txid |
-| `broadcast_pending` | Signed and saved, not broadcast; `sats tx broadcast <txid>` settles it |
-| `unresolved` | The signer was invoked and the outcome could not be made durable: a signature may exist. Never refunded, never signed again; you resolve it |
-| `failed` | Stopped before any signature could exist; refunded; can be approved again |
+| `broadcast_pending` | Signed and saved; broadcast unconfirmed locally; recover the saved transaction with `sats tx broadcast <txid>` |
+| `unresolved` | A signature may exist without a durable result. Never refunded or signed again; inspect before dismissing |
+| `failed` | Preparation/execution stopped before signer invocation; no new draw, or a provable pre-sign draw is refunded; may be reviewed again |
 
 `log` renders one line per event — received, denied, approved, dismissed,
 reserved, signed, broadcast, refunded, failed — and `--request` accepts
@@ -315,25 +329,39 @@ ending each line with the exact `sats agent approve` command. You learn
 about pending requests from sats itself instead of relying on the agent
 to relay (or downplay) its own status. Denied requests never appear there
 — nothing is awaited — and stay reviewable with `--all`. Request ids are
-scoped to their agent: two agents using the same id are announced
-independently. With `--json` the stream is JSONL, one full record per
+global; idempotency keys are scoped to the original grant instance. With `--json` the stream is JSONL, one full record per
 line. Watching is read-only; Ctrl-C stops it.
 
 ## Approving one request
 
 ```sh
-sats agent approve <id> [--yes]
+sats agent approve              # terminal selection and review
+sats agent approve <id> [--yes] # explicit id or unique prefix
 sats agent dismiss <id>
 ```
+
+Without an ID, terminal users see a numbered snapshot of pending and failed
+requests. Enter/r refreshes it, w waits one second and refreshes, and q cancels.
+An empty queue offers the same controls. Selection only opens review; even one
+request and `--yes` still require separate confirmation. The exact selected ID
+and record are revalidated, so queue reordering cannot redirect the choice.
+Piped/nonterminal stdin requires an explicit ID. JSON prompts and review stay
+on stderr; interactive cancellation returns `status: cancelled` on stdout,
+with the selected `id` if review had begun.
+
+The menu refreshes human reconciliation. Signing, broadcast-pending, and
+unresolved rows show attention/recovery instructions and cannot be selected
+for another signature. Only pending and provably pre-sign failed requests are
+reviewable. Explicit IDs and unique prefixes keep their existing behavior.
 
 `approve` is the human-authorized execution path. It prepares the
 transaction on current chain state, derives what the prepared transaction
 actually pays from the wallet's own descriptors and refuses if that
 disagrees with the recorded request, re-runs the grant's boundaries with
-the real fee, and shows you the recipient, amount, fee, total, and
-remaining budget — with `--json`, on stderr, so the review always reaches
+the real fee, and shows you the wallet location, network, full recipient, amount,
+fee, total, and remaining budget — with `--json`, on stderr, so the review always reaches
 you while stdout stays the machine-readable result. It then asks for
-confirmation (`--yes` skips the prompt, not the password) and for the
+confirmation (`--yes` skips it only with an explicit ID, never the password) and for the
 wallet password: the prompt is the authorization, and the key it unseals
 exists only for this one execution. Under the grant lock it draws the
 budget on the grant's ledger under the request's id and records the
@@ -364,6 +392,15 @@ reducing authority stays cheap, and dismissing an unresolved request
 never refunds. Both accept a request id or unique prefix and support
 `--json`.
 
+Sync, guard, fee, and provider-resolution failures during preparation record a
+`failed` attempt that the agent can observe and the human can review again.
+Fee errors direct you to the configured provider; approval has no `--fee-rate`
+option. A failed attempt cannot overwrite a settled or uncertain execution.
+
+A saved transaction marked broadcast can repair an outdated `broadcast_pending`
+receipt through listing or `sats tx broadcast <txid>`, without another network
+broadcast, signature, or draw. Live execution claims are respected.
+
 If an approve is interrupted after `signing` was recorded, the next
 listing or approve reconciles the record from the durable truth: a saved
 transaction attributed to the request (same agent, id, and intent) means
@@ -391,24 +428,9 @@ an authorization. Both are read-only, validate the endpoint's network
 first, and require an explicitly configured `alkanes.view` provider:
 there is no fallback, and without one they fail with a typed error.
 
-### Executing a call
-
-```sh
-sats alkanes execute <BLOCK:TX> <INPUTS...> [--fee-rate <SAT_VB>] \
-  [--postage <SATS>] [-y]
-```
-
-`execute` composes the call transaction — output 0 the runestone
-OP_RETURN, output 1 a postage output (default 546 sats) back to the
-wallet that the protostone's pointer and refund both target — then shows
-the simulation, postage, fee, and total, asks for confirmation, signs
-with the wallet password, privately persists the raw transaction, and
-broadcasts. The pipeline fails closed at every step: an unavailable
-simulation or guard stops it, sync failure stops it, and there are no
-`--allow-dust`/`--no-guards` escapes on this command at all. It refuses
-mainnet in this release — the encoding is young; dogfood on signet. The
-546-sat postage lands on a wallet address at a value the dust heuristic
-protects from later coin selection automatically.
+Execution is excluded from default v0.0.1 CLI help and dispatch. The pure
+composition library and execution source remain available for explicit
+non-default development builds; see [Development](development.md).
 
 ## JSON output
 
@@ -431,8 +453,7 @@ protects from later coin selection automatically.
 - `agent dismiss`;
 - `agent log`;
 - `alkanes inspect`;
-- `alkanes simulate`;
-- `alkanes execute`.
+- `alkanes simulate`.
 
 JSON field names are compatibility surfaces. Scripts should branch on
 documented status and reason fields rather than human-readable messages.
@@ -487,7 +508,8 @@ request is refused without requiring a usable chain provider.
 Command failures print a diagnostic to stderr and exit non-zero. Balance,
 status, and history are the intentionally tolerant chain-read commands: when
 sync fails without `--offline`, they report cached state with a stderr
-warning (`synced: false` for balance). Planning, signing, provider
+warning (`synced: false` for balance and status; status also reports
+`sync_status: failed`). Planning, signing, provider
 validation, and broadcast failures remain hard failures.
 Invalid or ambiguous provider selection is a hard failure for online operations,
 not a reason to fall back to offline output.

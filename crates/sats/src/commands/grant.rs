@@ -182,7 +182,7 @@ pub fn run(
             mcp_command.expect("human output has a launch command")
         ));
         ui::dim("review asks:         sats agent requests --watch");
-        ui::dim("approve one:         sats agent approve <id>");
+        ui::dim("review and approve:  sats agent approve");
         ui::dim(&format!("revoke any time:     sats agent revoke {agent}"));
         ui::dim("the token cannot spend on its own: every send waits for your approval");
     }

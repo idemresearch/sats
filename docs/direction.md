@@ -23,7 +23,7 @@ intent → policy → human authorization → signing → execution
 The AI participates in the first two stages. The human remains the
 authority over the signer.
 
-> **Agents can observe, reason, prepare, and request.
+> **Agents can observe, reason, and request.
 > Humans authorize money movement.**
 
 ## The invariant
@@ -34,8 +34,8 @@ authority over the signer.
 > to signing.**
 
 The agent never has signing authority. An agent can read balances, derive
-receive addresses, inspect its grant, prepare transactions, and file
-spend proposals. It cannot unlock the wallet for itself, obtain the
+receive addresses, inspect its grant, and file spend proposals. Transaction
+preparation happens in the human CLI. It cannot unlock the wallet for itself, obtain the
 private key, approve its own payment, cause an unattended signature, or
 silently modify a transaction after approval.
 
@@ -50,9 +50,9 @@ bit in the process that holds the seed.
 
 Every agent action resolves through three verdicts:
 
-- **ALLOW** — the action needs no signing authority: read balance, list
-  history, derive a receive address, inspect the grant, poll a request,
-  prepare a transaction.
+- **ALLOW** — the action needs no signing authority: read balance, derive a
+  receive address, inspect the grant, or observe a request. These are the
+  shipped MCP read and address tools; there is no agent preparation tool.
 - **ASK** — the normal verdict for a valid agent-originated request: a
   durable `pending_approval` request is filed for exactly this intent,
   and a human decides.
@@ -78,15 +78,15 @@ autonomous signing key with that amount.
 Budgets still matter with a human in the loop: policy is the first line
 of defense that keeps obviously invalid proposals out of the review
 queue, and the budget bounds the economic actions sats will authorize. A
-denied request consumes no budget; only an approved, signed send draws
-amount plus fee.
+denied request consumes no budget. Execution reserves amount plus fee before
+signing; any outcome that may have produced a signature keeps the draw.
 
 ## Trust zones
 
 ```text
-UNTRUSTED            AI agent / MCP client — reads, prepares, requests
+UNTRUSTED            AI agent / MCP client — reads, requests
 AUTHORIZATION        policy ladder, durable requests, PSBT verification
-HUMAN APPROVAL       CLI review queue today; any trusted surface tomorrow
+HUMAN APPROVAL       Local CLI review and wallet password
 TRUSTED SIGNER       the signing boundary that owns key material
 ```
 
@@ -109,9 +109,10 @@ Agent requests never block waiting on a human:
 agent creates a request
   → policy verdict: ASK (pending) or DENY
   → durable request with an id
-  → a trusted surface shows it (sats agent requests --watch)
-  → the human approves or dismisses
-  → the approving process prepares, re-verifies, signs, broadcasts
+  → the human selects it for review (sats agent approve)
+  → the CLI prepares, re-verifies, and shows the exact payment and fee
+  → the human authorizes with confirmation and the wallet password
+  → the approving CLI process signs, persists, and broadcasts
   → the request's status is updated
   → the agent only observes the result
 ```
@@ -126,7 +127,7 @@ status.
 
 Never trust the caller's description of a transaction; derive it
 independently. The human approves a canonical intent — network, agent,
-normalized recipient, amount — and the approval binds its digest, so it
+normalized recipient, amount — checked against the durable request digest, so it
 authorizes exactly the send the human saw, once. Before signing, sats
 recomputes what the prepared transaction actually pays from the wallet's
 own descriptors and refuses on any disagreement. An approval must never
@@ -146,15 +147,17 @@ model:
 
 - the signer is an in-memory software signer constructed inside the
   approving process, from the seed the human's password unseals for that
-  one execution; no process holds an unsealed seed between executions;
+  one execution; no resident process retains an unsealed seed between
+  operations, though human commands can temporarily decrypt it;
 - the human reviews the recorded request and the prepared transaction's
   real fee, not the raw PSBT — the executor's independent derivation
   enforces the exact-transaction property instead;
-- the only human-authorized execution path is the CLI; a desktop or
-  mobile approval client would call the same execution layer.
+- the human-authorized execution path is the local CLI. There is no daemon
+  or durable approval capability that another process can reuse.
 
-These are the debt to pay down — with hardware or independent-device
-signers and richer review surfaces — not properties to market away.
+The `Signer` trait preserves a boundary between preparation and signing.
+The shipped LocalSigner runs in the approving CLI process and provides no
+independent hardware isolation.
 
 ## Threat model and claims
 
@@ -162,8 +165,10 @@ Assume the agent is hostile: prompt injection, malicious clients,
 request replay, recipient or amount substitution, fee manipulation,
 forged approval state. The design answers with no agent-side key
 material, server-side grant checks on every send, independent intent
-derivation, durable digest-bound approvals, and an approval surface
-outside the agent's control.
+derivation, durable requests bound to their original grant instance, and a
+fresh human decision in the CLI. There is no reusable approval record.
+An agent with same-user shell access or control of the operating system is
+outside this MCP capability boundary; see the [security limitations](security.md).
 
 Claims sats can make: agents do not receive your keys; agents cannot
 approve their own payments; agent-originated money movement requires
@@ -191,8 +196,8 @@ hardware-backed signature.
 The one-line architecture:
 
 ```text
-Agent prepares → sats verifies intent → policy asks → human approves
-→ sats re-verifies → signer signs → Bitcoin
+Agent requests → policy asks → CLI prepares and verifies → human approves
+→ CLI re-checks grant → signer signs → persist → Bitcoin
 ```
 
 > **AI asks. You approve. Keys stay yours.**

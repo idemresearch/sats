@@ -28,7 +28,7 @@ jobs:
         shell: bash
         run: |
           if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "release tags must look like v0.1.0" >&2
+            echo "release tags must look like v0.0.1" >&2
             exit 1
           fi
           tag_version="${GITHUB_REF_NAME#v}"

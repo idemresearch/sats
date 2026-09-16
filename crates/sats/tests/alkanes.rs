@@ -125,6 +125,7 @@ fn ambiguous_view_providers_are_rejected() {
 }
 
 #[test]
+#[cfg(feature = "experimental-alkanes-execute")]
 fn execute_composes_signs_and_broadcasts_the_runestone() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
@@ -188,6 +189,7 @@ fn execute_composes_signs_and_broadcasts_the_runestone() {
 }
 
 #[test]
+#[cfg(feature = "experimental-alkanes-execute")]
 fn execute_refuses_mainnet() {
     let dir = TempDir::new().unwrap();
     sats(&dir)
@@ -206,6 +208,7 @@ fn execute_refuses_mainnet() {
 }
 
 #[test]
+#[cfg(feature = "experimental-alkanes-execute")]
 fn execute_fails_closed_without_simulation() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
@@ -221,6 +224,7 @@ fn execute_fails_closed_without_simulation() {
 }
 
 #[test]
+#[cfg(feature = "experimental-alkanes-execute")]
 fn execute_fails_closed_without_a_guard_answer() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
@@ -240,6 +244,7 @@ fn execute_fails_closed_without_a_guard_answer() {
 }
 
 #[test]
+#[cfg(feature = "experimental-alkanes-execute")]
 fn execute_excludes_dust_suspects() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
@@ -254,4 +259,24 @@ fn execute_excludes_dust_suspects() {
             .success(),
     );
     assert_eq!(out["excluded_utxos"], 1, "the 546-sat suspect stays out");
+}
+
+#[test]
+#[cfg(not(feature = "experimental-alkanes-execute"))]
+fn default_release_has_no_alkanes_execution_command() {
+    let dir = TempDir::new().unwrap();
+    sats(&dir)
+        .args(["alkanes", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("inspect"))
+        .stdout(predicate::str::contains("simulate"))
+        .stdout(predicate::str::contains("execute").not());
+    sats(&dir)
+        .args(["alkanes", "execute", "2:1", "77", "-y"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unrecognized subcommand"));
+    assert!(!dir.path().join("seed.sealed").exists());
+    assert!(!dir.path().join("signet").exists());
 }

@@ -13,14 +13,12 @@ mod store;
 mod ui;
 mod walletd;
 
-use clap::Parser;
-
 use crate::cli::{Cli, Command};
 use crate::config::{Config, parse_network};
 use crate::store::Store;
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = Cli::parse_with_safe_errors();
     if let Err(err) = run(cli) {
         eprintln!("✗ {err:#}");
         std::process::exit(1);
@@ -116,6 +114,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cli::AlkanesCommand::Simulate { id, inputs } => {
                 commands::alkanes::simulate(&services(&config)?, &id, &inputs, json)
             }
+            #[cfg(feature = "experimental-alkanes-execute")]
             cli::AlkanesCommand::Execute {
                 id,
                 inputs,

@@ -207,8 +207,8 @@ and rendering belong to callers.
   before the signer is invoked; construct the signer only after the
   reservation is durable (`request::execute::commit` takes it as a
   factory for exactly this reason).
-- Refund only before the signer is invoked, or when it reports that no
-  signature was produced.
+- Refund only when it is provable that the signer was never invoked. A
+  signer reporting failure cannot prove that no signature was produced.
 - The human review (recipient, amount, real fee, total) precedes the
   password in every mode; `--json` moves it to stderr, never drops it.
 - Never refund a signed transaction after a broadcast failure.
@@ -299,7 +299,7 @@ Call it from the shared native workflow so CLI and MCP cannot diverge.
 The pre-release compatibility policy applies: serialized shapes may
 change freely, and unsupported development state fails with a clear
 error naming the recreate step. Grant records carry
-`GRANT_FORMAT_VERSION` (currently 1, the first released schema);
+`GRANT_FORMAT_VERSION` (currently 1, the v0.0.1 schema);
 records claiming a newer version are refused because they may carry
 restrictions this build cannot see. Request and event records carry
 their own versions and are read tolerantly for the same forward-safety
