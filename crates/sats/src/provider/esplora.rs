@@ -128,7 +128,7 @@ impl EsploraProvider {
 
     pub fn broadcast(&self, tx: &Transaction) -> Result<(), ProviderError> {
         let txid = tx.compute_txid();
-        match self.client().broadcast(tx) {
+        match self.broadcast_request(tx) {
             Ok(()) => Ok(()),
             Err(err) if broadcast_succeeded_via_2xx(&err, &txid) => Ok(()),
             Err(e) => Err(ProviderError::Broadcast {
@@ -136,6 +136,29 @@ impl EsploraProvider {
                 message: format!("esplora: {}", error_message(&e)),
             }),
         }
+    }
+
+    /// esplora-client 0.12's blocking POST omits configured headers. Use the
+    /// same transport and response contract here so private relays receive
+    /// their bearer token too. Never retry a broadcast after an uncertain
+    /// response; the caller has already persisted the signed transaction.
+    fn broadcast_request(&self, tx: &Transaction) -> Result<(), esplora_client::Error> {
+        let mut request = minreq::post(format!("{}/tx", self.url))
+            .with_timeout(super::HTTP_TIMEOUT_SECS)
+            .with_body(hex::encode(sats_core::bitcoin::consensus::serialize(tx)));
+        if let Some(token) = &self.bearer {
+            request = request.with_header("Authorization", format!("Bearer {token}"));
+        }
+        let response = request.send()?;
+        if response.status_code == 200 {
+            return Ok(());
+        }
+        let status =
+            u16::try_from(response.status_code).map_err(esplora_client::Error::StatusCode)?;
+        Err(esplora_client::Error::HttpResponse {
+            status,
+            message: response.as_str().unwrap_or_default().to_string(),
+        })
     }
 }
 
@@ -222,7 +245,9 @@ mod tests {
                         content_length = value.trim().parse().unwrap();
                     }
                 }
-                reader.read_exact(&mut vec![0; content_length]).unwrap();
+                let mut body_bytes = vec![0; content_length];
+                reader.read_exact(&mut body_bytes).unwrap();
+                request.push_str(&String::from_utf8(body_bytes).unwrap());
                 send.send(request).unwrap();
                 write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
@@ -264,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_and_read_bearer_are_used_but_never_echoed_from_http_failures() {
+    fn endpoint_and_bearer_are_used_but_never_echoed_from_http_failures() {
         let echo = "PATHSECRET QUERYSECRET BEARERSECRET USERSECRET";
         let (origin, requests) = local_server(vec![
             (200, r#"{"2":3.0}"#.into()),
@@ -304,13 +329,53 @@ mod tests {
             assert!(request.lines().next().unwrap().contains(&format!(
                 "/arbitrary/PATHSECRET?unknown=QUERYSECRET/{operation}"
             )));
-            if operation != "tx" {
-                assert!(
-                    request
-                        .to_ascii_lowercase()
-                        .contains("authorization: bearer bearersecret")
-                );
-            }
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer bearersecret")
+            );
+        }
+    }
+
+    #[test]
+    fn authenticated_broadcast_preserves_bytes_2xx_semantics_and_does_not_retry() {
+        let tx = Transaction {
+            version: sats_core::bitcoin::transaction::Version::TWO,
+            lock_time: sats_core::bitcoin::absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+        let (origin, requests) = local_server(vec![
+            (200, String::new()),
+            (203, format!("{}\n", tx.compute_txid())),
+            (203, "accepted".into()),
+            (500, "BEARERSECRET".into()),
+        ]);
+        let provider = EsploraProvider::new(
+            "fixture".into(),
+            format!("{origin}/api"),
+            Some("BEARERSECRET".into()),
+        );
+        provider.broadcast(&tx).unwrap();
+        provider.broadcast(&tx).unwrap();
+        assert!(provider.broadcast(&tx).is_err());
+        super::super::error::assert_safe_error(
+            provider.broadcast(&tx).unwrap_err(),
+            &["BEARERSECRET"],
+        );
+        let requests: Vec<_> = requests.into_iter().collect();
+        assert_eq!(requests.len(), 4);
+        for request in requests {
+            assert!(request.starts_with("POST /api/tx HTTP/1.1\r\n"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer bearersecret")
+            );
+            assert_eq!(
+                request.split_once("\r\n\r\n").unwrap().1,
+                hex::encode(sats_core::bitcoin::consensus::serialize(&tx))
+            );
         }
     }
 
