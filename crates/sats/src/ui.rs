@@ -1,6 +1,6 @@
 //! Output styling: quiet, aligned, minimal color.
 
-use std::io::{IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Write};
 
 use owo_colors::OwoColorize;
 use sats_core::fmt::format_sats;
@@ -149,4 +149,75 @@ fn confirm_via(prompt: &str, default_yes: bool, stderr: bool) -> anyhow::Result<
         "y" | "yes" => true,
         _ => false,
     })
+}
+
+/// A menu selects a snapshot for review, never permission to execute it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReviewChoice {
+    Select(usize),
+    Refresh,
+    Wait,
+    Cancel,
+}
+
+/// Keep selection prompts on the human channel, including in JSON mode.
+pub fn review_choice(
+    input: &mut impl BufRead,
+    out: &mut impl Write,
+    count: usize,
+) -> anyhow::Result<ReviewChoice> {
+    loop {
+        if count > 0 {
+            write!(out, "Review number (1-{count}), ")?;
+        }
+        write!(out, "Enter/r refresh, w wait 1s, q cancel: ")?;
+        out.flush()?;
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            return Ok(ReviewChoice::Cancel);
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "" | "r" => return Ok(ReviewChoice::Refresh),
+            "w" => return Ok(ReviewChoice::Wait),
+            "q" => return Ok(ReviewChoice::Cancel),
+            number => {
+                if let Ok(number) = number.parse::<usize>()
+                    && (1..=count).contains(&number)
+                {
+                    return Ok(ReviewChoice::Select(number - 1));
+                }
+                writeln!(out, "Choose a displayed number, r, w, or q.")?;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn review_requires_a_displayed_number_and_never_defaults_to_one() {
+        let mut output = Vec::new();
+        assert_eq!(
+            review_choice(&mut &b"\n"[..], &mut output, 1).unwrap(),
+            ReviewChoice::Refresh
+        );
+        assert_eq!(
+            review_choice(&mut &b"0\n2\n1\n"[..], &mut output, 1).unwrap(),
+            ReviewChoice::Select(0)
+        );
+        assert_eq!(
+            review_choice(&mut &b"1\nq\n"[..], &mut output, 0).unwrap(),
+            ReviewChoice::Cancel
+        );
+        assert_eq!(
+            review_choice(&mut &b""[..], &mut output, 1).unwrap(),
+            ReviewChoice::Cancel
+        );
+        assert_eq!(
+            review_choice(&mut &b"w\n"[..], &mut output, 0).unwrap(),
+            ReviewChoice::Wait
+        );
+    }
 }

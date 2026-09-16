@@ -9,6 +9,8 @@ use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
 use sats_core::signer::LocalSigner;
 
+use crate::commands::requests;
+use crate::config::network_name;
 use crate::provider::Services;
 use crate::request::execute::{self, Outcome, Stage};
 use crate::store::Store;
@@ -18,19 +20,51 @@ pub fn run(
     store: &Store,
     network: Network,
     resolve_services: impl FnOnce() -> Result<Services>,
-    id_or_prefix: &str,
+    id_or_prefix: Option<&str>,
     yes: bool,
     json: bool,
 ) -> Result<()> {
-    let staged = match execute::stage(store, network, resolve_services, id_or_prefix)? {
+    let selected = if id_or_prefix.is_none() {
+        match requests::select_for_review(store, network)? {
+            Some(selected) => Some(selected),
+            None => {
+                if json {
+                    println!("{}", serde_json::json!({"status": "cancelled"}));
+                }
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    // Keep the exact snapshot id, never a number looked up in a new queue.
+    // Selection confers no authority, claims no request, and draws no budget.
+    if let Some(selected) = &selected {
+        requests::reread_selection(store, network, selected)?;
+    }
+    let id = id_or_prefix.unwrap_or_else(|| &selected.as_ref().expect("selected request").id);
+    let staged = match execute::stage(store, network, resolve_services, id)? {
         Stage::Ready(staged) => staged,
         Stage::Denied(request, reason) => return report_denied(&request.id, &reason, json),
     };
+    if let Some(selected) = &selected {
+        requests::validate_selection(selected, &staged.request)?;
+    }
+    // A menu choice only asks to review. Even --yes cannot turn that
+    // choice into authorization without the subsequent confirmation.
+    let confirm = selected.is_some() || !yes;
 
     // The human reviews the real transaction before authorizing it, in
     // every mode. With --json, stdout stays a machine-readable result and
     // the review goes to stderr, the human's channel.
     let rows = vec![
+        (
+            "Wallet",
+            std::fs::canonicalize(store.wallet_db_path(network_name(network)))?
+                .display()
+                .to_string(),
+        ),
+        ("Network", network_name(network).to_string()),
         ("Approve", staged.request.id.clone()),
         ("Agent", staged.request.agent.clone()),
         ("Recipient", staged.request.recipient.clone()),
@@ -61,8 +95,14 @@ pub fn run(
         if network == Network::Bitcoin {
             eprintln!("! mainnet approval — this signs and broadcasts real bitcoin");
         }
-        if !yes && !ui::confirm_stderr("Approve and sign?", true)? {
-            eprintln!("aborted — the request stays pending");
+        if confirm && !ui::confirm_stderr("Approve and sign?", selected.is_none())? {
+            eprintln!("aborted — the request remains available for review");
+            if selected.is_some() {
+                println!(
+                    "{}",
+                    serde_json::json!({"status": "cancelled", "id": staged.request.id})
+                );
+            }
             return Ok(());
         }
     } else {
@@ -70,8 +110,8 @@ pub fn run(
         if network == Network::Bitcoin {
             ui::warn("mainnet approval — this signs and broadcasts real bitcoin");
         }
-        if !yes && !ui::confirm("Approve and sign?", true)? {
-            ui::dim("aborted — the request stays pending");
+        if confirm && !ui::confirm("Approve and sign?", selected.is_none())? {
+            ui::dim("aborted — the request remains available for review");
             return Ok(());
         }
     }

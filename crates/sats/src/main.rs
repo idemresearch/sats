@@ -89,9 +89,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 commands::recipients::disallow(&store, network, &name, &address, json)
             }
             cli::AgentCommand::List => commands::grants::run(&store, network, json),
-            cli::AgentCommand::Approve { id, yes } => {
-                commands::approve::run(&store, network, || Ok(services(&config)?), &id, yes, json)
-            }
+            cli::AgentCommand::Approve { id, yes } => commands::approve::run(
+                &store,
+                network,
+                || Ok(services(&config)?),
+                id.as_deref(),
+                yes,
+                json,
+            ),
             cli::AgentCommand::Dismiss { id } => commands::dismiss::run(&store, network, &id, json),
             cli::AgentCommand::Requests { all, watch } => {
                 commands::requests::run(&store, network, all, watch, json)
