@@ -116,8 +116,8 @@ pub enum Outcome {
 /// instance that created the request. Providers are resolved only after
 /// these local checks pass. Preparation runs on the human's
 /// side of the boundary with no safety bypasses. Operational failures
-/// (sync, guards, fee estimation) leave the request untouched so the
-/// human can try again; a mismatch between the prepared transaction and
+/// (sync, guards, fee estimation) record a safe pre-signature failure so
+/// the human can inspect the attempt and authorize again; a mismatch between the prepared transaction and
 /// the recorded intent refuses without signing.
 pub fn stage(
     store: &Store,
@@ -171,12 +171,30 @@ pub fn stage(
 
     // Preparation: the shared pipeline, agent form — no dust or guard
     // bypass, and a failed sync is a hard stop.
-    let mut ctx = walletd::open(store, network)?;
-    let prepare_request =
-        prepare::PrepareRequest::for_agent(&request.recipient, request.amount_sat);
-    let services = resolve_services()?;
-    let prepared = prepare::build(&mut ctx, &services, &prepare_request)?;
-    ctx.persist()?;
+    let preparation = (|| -> Result<_> {
+        let mut ctx = walletd::open(store, network)?;
+        let prepare_request =
+            prepare::PrepareRequest::for_agent(&request.recipient, request.amount_sat);
+        let services = resolve_services()?;
+        let prepared = prepare::build(&mut ctx, &services, &prepare_request)?;
+        ctx.persist()?;
+        Ok((ctx, services, prepared))
+    })();
+    let (ctx, services, prepared) = match preparation {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            // The claim excludes another execution, but a human may dismiss
+            // while provider I/O runs. Re-read under the grant lock and never
+            // replace a settled or potentially signed state with a retry.
+            let recorded = record_preparation_failure(store, net_name, &request, &err);
+            return match recorded {
+                Ok(()) => Err(err),
+                Err(write_err) => Err(err.context(format!(
+                    "preparation failed; cannot record the attempt: {write_err:#}"
+                ))),
+            };
+        }
+    };
 
     // What this transaction actually does, per our own descriptors. The
     // recorded intent committed to one exact payment; a PSBT that pays
@@ -557,6 +575,36 @@ fn record_denied_locked(
     request.updated_at = now;
     store.save_agent_request(net_name, &request)?;
     Ok(request)
+}
+
+/// Record only a provable pre-signing attempt. The caller holds the
+/// execution claim; the grant lock protects the fresh state check/write.
+fn record_preparation_failure(
+    store: &Store,
+    net_name: &str,
+    request: &AgentRequest,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let _lock = store.lock_grants(net_name)?;
+    let mut fresh = store
+        .load_agent_request(net_name, &request.agent, &request.id)?
+        .context("request disappeared during preparation")?;
+    if !fresh.version_supported()
+        || fresh.id != request.id
+        || fresh.agent != request.agent
+        || fresh.network != request.network
+        || fresh.grant_id != request.grant_id
+        || fresh.intent_digest != request.intent_digest
+        || fresh.recipient != request.recipient
+        || fresh.amount_sat != request.amount_sat
+    {
+        bail!("request changed during preparation; refusing to overwrite the record");
+    }
+    if !fresh.is_approvable() {
+        return Ok(());
+    }
+    let message = format!("preparation failed before signing: {error:#}");
+    record_failed_locked(store, net_name, &mut fresh, &message, unix_now())
 }
 
 /// The pre-invocation stop: written before the grant refund, so a crash
@@ -2141,10 +2189,9 @@ mod tests {
         assert_eq!(probe.counts(), (0, 0));
     }
 
-    /// Stale sync on the human's side leaves the request untouched: the
-    /// human retries when the chain is reachable.
+    /// Stale sync records a provably pre-signature failure for observation.
     #[test]
-    fn sync_failure_leaves_the_request_pending() {
+    fn sync_failure_records_a_safe_preparation_failure() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
         let id = fx.create(&token, "pay", 10_000).id;
@@ -2153,8 +2200,127 @@ mod tests {
         let err = approve(&fx, &id, &probe).unwrap_err();
         assert!(err.to_string().contains("stale state"), "{err:#}");
         assert_eq!(probe.counts(), (0, 0));
-        assert_eq!(fx.request(&id).status(), "pending_approval");
+        let request = fx.request(&id);
+        let RequestState::Failed { message, .. } = request.state else {
+            panic!("expected failed");
+        };
+        assert!(message.contains("stale state"));
+        assert!(message.contains("preparation failed before signing"));
         assert_eq!(fx.grant_state().spent_sat, 0);
+        assert_eq!(fx.count_events("failed"), 1);
+        std::fs::remove_file(fx.mockdata.join("sync-error")).unwrap();
+        assert!(matches!(
+            approve(&fx, &id, &probe).unwrap(),
+            Outcome::Sent { .. }
+        ));
+        assert_eq!(probe.counts(), (1, 1));
         drop(fx.dir);
+    }
+    #[test]
+    fn guard_fee_and_resolution_failures_are_observable_without_drawing_budget() {
+        for failure in ["guard", "fee", "resolution"] {
+            let fx = Fixture::new(&[100_000]);
+            let token = fx.grant(50_000, 5_000);
+            let id = fx.create(&token, "pay", 10_000).id;
+            match failure {
+                "guard" => std::fs::remove_file(fx.mockdata.join("guard.json")).unwrap(),
+                "fee" => std::fs::write(fx.mockdata.join("fees.json"), "invalid").unwrap(),
+                _ => {}
+            }
+            assert!(
+                stage(
+                    &fx.store,
+                    Network::Signet,
+                    || {
+                        if failure == "resolution" {
+                            bail!("provider unavailable");
+                        }
+                        Ok(fx.services())
+                    },
+                    &id
+                )
+                .is_err()
+            );
+            let record = fx.request(&id);
+            assert!(record.is_approvable());
+            let RequestState::Failed { message, .. } = record.state else {
+                panic!("expected failed");
+            };
+            assert!(message.contains("preparation failed before signing"));
+            assert_eq!(fx.grant_state().spent_sat, 0);
+            assert_eq!(fx.transactions(), 0);
+            assert_eq!(fx.count_events("failed"), 1);
+        }
+    }
+
+    #[test]
+    fn preparation_failure_never_overwrites_concurrent_settled_or_uncertain_state() {
+        for state in [
+            RequestState::Dismissed { at: 2 },
+            RequestState::Signing {
+                approved_at: 2,
+                fee_sat: 100,
+            },
+            RequestState::Unresolved {
+                at: 2,
+                message: "uncertain".into(),
+                txid: None,
+            },
+            RequestState::Sent {
+                at: 2,
+                fee_sat: 100,
+                txid: "saved".into(),
+            },
+        ] {
+            let fx = Fixture::new(&[100_000]);
+            let token = fx.grant(50_000, 5_000);
+            let id = fx.create(&token, "pay", 10_000).id;
+            assert!(
+                stage(
+                    &fx.store,
+                    Network::Signet,
+                    || {
+                        let _lock = fx.store.lock_grants("signet").unwrap();
+                        let mut record = fx.request(&id);
+                        record.state = state.clone();
+                        fx.store.save_agent_request("signet", &record).unwrap();
+                        bail!("preparation interrupted")
+                    },
+                    &id
+                )
+                .is_err()
+            );
+            assert_eq!(fx.request(&id).state, state);
+            assert_eq!(fx.count_events("failed"), 0);
+        }
+    }
+    #[test]
+    fn preparation_failure_preserves_replaced_or_unsupported_records() {
+        for replacement in ["version", "grant", "intent"] {
+            let fx = Fixture::new(&[100_000]);
+            let token = fx.grant(50_000, 5_000);
+            let id = fx.create(&token, "pay", 10_000).id;
+            let err = stage(
+                &fx.store,
+                Network::Signet,
+                || {
+                    let _lock = fx.store.lock_grants("signet").unwrap();
+                    let mut record = fx.request(&id);
+                    match replacement {
+                        "version" => record.format_version += 1,
+                        "grant" => record.grant_id = "replacement".into(),
+                        _ => record.intent_digest = "replacement".into(),
+                    }
+                    fx.store.save_agent_request("signet", &record).unwrap();
+                    bail!("preparation interrupted")
+                },
+                &id,
+            )
+            .err()
+            .expect("must fail");
+            assert!(format!("{err:#}").contains("request changed during preparation"));
+            assert_eq!(fx.request(&id).status(), "pending_approval");
+            assert_eq!(fx.count_events("failed"), 0);
+        }
     }
 }
