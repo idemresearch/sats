@@ -489,6 +489,28 @@ impl Store {
         }
     }
 
+    /// Observe the existing execution lock without creating files or changing
+    /// permissions. A missing lock means no live claim was observed, never
+    /// that the signer was not invoked. Other failures remain storage errors.
+    pub fn request_execution_active(&self, network: &str, agent: &str, id: &str) -> Result<bool> {
+        let path = self
+            .agent_requests_dir(network)
+            .join(agent_component(agent)?)
+            .join(format!("{}.lock", request_id_component(id)?));
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err).context("cannot inspect request execution lock"),
+        };
+        match file.try_lock() {
+            Ok(()) => Ok(false), // The temporary read-only probe releases on drop.
+            Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+            Err(std::fs::TryLockError::Error(err)) => {
+                Err(err).context("cannot inspect request execution lock")
+            }
+        }
+    }
+
     pub fn load_agent_request(
         &self,
         network: &str,

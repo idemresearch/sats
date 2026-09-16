@@ -460,6 +460,23 @@ pub(crate) fn attributed_transaction(
         }))
 }
 
+/// Read-only execution visibility for a signing receipt. `Some(false)`
+/// means a human must reconcile durable state; it never proves unsigned.
+/// This snapshot does not change the request or contact a provider.
+pub fn observe_execution(
+    store: &Store,
+    net_name: &str,
+    request: &AgentRequest,
+) -> Result<Option<bool>> {
+    if matches!(request.state, RequestState::Signing { .. }) {
+        store
+            .request_execution_active(net_name, &request.agent, &request.id)
+            .map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 /// Settle an interrupted execution around the signature boundary.
 ///
 /// A request left `signing` by a process that died is resolved from the
@@ -617,7 +634,7 @@ pub fn describe_settled(request: &AgentRequest) -> String {
             deny.code()
         ),
         RequestState::Dismissed { .. } => "already dismissed".into(),
-        RequestState::Signing { .. } => "signing right now".into(),
+        RequestState::Signing { .. } => "signing or awaiting human reconciliation".into(),
         RequestState::Unresolved { txid, .. } => format!(
             "unresolved — a signature may exist{}; sats will not sign it again or refund it; \
              check sats status, then dismiss it",
