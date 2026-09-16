@@ -171,31 +171,43 @@ pub fn run(
             ui::ok(&format!("granted  {agent}"));
         }
         println!();
-        ui::warn("this token is shown once and is not stored — copy it now");
+        println!("Copy one command now; sats cannot recover its embedded token.");
         println!();
-        println!("  SATS_AGENT_TOKEN={}", *issued.secret);
+        let token_env = shell_quote(&format!("SATS_AGENT_TOKEN={}", *issued.secret));
+        let mcp_command = mcp_command.expect("human output has a launch command");
+        println!("ChatGPT desktop / Codex:");
+        println!("codex mcp add sats --env {token_env} -- {mcp_command}");
         println!();
-        ui::dim("add to Claude Code (POSIX shell):");
-        ui::dim(&format!(
-            "  claude mcp add sats --env {} -- {}",
-            shell_quote(&format!("SATS_AGENT_TOKEN={}", *issued.secret)),
-            mcp_command.expect("human output has a launch command")
-        ));
-        ui::dim("review asks:         sats agent requests --watch");
-        ui::dim("review and approve:  sats agent approve");
-        ui::dim(&format!("revoke any time:     sats agent revoke {agent}"));
-        ui::dim("the token cannot spend on its own: every send waits for your approval");
+        println!("Claude Code (current project):");
+        println!(
+            "claude mcp add --transport stdio --scope local sats --env {token_env} -- {mcp_command}"
+        );
+        println!();
+        if grant.mode == sats_core::authz::GrantMode::Ask {
+            println!("Approve: sats agent approve");
+        }
+        println!("Revoke:  sats agent revoke {agent}");
     }
     Ok(())
 }
 
 /// Pin the same configuration and data locations the grant used. An
-/// explicit directory takes precedence over SATS_DIR; the default layout
-/// may split config and data, so retain the directory resolver's roots and
-/// remove a future client's SATS_DIR in the launched process itself.
+/// explicit directory takes precedence over SATS_DIR. When the default
+/// config and data directories are identical, one explicit --dir is the
+/// shortest equivalent command. A split default layout retains the directory
+/// resolver's roots and removes a future client's SATS_DIR in the launched
+/// process itself.
 fn mcp_launch_command(store: &Store, network: &str, agent: &str) -> Result<String> {
     let mut args = Vec::new();
-    if store.dir_override().is_none() {
+    let config_path = store.config_path();
+    let seed_path = store.seed_path();
+    let shared_default_dir = match (config_path.parent(), seed_path.parent()) {
+        (Some(config_dir), Some(data_dir)) if config_dir == data_dir => Some(data_dir),
+        _ => None,
+    };
+    let pinned_dir = store.dir_override().or(shared_default_dir);
+
+    if pinned_dir.is_none() {
         let dirs = directories::BaseDirs::new().context("cannot determine home directory")?;
         args.extend(["env".into(), "-u".into(), "SATS_DIR".into()]);
         for (name, path) in [
@@ -207,7 +219,7 @@ fn mcp_launch_command(store: &Store, network: &str, agent: &str) -> Result<Strin
         }
     }
     args.extend(["sats".into(), "--network".into(), network.into()]);
-    if let Some(dir) = store.dir_override() {
+    if let Some(dir) = pinned_dir {
         args.extend(["--dir".into(), absolute_shell_path(dir)?]);
     }
     args.extend(["agent".into(), "serve".into()]);

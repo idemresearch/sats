@@ -25,21 +25,30 @@ sats agent grant claude \
   --max-fee 1000
 ```
 
-The grant prints a bearer token once. It is never stored, so copy it now;
-re-issue the grant if you lose it. The served process reads it from
-`SATS_AGENT_TOKEN`:
+The grant emits a bearer token that sats cannot show again. sats stores only
+its hash, so re-issue the grant if you lose it. Copy one of the two printed
+commands; each embeds the same token as `SATS_AGENT_TOKEN` and starts the same
+local stdio server:
 
 ```sh
-SATS_AGENT_TOKEN=<token> sats agent serve claude
+codex mcp add sats --env SATS_AGENT_TOKEN=<token> -- <pinned sats command>
+claude mcp add --transport stdio --scope local sats --env SATS_AGENT_TOKEN=<token> -- <pinned sats command>
 ```
 
-For Claude Code, copy the exact POSIX-shell `claude mcp add` command printed by
-`grant`. It pins the effective network and wallet/configuration locations,
-resolves relative directory overrides, and safely quotes literal arguments.
-A different working directory or conflicting ambient defaults cannot redirect
-it. Provider credentials are not copied into that command; provider settings
-are read from the original wallet configuration. If launching manually, select
-the same `--network` and wallet directory explicitly.
+The `codex mcp add` command configures the MCP host shared by ChatGPT desktop,
+Codex CLI, and the Codex IDE extension. Restart ChatGPT desktop after adding
+the server. ChatGPT web cannot launch a local stdio server. The Claude Code
+command uses local scope for the current project and does not write a
+repository `.mcp.json`. Both clients save the raw token in their local
+configuration; sats stores only its hash.
+
+The printed POSIX-shell commands pin the effective network and
+wallet/configuration locations, resolve relative directory overrides, and
+safely quote literal arguments. A different working directory or conflicting
+ambient defaults cannot redirect them. Provider credentials are not copied;
+provider settings are read from the original wallet configuration. If
+launching manually, select the same `--network` and wallet directory
+explicitly.
 
 At startup the server verifies:
 

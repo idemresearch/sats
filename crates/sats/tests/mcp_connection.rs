@@ -1,4 +1,4 @@
-//! Execute the printed POSIX connection command without a Claude installation.
+//! Execute both printed POSIX connection commands without client installations.
 //! The fixture records exact arguments/environment, then launches the real MCP
 //! server against disposable wallets, with hostile ambient defaults and cwd.
 #![cfg(all(unix, feature = "mcp"))]
@@ -43,12 +43,38 @@ impl Fixture {
         fs::write(other.join("config.toml"), "network = \"mainnet\"\n").unwrap();
         for (name, script) in [
             (
+                "codex",
+                r#"#!/bin/sh
+set -eu
+printf '%s\0' "$@" > "$SATS_FIXTURE_CODEX_ARGS"
+test "$1" = mcp && test "$2" = add && test "$3" = sats
+shift 3
+test "$1" = --env
+shift
+export "$1"
+shift
+test "$1" = --
+shift
+case "${SATS_FIXTURE_TOKEN_MODE-}" in
+    missing) unset SATS_AGENT_TOKEN ;;
+    wrong) export SATS_AGENT_TOKEN=wrong-token ;;
+esac
+exec "$@"
+"#,
+            ),
+            (
                 "claude",
                 r#"#!/bin/sh
 set -eu
 printf '%s\0' "$@" > "$SATS_FIXTURE_CLAUDE_ARGS"
-test "$1" = mcp && test "$2" = add && test "$3" = sats
-shift 3
+test "$1" = mcp && test "$2" = add
+shift 2
+test "$1" = --transport && test "$2" = stdio
+shift 2
+test "$1" = --scope && test "$2" = local
+shift 2
+test "$1" = sats
+shift
 test "$1" = --env
 shift
 export "$1"
@@ -136,6 +162,10 @@ exec "$SATS_FIXTURE_BINARY" "$@"
             .env_remove("SATS_PASSWORD")
             .env("NO_COLOR", "1")
             .env("SATS_FIXTURE_BINARY", env!("CARGO_BIN_EXE_sats"))
+            .env(
+                "SATS_FIXTURE_CODEX_ARGS",
+                self.root.path().join("codex-args"),
+            )
             .env(
                 "SATS_FIXTURE_CLAUDE_ARGS",
                 self.root.path().join("claude-args"),
@@ -247,6 +277,12 @@ fn find_named(root: &Path, name: &str) -> PathBuf {
     found.pop().unwrap()
 }
 
+fn embedded_token(line: &str) -> &str {
+    line.split_ascii_whitespace()
+        .find_map(|word| word.strip_prefix("SATS_AGENT_TOKEN="))
+        .unwrap()
+}
+
 fn check_connection(
     network: &str,
     directory: Option<&str>,
@@ -317,22 +353,50 @@ fn check_connection(
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8(out.stdout).unwrap();
-    let line = stdout
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("claude mcp add "))
-        .unwrap();
-    let token = stdout
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("SATS_AGENT_TOKEN="))
-        .unwrap();
-    assert!(!line.contains(common::PASSWORD));
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "Approve: sats agent approve")
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == format!("Revoke:  sats agent revoke {agent}"))
+    );
+    let commands = [
+        (
+            "codex",
+            stdout
+                .lines()
+                .find(|line| line.starts_with("codex mcp add "))
+                .unwrap(),
+            "codex-args",
+        ),
+        (
+            "claude",
+            stdout
+                .lines()
+                .find(|line| line.starts_with("claude mcp add "))
+                .unwrap(),
+            "claude-args",
+        ),
+    ];
+    assert!(
+        !stdout
+            .lines()
+            .any(|line| line.trim_start().starts_with("SATS_AGENT_TOKEN=")),
+        "the token should only appear inside copyable commands"
+    );
+    let token = embedded_token(commands[0].1);
+    assert_eq!(embedded_token(commands[1].1), token);
+    for (_, line, _) in commands {
+        assert!(!line.contains(common::PASSWORD));
+        assert!(!line.contains("private-provider-secret"));
+        assert!(!line.contains("private-bearer-secret"));
+    }
     // The future client's defaults and this wallet's config may both change.
     // Ambiguous providers prove startup, filing and observation stay local.
     fs::write(&config, format!("network = \"mainnet\"\n{providers}")).unwrap();
-    assert!(!line.contains("private-provider-secret"));
-    assert!(!line.contains("private-bearer-secret"));
     let grant_path = data
         .join(network)
         .join("grants")
@@ -345,15 +409,21 @@ fn check_connection(
     let grant: sats_core::authz::Grant = serde_json::from_str(&stored).unwrap();
     assert!(grant.authorizes(token));
 
-    let mut mcp = Mcp::start(fixture.launch(line));
     let mut expected = vec!["--network".to_owned(), network.to_owned()];
-    if let Some(dir) = &directory {
-        let absolute = std::path::absolute(if dir.is_absolute() {
+    let shared_default = directory.is_none() && config.parent() == Some(data);
+    let pinned_dir = if let Some(dir) = &directory {
+        Some(if dir.is_absolute() {
             dir.clone()
         } else {
             fixture.cwd.canonicalize().unwrap().join(dir)
         })
-        .unwrap();
+    } else if shared_default {
+        Some(data.to_path_buf())
+    } else {
+        None
+    };
+    if let Some(dir) = pinned_dir {
+        let absolute = std::path::absolute(dir).unwrap();
         expected.extend(["--dir".into(), absolute.to_str().unwrap().into()]);
     }
     expected.extend(["agent".into(), "serve".into()]);
@@ -361,71 +431,104 @@ fn check_connection(
         expected.push("--".into());
     }
     expected.push(agent.into());
-    assert_eq!(fixture.captured("sats-args"), expected);
-    assert!(!fixture.other.join("injected").exists());
-    let claude = fixture.captured("claude-args");
-    assert_eq!(&claude[..4], ["mcp", "add", "sats", "--env"]);
-    assert_eq!(claude[4], format!("SATS_AGENT_TOKEN={token}"));
-    assert_eq!(claude[5], "--");
-    let env = fixture.captured("sats-env");
-    assert_eq!(env[4], token);
-    if directory.is_none() {
-        assert_eq!(env[0], "unset");
-        assert_eq!(env[1], fixture.home.to_str().unwrap());
-        assert!(Path::new(&env[2]).is_absolute());
-        assert!(Path::new(&env[3]).is_absolute());
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert_eq!(
-                env[2],
-                config.parent().unwrap().parent().unwrap().to_str().unwrap()
-            );
-            assert_eq!(env[3], data.parent().unwrap().to_str().unwrap());
-        }
-    }
-    let view = mcp.tool(2, "get_grant", json!({}));
-    assert_eq!(view["active"], true);
-    assert_eq!(view["remaining_sat"], 12345);
-    let address = mcp.tool(3, "get_receive_address", json!({}));
-    assert_eq!(address["network"], network);
-    let filed = mcp.tool(
-        4,
-        "request_send",
-        json!({"address":address["address"],"amount_sat":1000,"idempotency_key":"connection-once"}),
-    );
-    assert_eq!(filed["status"], "pending_approval");
-    let id = filed["request_id"].as_str().unwrap();
-    let path = data
-        .join(network)
-        .join("agent-requests")
-        .join(agent)
-        .join(format!("{id}.json"));
-    let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    assert_eq!(record["grant_id"], grant.grant_id);
-    assert_eq!(
-        mcp.tool(5, "check_request", json!({"request_id":id})),
-        filed
-    );
-    drop(mcp);
 
-    if auth_errors {
-        for (mode, diagnostic) in [
-            ("wrong", "does not match the active grant"),
-            ("missing", "no SATS_AGENT_TOKEN"),
-        ] {
-            let out = fixture
-                .launch(line)
-                .env("SATS_FIXTURE_TOKEN_MODE", mode)
-                .stdin(Stdio::null())
-                .output()
-                .unwrap();
-            assert!(!out.status.success());
-            assert!(
-                String::from_utf8_lossy(&out.stderr).contains(diagnostic),
-                "{}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            assert!(out.stdout.is_empty());
+    for (client, line, args_file) in commands {
+        let mut mcp = Mcp::start(fixture.launch(line));
+        assert_eq!(fixture.captured("sats-args"), expected);
+        assert!(!fixture.other.join("injected").exists());
+        let client_args = fixture.captured(args_file);
+        let token_arg = format!("SATS_AGENT_TOKEN={token}");
+        match client {
+            "codex" => {
+                assert_eq!(&client_args[..4], ["mcp", "add", "sats", "--env"]);
+                assert_eq!(client_args[4], token_arg);
+                assert_eq!(client_args[5], "--");
+            }
+            "claude" => {
+                assert_eq!(
+                    &client_args[..8],
+                    [
+                        "mcp",
+                        "add",
+                        "--transport",
+                        "stdio",
+                        "--scope",
+                        "local",
+                        "sats",
+                        "--env"
+                    ]
+                );
+                assert_eq!(client_args[8], token_arg);
+                assert_eq!(client_args[9], "--");
+            }
+            _ => unreachable!(),
+        }
+        let env = fixture.captured("sats-env");
+        assert_eq!(env[4], token);
+        if directory.is_none() && !shared_default {
+            assert_eq!(env[0], "unset");
+            assert_eq!(env[1], fixture.home.to_str().unwrap());
+            assert!(Path::new(&env[2]).is_absolute());
+            assert!(Path::new(&env[3]).is_absolute());
+            #[cfg(not(target_os = "macos"))]
+            {
+                assert_eq!(
+                    env[2],
+                    config.parent().unwrap().parent().unwrap().to_str().unwrap()
+                );
+                assert_eq!(env[3], data.parent().unwrap().to_str().unwrap());
+            }
+        } else {
+            assert_eq!(env[0], fixture.other.to_str().unwrap());
+        }
+        let view = mcp.tool(2, "get_grant", json!({}));
+        assert_eq!(view["active"], true);
+        assert_eq!(view["remaining_sat"], 12345);
+        let address = mcp.tool(3, "get_receive_address", json!({}));
+        assert_eq!(address["network"], network);
+        let filed = mcp.tool(
+            4,
+            "request_send",
+            json!({
+                "address": address["address"],
+                "amount_sat": 1000,
+                "idempotency_key": format!("connection-{client}")
+            }),
+        );
+        assert_eq!(filed["status"], "pending_approval");
+        let id = filed["request_id"].as_str().unwrap();
+        let path = data
+            .join(network)
+            .join("agent-requests")
+            .join(agent)
+            .join(format!("{id}.json"));
+        let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(record["grant_id"], grant.grant_id);
+        assert_eq!(
+            mcp.tool(5, "check_request", json!({"request_id":id})),
+            filed
+        );
+        drop(mcp);
+
+        if auth_errors {
+            for (mode, diagnostic) in [
+                ("wrong", "does not match the active grant"),
+                ("missing", "no SATS_AGENT_TOKEN"),
+            ] {
+                let out = fixture
+                    .launch(line)
+                    .env("SATS_FIXTURE_TOKEN_MODE", mode)
+                    .stdin(Stdio::null())
+                    .output()
+                    .unwrap();
+                assert!(!out.status.success());
+                assert!(
+                    String::from_utf8_lossy(&out.stderr).contains(diagnostic),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                assert!(out.stdout.is_empty());
+            }
         }
     }
 }
@@ -470,4 +573,46 @@ fn generated_connection_preserves_xdg_default_layout() {
 #[test]
 fn generated_connection_preserves_agent_names_starting_with_a_hyphen() {
     check_connection("regtest", Some("wallet"), false, false, "-agent");
+}
+
+#[test]
+fn observe_grant_omits_the_approval_hint() {
+    let fixture = Fixture::new();
+    let wallet = fixture.root.path().join("observe-wallet");
+    let out = fixture
+        .sats(Some(&wallet), Some("signet"), false)
+        .args(["init", "--words", "12"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = fixture
+        .sats(Some(&wallet), Some("signet"), false)
+        .args([
+            "agent", "grant", "observer", "--budget", "12345", "--mode", "observe",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("codex mcp add "))
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.starts_with("claude mcp add "))
+    );
+    assert!(!stdout.contains("Approve: sats agent approve"));
+    assert!(stdout.contains("Revoke:  sats agent revoke observer"));
 }

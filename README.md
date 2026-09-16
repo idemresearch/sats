@@ -88,9 +88,8 @@ Grant an agent the authority to file requests:
 
 ```sh
 sats agent grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
-# prints, once: SATS_AGENT_TOKEN=<token>
-
-# Copy the printed claude mcp add command; it pins this wallet and network.
+# Copy one printed command for ChatGPT desktop/Codex or Claude Code.
+# Each command embeds the same one-time token and pins this wallet and network.
 ```
 
 The rule: **agents create requests, humans authorize requests, sats

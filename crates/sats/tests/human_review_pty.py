@@ -53,8 +53,14 @@ LAUNCHERS.mkdir()
 (LAUNCHERS / "sats").symlink_to(BINARY)
 (LAUNCHERS / "claude").write_text("""#!/bin/sh
 set -eu
-test "$1" = mcp && test "$2" = add && test "$3" = sats
-shift 3
+test "$1" = mcp && test "$2" = add
+shift 2
+test "$1" = --transport && test "$2" = stdio
+shift 2
+test "$1" = --scope && test "$2" = local
+shift 2
+test "$1" = sats
+shift
 test "$1" = --env
 shift
 export "$1"

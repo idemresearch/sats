@@ -260,14 +260,13 @@ grant itself. The cap is the
 pre-commitment you make while calm, so that later pressure — an agent
 asking nicely fifty times — has nothing to push on.
 
-Creating a grant prints a bearer token **once**. It is not stored — only its
-SHA-256 is — so there is no way to recover it later; re-issue the grant to
-mint a new one. Pass it to the served process as `SATS_AGENT_TOKEN`:
+Creating a grant emits a bearer token that sats cannot show again. sats stores
+only its SHA-256, so re-issue the grant to mint a replacement if you lose it.
+The two printed setup commands embed that same token as `SATS_AGENT_TOKEN`:
 
 ```sh
 sats agent grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
-# SATS_AGENT_TOKEN=<token>
-# Copy the exact claude mcp add command printed by grant.
+# Copy either the ChatGPT desktop / Codex command or the Claude Code command.
 ```
 
 ```sh
@@ -275,11 +274,18 @@ sats agent list
 sats agent revoke claude
 ```
 
-The printed command supports POSIX shells and pins the effective network and
+Both printed commands support POSIX shells and pin the effective network and
 wallet/configuration locations. Relative overrides become absolute, and shell
 metacharacters stay literal. Conflicting ambient defaults cannot select a
-different wallet. It copies no provider credentials; the server reads the
+different wallet. They copy no provider credentials; the server reads the
 original wallet configuration.
+
+The `codex mcp add` command configures the local MCP host shared by ChatGPT
+desktop, Codex CLI, and the Codex IDE extension. Restart ChatGPT desktop after
+adding it. ChatGPT web cannot launch this local stdio server. The
+printed Claude command uses `--scope local` to configure the current project
+without writing a repository `.mcp.json`. Each client saves the raw token in
+its local configuration; sats continues to store only the hash.
 
 Expired grants are removed while listing. Revocation deletes the grant file;
 an active MCP server observes the deletion on its next send call. Re-issuing

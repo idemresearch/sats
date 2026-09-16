@@ -30,7 +30,7 @@ pub fn run(
 ) -> Result<()> {
     let net_name = network_name(network);
 
-    // Fail loudly at startup — `claude mcp add` time — not mid-conversation.
+    // Fail loudly when the MCP client starts the server, not mid-conversation.
     // Order matters: "no grant" names the step a human has not done yet,
     // so it outranks a missing token, which is only meaningful once a
     // grant exists to hold one.
@@ -46,9 +46,9 @@ pub fn run(
     let token = Zeroizing::new(std::env::var(TOKEN_ENV).ok().unwrap_or_default());
     if token.is_empty() {
         bail!(
-            "no {TOKEN_ENV} in the environment — the token is printed once by \
-             `sats agent grant {agent} --budget <sats>`; pass it with \
-             `claude mcp add sats --env {TOKEN_ENV}=<token> -- sats agent serve {agent}`"
+            "no {TOKEN_ENV} in the environment — the token is emitted when you run \
+             `sats agent grant {agent} --budget <sats>`; copy one of the local MCP \
+             setup commands printed by that grant"
         );
     }
     if !grant.authorizes(&token) {

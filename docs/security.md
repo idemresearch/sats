@@ -185,14 +185,16 @@ the MCP boundary, and again inside the store.
 
 Creating the grant requires the human's wallet password, but nothing derived
 from it enters the grant: **the grant file holds no key material.** A random
-32-byte token is minted, printed once, and never persisted — only its hash
-is stored, compared in constant time. Reading a grant file yields a budget
-and a hash, and nothing that can spend.
+32-byte token is minted and emitted only while creating the grant. sats never
+persists it — only its hash is stored and compared in constant time. Reading a
+grant file yields a budget and a hash, and nothing that can spend.
 
 The token is what an agent presents. Pass it to the served process as
-`SATS_AGENT_TOKEN`; `sats agent grant` prints the exact `claude mcp add`
-line. Re-issuing a grant mints a new token and kills the old one, so
-rotation and revocation are the same act.
+`SATS_AGENT_TOKEN`; `sats agent grant` prints exact local setup commands for
+ChatGPT desktop/Codex and Claude Code. Both commands contain the same token.
+The selected MCP client saves that raw token in its local configuration, while
+sats retains only the hash. Re-issuing a grant mints a new token and kills the
+old one, so rotation and revocation are the same act.
 
 A grant names its network and authorizes only that network. Loading a grant
 checks the record's network against the one requested and refuses a
