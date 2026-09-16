@@ -22,6 +22,10 @@ continuing. Mainnet requires `--network mainnet` explicitly.
 whether to create a new wallet or restore one from a mnemonic backup;
 `--restore` and `--words` skip the question.
 
+If the wallet already exists, continue with `sats balance` or `sats receive`.
+For a separate test wallet, set `SATS_DIR` to an empty directory before running
+`sats init`.
+
 ## Restoring a wallet
 
 ```sh

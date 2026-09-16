@@ -43,7 +43,14 @@ fn init_refuses_existing_wallet() {
         .arg("init")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("already exists"));
+        .stderr(predicate::str::contains("already exists"))
+        .stderr(predicate::str::contains(
+            "Use `sats balance` or `sats receive`",
+        ))
+        .stderr(predicate::str::contains(
+            "set SATS_DIR to an empty directory",
+        ))
+        .stderr(predicate::str::contains("delete").not());
 }
 
 /// Pull the mnemonic out of `sats init`'s stdout (indented six-word rows).
