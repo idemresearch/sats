@@ -4,8 +4,8 @@
 //! tightens and never does. Entries are stored in the same normalized
 //! spelling the intent digest hashes, and only these commands — never
 //! payment history, successful sends, or approvals — change the list: an
-//! agent must not be able to launder an address into "known" by paying
-//! it once inside the automatic band.
+//! agent must not be able to launder an address into "known" by getting
+//! one payment to it approved.
 
 use anyhow::{Context, Result, bail};
 use sats_core::bitcoin::{Address, Network};
@@ -85,7 +85,7 @@ pub fn allow(
         agent,
         &recipient,
         "allowed",
-        "sends to it are now automatic within the caps",
+        "the agent may now propose sends to it — each still needs your approval",
     );
     Ok(())
 }
@@ -140,9 +140,17 @@ pub fn disallow(
             recipient: recipient.clone(),
         },
     );
-    emit(json, agent, &recipient, "disallowed", "sends to it now ask");
+    emit(
+        json,
+        agent,
+        &recipient,
+        "disallowed",
+        "requests to it are now refused",
+    );
     if emptied && !json {
-        ui::warn("the allowlist is now empty — every recipient asks until one is allowed");
+        ui::warn(
+            "the allowlist is now empty — every request is refused until a recipient is allowed",
+        );
     }
     Ok(())
 }

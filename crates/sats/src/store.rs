@@ -775,6 +775,55 @@ pub fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
     Ok(())
 }
 
+/// Write a file the human named (a PSBT artifact) atomically and
+/// owner-only. Unlike `write_atomic`, the destination directory belongs to
+/// the user: it must already exist and its permissions are never changed.
+/// A bare file name lands in the working directory.
+pub fn write_artifact(path: &Path, bytes: &[u8]) -> Result<()> {
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} does not name a file", path.display()))?;
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    // A hidden, process-unique sibling: never clobbers a user's own file.
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = dir.join(tmp_name);
+    let written = (|| -> Result<()> {
+        let mut file =
+            create_private(&tmp).with_context(|| format!("cannot write {}", path.display()))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// Create a new file that is owner-only from its first byte.
+#[cfg(unix)]
+fn create_private(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
 #[cfg(unix)]
 fn set_secret_perms(file: &fs::File, secret: bool) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;

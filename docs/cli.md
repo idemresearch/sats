@@ -145,8 +145,10 @@ The three send modes:
   no PSBT, no transaction record, no wallet-state change, and no password
   prompt.
 - **`--export-psbt <FILE>`**: writes the unsigned PSBT to `FILE` as an
-  owner-only artifact and signs nothing. The change address it reserves is
-  persisted so the artifact stays valid.
+  owner-only artifact and signs nothing. `FILE` may be a bare name in the
+  working directory; its directory must exist, and sats never changes that
+  directory's permissions. The change address it reserves is persisted so
+  the artifact stays valid.
 
 If broadcast fails after signing, the transaction is already saved:
 `sats status` lists it and `sats tx broadcast <txid>` retries it.

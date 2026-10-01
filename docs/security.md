@@ -484,7 +484,10 @@ unverified against a live endpoint.
 PSBTs are the preparation and signer contract. A normal human or agent send
 keeps the PSBT in memory. `sats send --export-psbt` is the explicit
 exception: it writes the unsigned PSBT to an owner-only file artifact the
-user names. Successful `sats psbt sign` converts an artifact into a
+user names. Artifacts are created owner-only from their first byte; the
+directory that holds them belongs to the user and keeps its permissions,
+unlike sats-managed state directories, which are restricted to the owner.
+Successful `sats psbt sign` converts an artifact into a
 private raw finalized-transaction record.
 
 `sats psbt sign FILE` accepts an external base64 or binary PSBT; a PSBT that

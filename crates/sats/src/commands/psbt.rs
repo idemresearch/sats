@@ -11,7 +11,7 @@ use sats_core::bitcoin::{Address, Network, Psbt, ScriptBuf};
 use sats_core::plan::TransactionRecord;
 use sats_core::signer::{LocalSigner, Signer};
 
-use crate::store::{Store, unix_now, write_atomic};
+use crate::store::{Store, unix_now, write_artifact};
 use crate::{keys, ui, walletd};
 
 /// Decode a PSBT file without touching the wallet, the store, or the chain.
@@ -115,7 +115,7 @@ pub fn sign(
     let finalized = signer.sign(&mut psbt)?;
 
     if let Some(out_path) = out {
-        write_atomic(out_path, psbt.to_string().as_bytes(), true)?;
+        write_artifact(out_path, psbt.to_string().as_bytes())?;
         if json {
             println!(
                 "{}",
@@ -137,7 +137,7 @@ pub fn sign(
     if !finalized {
         // Interop path: hand the partially signed PSBT back as a file.
         let out_path = file.with_extension("signed.psbt");
-        write_atomic(&out_path, psbt.to_string().as_bytes(), true)?;
+        write_artifact(&out_path, psbt.to_string().as_bytes())?;
         if json {
             println!(
                 "{}",

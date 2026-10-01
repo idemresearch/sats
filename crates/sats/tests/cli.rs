@@ -1434,10 +1434,13 @@ fn agent_allowlist_edits_gate_on_widening() {
 
     // With the right password it lands; re-allowing is a passwordless
     // no-op.
+    // Allowing never implies autonomy: every send still waits for approval.
     sats(&dir)
         .args(["agent", "allow", "claude", &stranger])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("still needs your approval"))
+        .stdout(predicate::str::contains("automatic").not());
     assert_eq!(allowed_in_file(&dir), Some(2));
     sats(&dir)
         .args(["agent", "allow", "claude", &stranger])
@@ -1447,7 +1450,7 @@ fn agent_allowlist_edits_gate_on_widening() {
         .stdout(predicate::str::contains("already"));
 
     // Tightening never prompts — wrong password on hand, still fine —
-    // and emptying the list means every recipient asks.
+    // and emptying the list means every request is refused.
     sats(&dir)
         .args(["agent", "disallow", "claude", &stranger])
         .env("SATS_PASSWORD", "wrong-password")
@@ -1459,7 +1462,9 @@ fn agent_allowlist_edits_gate_on_widening() {
         .env("SATS_PASSWORD", "wrong-password")
         .assert()
         .success()
-        .stdout(predicate::str::contains("every recipient asks"));
+        .stdout(predicate::str::contains("requests to it are now refused"))
+        .stdout(predicate::str::contains("every request is refused"))
+        .stdout(predicate::str::contains("now ask").not());
     assert_eq!(allowed_in_file(&dir), Some(0));
 
     // A grant with no allowlist: allow is an informative no-op, disallow
@@ -1776,6 +1781,61 @@ fn dismiss_declines_a_pending_request() {
     );
     assert_eq!(log.as_array().unwrap().len(), 1);
     assert_eq!(log[0]["event"], "dismissed");
+}
+
+// PSBT artifacts are owner-only files, but the directory belongs to the
+// user: a bare name lands in the working directory and the directory's
+// permissions are left alone.
+#[cfg(unix)]
+#[test]
+fn psbt_artifacts_are_private_without_touching_the_users_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    write_mock_provider(&dir);
+    common::fund_wallet(&dir, &[100_000]);
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    std::fs::set_permissions(&work, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+    sats(&dir)
+        .current_dir(&work)
+        .args([
+            "send",
+            common::ADDRESS,
+            "5000",
+            "--fee-rate",
+            "2",
+            "--export-psbt",
+            "spend.psbt",
+        ])
+        .assert()
+        .success();
+    sats(&dir)
+        .current_dir(&work)
+        .args(["psbt", "sign", "spend.psbt", "--out", "signed.psbt"])
+        .assert()
+        .success();
+
+    for name in ["spend.psbt", "signed.psbt"] {
+        assert_eq!(mode(&work.join(name)), 0o600, "{name}");
+    }
+    assert_eq!(
+        mode(&work),
+        0o755,
+        "the user's directory keeps its permissions"
+    );
+    let mut names: Vec<_> = std::fs::read_dir(&work)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["signed.psbt", "spend.psbt"],
+        "no temporary files remain"
+    );
 }
 
 #[test]
