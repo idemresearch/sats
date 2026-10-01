@@ -132,6 +132,9 @@ impl HttpServer {
                 }
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // BSD/macOS accepted sockets inherit the listener's
+                        // non-blocking flag; reads below must block.
+                        stream.set_nonblocking(false).unwrap();
                         stream
                             .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                             .unwrap();

@@ -46,7 +46,9 @@ fn extend_network(store: &Store, network: Network) -> Result<()> {
     let net_name = network_name(network);
     if store.wallet_db_path(net_name).exists() {
         bail!(
-            "wallet already exists ({}) — to start over, delete your sats data directory manually",
+            "wallet already exists ({})\n\
+             Use `sats balance` or `sats receive` to use this wallet.\n\
+             For a separate test wallet, set SATS_DIR to an empty directory and run `sats init`.",
             store.seed_path().display()
         );
     }

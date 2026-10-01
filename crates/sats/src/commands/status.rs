@@ -91,12 +91,20 @@ pub fn run(
     json: bool,
 ) -> Result<()> {
     let mut ctx = walletd::open(store, network)?;
-    if !offline && let Err(err) = resolve_services()?.sync_wallet(&mut ctx) {
-        eprintln!("✗ sync failed — confirmation state may be stale ({err:#})");
-    }
+    let freshness = if offline {
+        "offline"
+    } else {
+        match resolve_services()?.sync_wallet(&mut ctx) {
+            Ok(()) => "fresh",
+            Err(err) => {
+                eprintln!("✗ sync failed — confirmation state may be stale ({err:#})");
+                "failed"
+            }
+        }
+    };
 
     if let Some(id) = txid {
-        return detail(store, &ctx, id, json);
+        return detail(store, &ctx, id, json, freshness);
     }
 
     let records = store.list_transactions(ctx.net_name)?;
@@ -108,9 +116,11 @@ pub fn run(
         println!(
             "{}",
             serde_json::json!({
+                "synced": freshness == "fresh",
+                "sync_status": freshness,
                 "pending": pending
                     .iter()
-                    .map(|r| entry_json(r, &ChainState::Unseen))
+                    .map(|r| entry_json(r, &chain_state(&ctx, &r.txid)))
                     .collect::<Vec<_>>(),
                 "broadcast": broadcast
                     .iter()
@@ -126,13 +136,14 @@ pub fn run(
         return Ok(());
     }
     if !pending.is_empty() {
-        ui::dim("pending (signed, not broadcast)");
+        ui::dim("pending (signed; broadcast unconfirmed)");
         for record in &pending {
             println!(
-                "{}  {} sat → {}",
+                "{}  {} sat → {}  {}",
                 &record.txid[..8],
                 format_sats(record.total_sat()),
-                record.recipient
+                record.recipient,
+                chain_state(&ctx, &record.txid).label()
             );
             ui::dim(&format!(
                 "  broadcast: sats tx broadcast {}",
@@ -158,19 +169,21 @@ pub fn run(
     Ok(())
 }
 
-fn detail(store: &Store, ctx: &WalletCtx, id: &str, json: bool) -> Result<()> {
+fn detail(store: &Store, ctx: &WalletCtx, id: &str, json: bool, freshness: &str) -> Result<()> {
     match store.load_transaction(ctx.net_name, id) {
         Ok(record) => {
-            let state = match record.status {
-                TransactionStatus::Pending => ChainState::Unseen,
-                TransactionStatus::Broadcast => chain_state(ctx, &record.txid),
-            };
+            let state = chain_state(ctx, &record.txid);
             if json {
-                println!("{}", entry_json(&record, &state));
+                let mut entry = entry_json(&record, &state);
+                entry["synced"] = (freshness == "fresh").into();
+                entry["sync_status"] = freshness.into();
+                println!("{entry}");
                 return Ok(());
             }
             let status = match record.status {
-                TransactionStatus::Pending => "pending (signed, not broadcast)".to_string(),
+                TransactionStatus::Pending => {
+                    format!("signed; broadcast unconfirmed — {}", state.label())
+                }
                 TransactionStatus::Broadcast => format!("broadcast — {}", state.label()),
             };
             ui::kv_rows(&[
@@ -202,6 +215,8 @@ fn detail(store: &Store, ctx: &WalletCtx, id: &str, json: bool) -> Result<()> {
             if json {
                 let mut entry = serde_json::json!({
                     "txid": id,
+                    "synced": freshness == "fresh",
+                    "sync_status": freshness,
                     "net_sat": details.balance_delta.to_sat(),
                     "fee_sat": details.fee.map(|f| f.to_sat()),
                     "seen": state.seen(),

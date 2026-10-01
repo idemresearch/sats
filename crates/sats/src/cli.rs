@@ -33,6 +33,25 @@ pub struct Cli {
     pub command: Command,
 }
 
+impl Cli {
+    pub fn parse_with_safe_errors() -> Self {
+        Self::try_parse().unwrap_or_else(|mut error| {
+            use clap::error::{ContextKind, ContextValue};
+            // Clap otherwise repeats the complete credential-bearing value
+            // even though our provider parser returns a display-safe reason.
+            if matches!(error.get(ContextKind::InvalidArg),
+                Some(ContextValue::String(arg)) if arg.starts_with("--provider"))
+            {
+                error.insert(
+                    ContextKind::InvalidValue,
+                    ContextValue::String("[redacted provider endpoint]".into()),
+                );
+            }
+            error.exit()
+        })
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Set up the wallet: create a new one, or restore from a mnemonic backup
@@ -111,6 +130,7 @@ pub enum AlkanesCommand {
     },
     /// Execute a contract call: simulate, confirm, sign, broadcast.
     /// Refuses mainnet in this release
+    #[cfg(feature = "experimental-alkanes-execute")]
     Execute {
         /// Alkane id (e.g. 2:1)
         #[arg(value_name = "BLOCK:TX")]
@@ -257,9 +277,9 @@ pub enum AgentCommand {
     /// Authorize and execute one pending request: prepare, review the
     /// real fee, enter the password, sign, broadcast
     Approve {
-        /// Request id or unique prefix (see: sats agent requests)
-        id: String,
-        /// Skip the confirmation prompt (the password is still required)
+        /// Request id or unique prefix; omit to select one on a terminal
+        id: Option<String>,
+        /// Skip confirmation for an explicit id (the password is still required)
         #[arg(short, long)]
         yes: bool,
     },
@@ -268,9 +288,9 @@ pub enum AgentCommand {
         /// Request id or unique prefix
         id: String,
     },
-    /// Review agent requests (pending ones await your decision)
+    /// Review agent requests awaiting approval or recovery
     Requests {
-        /// Include settled and dismissed requests, not only pending ones
+        /// Include settled and dismissed requests, not only those needing attention
         #[arg(long, conflicts_with = "watch")]
         all: bool,
         /// Stay running and print each request as it newly awaits a

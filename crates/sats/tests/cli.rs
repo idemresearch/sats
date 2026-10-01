@@ -43,7 +43,14 @@ fn init_refuses_existing_wallet() {
         .arg("init")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("already exists"));
+        .stderr(predicate::str::contains("already exists"))
+        .stderr(predicate::str::contains(
+            "Use `sats balance` or `sats receive`",
+        ))
+        .stderr(predicate::str::contains(
+            "set SATS_DIR to an empty directory",
+        ))
+        .stderr(predicate::str::contains("delete").not());
 }
 
 /// Pull the mnemonic out of `sats init`'s stdout (indented six-word rows).
@@ -243,7 +250,8 @@ fn guard_failure_stops_planning() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     let mockdata = write_mock_provider(&dir);
-    // A configured guard that cannot answer must stop planning.
+    common::fund_wallet(&dir, &[100_000]);
+    // A configured guard that cannot answer must stop planning with candidates.
     std::fs::remove_file(mockdata.join("guard.json")).unwrap();
     sats(&dir)
         .args([
@@ -267,8 +275,8 @@ fn no_guards_flag_skips_the_asset_check() {
     init_wallet(&dir);
     let mockdata = write_mock_provider(&dir);
     std::fs::remove_file(mockdata.join("guard.json")).unwrap();
-    // With the explicit escape the pipeline proceeds past the guard and
-    // fails for the ordinary reason: an empty wallet.
+    common::fund_wallet(&dir, &[100_000]);
+    // With candidates and the explicit escape, preparation skips the guard.
     sats(&dir)
         .args([
             "send",
@@ -280,8 +288,7 @@ fn no_guards_flag_skips_the_asset_check() {
             "--no-guards",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("Insufficient funds"));
+        .success();
 }
 
 #[test]
@@ -417,7 +424,6 @@ fn provider_resolution_is_only_required_for_online_commands() {
         vec!["status", "--json"],
         vec!["status", &txid, "--json"],
         vec!["send", common::ADDRESS, "5000", "--dry-run"],
-        vec!["tx", "broadcast", &txid],
         vec!["agent", "approve", "r-pending", "--yes"],
     ] {
         sats(&dir)
@@ -427,7 +433,21 @@ fn provider_resolution_is_only_required_for_online_commands() {
             .stderr(predicate::str::contains("multiple chain.sync providers"))
             .stderr(predicate::str::contains("invalid config").not());
     }
-    assert_eq!(request_json(&dir, "r-pending"), request_before);
+    let attempted = request_json(&dir, "r-pending");
+    assert_eq!(attempted["status"], "failed");
+    assert_eq!(attempted["intent_digest"], request_before["intent_digest"]);
+    assert!(
+        attempted["message"]
+            .as_str()
+            .unwrap()
+            .contains("multiple chain.sync providers")
+    );
+    // An unsaved incoming txid fails locally, before provider selection.
+    sats(&dir)
+        .args(["tx", "broadcast", &txid])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no transaction"));
     assert_eq!(std::fs::read(grant_path).unwrap(), grant_before);
     assert!(!dir.path().join("signet/transactions").exists());
     common::assert_no_provider_calls(&servers);
@@ -889,7 +909,7 @@ fn agent_requests_lists_pending_requests() {
         .success()
         .stdout(predicate::str::contains("r-pay-1"))
         .stdout(predicate::str::contains("pending_approval"))
-        .stdout(predicate::str::contains("sats agent approve <id>"));
+        .stdout(predicate::str::contains("sats agent approve"));
     sats(&dir)
         .args(["agent", "requests", "--all"])
         .assert()
@@ -1414,10 +1434,13 @@ fn agent_allowlist_edits_gate_on_widening() {
 
     // With the right password it lands; re-allowing is a passwordless
     // no-op.
+    // Allowing never implies autonomy: every send still waits for approval.
     sats(&dir)
         .args(["agent", "allow", "claude", &stranger])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("still needs your approval"))
+        .stdout(predicate::str::contains("automatic").not());
     assert_eq!(allowed_in_file(&dir), Some(2));
     sats(&dir)
         .args(["agent", "allow", "claude", &stranger])
@@ -1427,7 +1450,7 @@ fn agent_allowlist_edits_gate_on_widening() {
         .stdout(predicate::str::contains("already"));
 
     // Tightening never prompts — wrong password on hand, still fine —
-    // and emptying the list means every recipient asks.
+    // and emptying the list means every request is refused.
     sats(&dir)
         .args(["agent", "disallow", "claude", &stranger])
         .env("SATS_PASSWORD", "wrong-password")
@@ -1439,7 +1462,9 @@ fn agent_allowlist_edits_gate_on_widening() {
         .env("SATS_PASSWORD", "wrong-password")
         .assert()
         .success()
-        .stdout(predicate::str::contains("every recipient asks"));
+        .stdout(predicate::str::contains("requests to it are now refused"))
+        .stdout(predicate::str::contains("every request is refused"))
+        .stdout(predicate::str::contains("now ask").not());
     assert_eq!(allowed_in_file(&dir), Some(0));
 
     // A grant with no allowlist: allow is an informative no-op, disallow
@@ -1756,4 +1781,108 @@ fn dismiss_declines_a_pending_request() {
     );
     assert_eq!(log.as_array().unwrap().len(), 1);
     assert_eq!(log[0]["event"], "dismissed");
+}
+
+// PSBT artifacts are owner-only files, but the directory belongs to the
+// user: a bare name lands in the working directory and the directory's
+// permissions are left alone.
+#[cfg(unix)]
+#[test]
+fn psbt_artifacts_are_private_without_touching_the_users_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    write_mock_provider(&dir);
+    common::fund_wallet(&dir, &[100_000]);
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    std::fs::set_permissions(&work, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+    sats(&dir)
+        .current_dir(&work)
+        .args([
+            "send",
+            common::ADDRESS,
+            "5000",
+            "--fee-rate",
+            "2",
+            "--export-psbt",
+            "spend.psbt",
+        ])
+        .assert()
+        .success();
+    sats(&dir)
+        .current_dir(&work)
+        .args(["psbt", "sign", "spend.psbt", "--out", "signed.psbt"])
+        .assert()
+        .success();
+
+    for name in ["spend.psbt", "signed.psbt"] {
+        assert_eq!(mode(&work.join(name)), 0o600, "{name}");
+    }
+    assert_eq!(
+        mode(&work),
+        0o755,
+        "the user's directory keeps its permissions"
+    );
+    let mut names: Vec<_> = std::fs::read_dir(&work)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["signed.psbt", "spend.psbt"],
+        "no temporary files remain"
+    );
+}
+
+#[test]
+fn pending_saved_transaction_requires_providers_but_receipt_repair_does_not() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    write_mock_provider(&dir);
+    common::fund_wallet(&dir, &[100_000]);
+    let artifact = dir.path().join("unsigned.psbt");
+    sats(&dir)
+        .args([
+            "send",
+            common::ADDRESS,
+            "5000",
+            "--fee-rate",
+            "2",
+            "--export-psbt",
+        ])
+        .arg(&artifact)
+        .assert()
+        .success();
+    let signed = json_stdout(
+        sats(&dir)
+            .args(["psbt", "sign"])
+            .arg(&artifact)
+            .arg("--json")
+            .assert()
+            .success(),
+    );
+    let txid = signed["txid"].as_str().unwrap();
+    let record_path = dir.path().join(format!("signet/transactions/{txid}.json"));
+    let before = std::fs::read(&record_path).unwrap();
+    let servers = common::write_ambiguous_providers(&dir);
+    sats(&dir)
+        .env_remove("SATS_PASSWORD")
+        .args(["tx", "broadcast", txid])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("multiple chain.sync providers"));
+    assert_eq!(std::fs::read(&record_path).unwrap(), before);
+    let mut record: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    record["status"] = "broadcast".into();
+    std::fs::write(&record_path, record.to_string()).unwrap();
+    sats(&dir)
+        .env_remove("SATS_PASSWORD")
+        .args(["tx", "broadcast", txid])
+        .assert()
+        .success();
+    common::assert_no_provider_calls(&servers);
 }

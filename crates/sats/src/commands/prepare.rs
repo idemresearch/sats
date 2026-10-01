@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use sats_core::bitcoin::{Address, Amount, FeeRate, OutPoint};
 use sats_core::engine;
 use sats_core::plan::PreparedSpend;
@@ -11,8 +11,8 @@ use crate::store::unix_now;
 use crate::ui;
 use crate::walletd::WalletCtx;
 
-/// One preparation request. MCP sends always use the defaults for the
-/// safety escapes: agents get no bypass.
+/// One preparation request. Human-approved agent requests always use the
+/// defaults for the safety escapes: agents get no bypass.
 pub struct PrepareRequest<'a> {
     pub address: &'a str,
     pub amount: u64,
@@ -35,10 +35,10 @@ impl<'a> PrepareRequest<'a> {
 
 /// The shared preparation pipeline for human sends and approved agent
 /// requests:
-/// validate → sync → protect → estimate → build. Ordered so that a request
-/// that can never succeed (bad address) fails before any network IO, and
-/// spending never plans on stale chain state — a failed sync is a hard
-/// error, as is a configured guard that cannot answer.
+/// validate → sync → check funds → protect → estimate → build. A request
+/// that can never succeed (bad address) fails before any network IO.
+/// Spending never plans on stale chain state — a failed sync is a hard
+/// error. With candidates present, every configured guard must answer.
 pub fn build(
     ctx: &mut WalletCtx,
     services: &Services,
@@ -59,12 +59,18 @@ pub fn build(
         .list_unspent()
         .map(|u| (u.outpoint, u.txout.value))
         .collect();
+    if utxos.is_empty() {
+        bail!(
+            "Insufficient funds: wallet has no unspent outputs after synchronization — \
+             fund this wallet using an address from sats receive"
+        );
+    }
     let mut unspendable: BTreeSet<OutPoint> = BTreeSet::new();
     if !req.allow_dust {
         let dust = engine::dust_suspects(utxos.iter().copied());
         if !dust.is_empty() {
             eprintln!(
-                "⚠ {} utxo{} excluded (dust heuristic: possible inscriptions — --allow-dust to override)",
+                "⚠ {} utxo{} excluded (dust heuristic: possible inscriptions)",
                 dust.len(),
                 if dust.len() == 1 { "" } else { "s" },
             );
@@ -89,6 +95,13 @@ pub fn build(
         }
         unspendable.extend(fresh);
     }
+    if utxos.iter().all(|(op, _)| unspendable.contains(op)) {
+        bail!(
+            "Insufficient spendable funds: all {} unspent outputs are protected by the dust \
+             heuristic or configured asset guards — add funds in unprotected outputs before retrying",
+            utxos.len()
+        );
+    }
     let unspendable: Vec<OutPoint> = unspendable.into_iter().collect();
 
     let rate = match req.fee_rate {
@@ -98,7 +111,7 @@ pub fn build(
         }
         None => services
             .estimate_fee_rate()
-            .context("cannot estimate fee — pass --fee-rate")?,
+            .context("cannot estimate fee — check the configured fee provider and try again")?,
     };
     Ok(engine::build_plan(
         &mut ctx.wallet,

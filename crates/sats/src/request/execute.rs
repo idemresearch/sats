@@ -116,8 +116,8 @@ pub enum Outcome {
 /// instance that created the request. Providers are resolved only after
 /// these local checks pass. Preparation runs on the human's
 /// side of the boundary with no safety bypasses. Operational failures
-/// (sync, guards, fee estimation) leave the request untouched so the
-/// human can try again; a mismatch between the prepared transaction and
+/// (sync, guards, fee estimation) record a safe pre-signature failure so
+/// the human can inspect the attempt and authorize again; a mismatch between the prepared transaction and
 /// the recorded intent refuses without signing.
 pub fn stage(
     store: &Store,
@@ -171,12 +171,30 @@ pub fn stage(
 
     // Preparation: the shared pipeline, agent form — no dust or guard
     // bypass, and a failed sync is a hard stop.
-    let mut ctx = walletd::open(store, network)?;
-    let prepare_request =
-        prepare::PrepareRequest::for_agent(&request.recipient, request.amount_sat);
-    let services = resolve_services()?;
-    let prepared = prepare::build(&mut ctx, &services, &prepare_request)?;
-    ctx.persist()?;
+    let preparation = (|| -> Result<_> {
+        let mut ctx = walletd::open(store, network)?;
+        let prepare_request =
+            prepare::PrepareRequest::for_agent(&request.recipient, request.amount_sat);
+        let services = resolve_services()?;
+        let prepared = prepare::build(&mut ctx, &services, &prepare_request)?;
+        ctx.persist()?;
+        Ok((ctx, services, prepared))
+    })();
+    let (ctx, services, prepared) = match preparation {
+        Ok(prepared) => prepared,
+        Err(err) => {
+            // The claim excludes another execution, but a human may dismiss
+            // while provider I/O runs. Re-read under the grant lock and never
+            // replace a settled or potentially signed state with a retry.
+            let recorded = record_preparation_failure(store, net_name, &request, &err);
+            return match recorded {
+                Ok(()) => Err(err),
+                Err(write_err) => Err(err.context(format!(
+                    "preparation failed; cannot record the attempt: {write_err:#}"
+                ))),
+            };
+        }
+    };
 
     // What this transaction actually does, per our own descriptors. The
     // recorded intent committed to one exact payment; a PSBT that pays
@@ -557,6 +575,36 @@ fn record_denied_locked(
     request.updated_at = now;
     store.save_agent_request(net_name, &request)?;
     Ok(request)
+}
+
+/// Record only a provable pre-signing attempt. The caller holds the
+/// execution claim; the grant lock protects the fresh state check/write.
+fn record_preparation_failure(
+    store: &Store,
+    net_name: &str,
+    request: &AgentRequest,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let _lock = store.lock_grants(net_name)?;
+    let mut fresh = store
+        .load_agent_request(net_name, &request.agent, &request.id)?
+        .context("request disappeared during preparation")?;
+    if !fresh.version_supported()
+        || fresh.id != request.id
+        || fresh.agent != request.agent
+        || fresh.network != request.network
+        || fresh.grant_id != request.grant_id
+        || fresh.intent_digest != request.intent_digest
+        || fresh.recipient != request.recipient
+        || fresh.amount_sat != request.amount_sat
+    {
+        bail!("request changed during preparation; refusing to overwrite the record");
+    }
+    if !fresh.is_approvable() {
+        return Ok(());
+    }
+    let message = format!("preparation failed before signing: {error:#}");
+    record_failed_locked(store, net_name, &mut fresh, &message, unix_now())
 }
 
 /// The pre-invocation stop: written before the grant refund, so a crash
@@ -1527,7 +1575,7 @@ mod tests {
         );
         let again = approve(&fx, &id, &probe).unwrap_err();
         assert!(
-            again.to_string().contains("signed but not broadcast"),
+            again.to_string().contains("signed; broadcast unconfirmed"),
             "{again:#}"
         );
         assert_eq!(probe.counts(), (1, 1), "never signs again");
@@ -1972,7 +2020,7 @@ mod tests {
             "never refund a signature"
         );
         let again = approve(&fx, &id, &probe).unwrap_err();
-        assert!(again.to_string().contains("signed but not broadcast"));
+        assert!(again.to_string().contains("signed; broadcast unconfirmed"));
         assert_eq!(probe.counts(), (1, 1));
 
         // The same record marked broadcast reconciles to `sent`.
@@ -2141,10 +2189,9 @@ mod tests {
         assert_eq!(probe.counts(), (0, 0));
     }
 
-    /// Stale sync on the human's side leaves the request untouched: the
-    /// human retries when the chain is reachable.
+    /// Stale sync records a provably pre-signature failure for observation.
     #[test]
-    fn sync_failure_leaves_the_request_pending() {
+    fn sync_failure_records_a_safe_preparation_failure() {
         let fx = Fixture::new(&[100_000]);
         let token = fx.grant(50_000, 5_000);
         let id = fx.create(&token, "pay", 10_000).id;
@@ -2153,8 +2200,340 @@ mod tests {
         let err = approve(&fx, &id, &probe).unwrap_err();
         assert!(err.to_string().contains("stale state"), "{err:#}");
         assert_eq!(probe.counts(), (0, 0));
-        assert_eq!(fx.request(&id).status(), "pending_approval");
+        let request = fx.request(&id);
+        let RequestState::Failed { message, .. } = request.state else {
+            panic!("expected failed");
+        };
+        assert!(message.contains("stale state"));
+        assert!(message.contains("preparation failed before signing"));
         assert_eq!(fx.grant_state().spent_sat, 0);
+        assert_eq!(fx.count_events("failed"), 1);
+        std::fs::remove_file(fx.mockdata.join("sync-error")).unwrap();
+        assert!(matches!(
+            approve(&fx, &id, &probe).unwrap(),
+            Outcome::Sent { .. }
+        ));
+        assert_eq!(probe.counts(), (1, 1));
         drop(fx.dir);
+    }
+    #[test]
+    fn guard_fee_and_resolution_failures_are_observable_without_drawing_budget() {
+        for failure in ["guard", "fee", "resolution"] {
+            let fx = Fixture::new(&[100_000]);
+            let token = fx.grant(50_000, 5_000);
+            let id = fx.create(&token, "pay", 10_000).id;
+            match failure {
+                "guard" => std::fs::remove_file(fx.mockdata.join("guard.json")).unwrap(),
+                "fee" => std::fs::write(fx.mockdata.join("fees.json"), "invalid").unwrap(),
+                _ => {}
+            }
+            assert!(
+                stage(
+                    &fx.store,
+                    Network::Signet,
+                    || {
+                        if failure == "resolution" {
+                            bail!("provider unavailable");
+                        }
+                        Ok(fx.services())
+                    },
+                    &id
+                )
+                .is_err()
+            );
+            let record = fx.request(&id);
+            assert!(record.is_approvable());
+            let RequestState::Failed { message, .. } = record.state else {
+                panic!("expected failed");
+            };
+            assert!(message.contains("preparation failed before signing"));
+            assert_eq!(fx.grant_state().spent_sat, 0);
+            assert_eq!(fx.transactions(), 0);
+            assert_eq!(fx.count_events("failed"), 1);
+        }
+    }
+
+    #[test]
+    fn preparation_failure_never_overwrites_concurrent_settled_or_uncertain_state() {
+        for state in [
+            RequestState::Dismissed { at: 2 },
+            RequestState::Signing {
+                approved_at: 2,
+                fee_sat: 100,
+            },
+            RequestState::Unresolved {
+                at: 2,
+                message: "uncertain".into(),
+                txid: None,
+            },
+            RequestState::Sent {
+                at: 2,
+                fee_sat: 100,
+                txid: "saved".into(),
+            },
+        ] {
+            let fx = Fixture::new(&[100_000]);
+            let token = fx.grant(50_000, 5_000);
+            let id = fx.create(&token, "pay", 10_000).id;
+            assert!(
+                stage(
+                    &fx.store,
+                    Network::Signet,
+                    || {
+                        let _lock = fx.store.lock_grants("signet").unwrap();
+                        let mut record = fx.request(&id);
+                        record.state = state.clone();
+                        fx.store.save_agent_request("signet", &record).unwrap();
+                        bail!("preparation interrupted")
+                    },
+                    &id
+                )
+                .is_err()
+            );
+            assert_eq!(fx.request(&id).state, state);
+            assert_eq!(fx.count_events("failed"), 0);
+        }
+    }
+    #[test]
+    fn preparation_failure_preserves_replaced_or_unsupported_records() {
+        for replacement in ["version", "grant", "intent"] {
+            let fx = Fixture::new(&[100_000]);
+            let token = fx.grant(50_000, 5_000);
+            let id = fx.create(&token, "pay", 10_000).id;
+            let err = stage(
+                &fx.store,
+                Network::Signet,
+                || {
+                    let _lock = fx.store.lock_grants("signet").unwrap();
+                    let mut record = fx.request(&id);
+                    match replacement {
+                        "version" => record.format_version += 1,
+                        "grant" => record.grant_id = "replacement".into(),
+                        _ => record.intent_digest = "replacement".into(),
+                    }
+                    fx.store.save_agent_request("signet", &record).unwrap();
+                    bail!("preparation interrupted")
+                },
+                &id,
+            )
+            .err()
+            .expect("must fail");
+            assert!(format!("{err:#}").contains("request changed during preparation"));
+            assert_eq!(fx.request(&id).status(), "pending_approval");
+            assert_eq!(fx.count_events("failed"), 0);
+        }
+    }
+    #[test]
+    fn broadcast_receipt_write_failure_recovers_repeatedly_without_resigning_or_redrawing() {
+        for via_listing in [false, true] {
+            let fx = Fixture::new(&[100_000]);
+            let token = fx.grant(50_000, 5_000);
+            let id = fx.create(&token, "pay", 10_000).id;
+            let probe = SignerProbe::default();
+            std::fs::write(fx.mockdata.join("broadcast-fail"), "response lost").unwrap();
+            let Outcome::BroadcastPending { txid, .. } = approve(&fx, &id, &probe).unwrap() else {
+                panic!("expected broadcast_pending");
+            };
+            let before = fx.store.load_transaction("signet", &txid).unwrap();
+            let budget = fx.grant_state().spent_sat;
+            std::fs::remove_file(fx.mockdata.join("broadcast-fail")).unwrap();
+            // Block only the atomic receipt write, after successful broadcast.
+            let blocker = fx
+                .store
+                .agent_requests_dir("signet")
+                .join("claude")
+                .join(format!("{id}.tmp"));
+            std::fs::create_dir(&blocker).unwrap();
+            crate::commands::tx::broadcast(
+                &fx.store,
+                Network::Signet,
+                || Ok(fx.services()),
+                &txid,
+                true,
+            )
+            .unwrap();
+            assert_eq!(fx.request(&id).status(), "broadcast_pending");
+            let saved = fx.store.load_transaction("signet", &txid).unwrap();
+            assert_eq!(saved.status, TransactionStatus::Broadcast);
+            assert_eq!(saved.tx_hex, before.tx_hex);
+            std::fs::remove_dir(&blocker).unwrap();
+            for _ in 0..2 {
+                if via_listing {
+                    list_reconciled(&fx.store, Network::Signet).unwrap();
+                } else {
+                    crate::commands::tx::broadcast(
+                        &fx.store,
+                        Network::Signet,
+                        || panic!("receipt repair must not resolve providers"),
+                        &txid,
+                        true,
+                    )
+                    .unwrap();
+                }
+                assert_eq!(fx.request(&id).status(), "sent");
+                assert_eq!(fx.grant_state().spent_sat, budget);
+                assert_eq!(fx.grant_state().tx_count, 1);
+                assert_eq!(probe.counts(), (1, 1));
+                assert_eq!(fx.count_events("broadcast"), 1);
+            }
+            assert_eq!(
+                std::fs::read_to_string(fx.mockdata.join("broadcasts.log"))
+                    .unwrap()
+                    .lines()
+                    .count(),
+                1
+            );
+            assert!(approve(&fx, &id, &probe).is_err());
+            fx.assert_ledger_consistent();
+        }
+    }
+
+    #[test]
+    fn receipt_recovery_requires_broadcast_status_and_the_exact_transaction() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let probe = SignerProbe::default();
+        std::fs::write(fx.mockdata.join("broadcast-fail"), "response lost").unwrap();
+        let Outcome::BroadcastPending { txid, .. } = approve(&fx, &id, &probe).unwrap() else {
+            panic!("expected pending");
+        };
+        crate::request::settle_broadcast(&fx.store, Network::Signet, &txid).unwrap();
+        assert_eq!(fx.request(&id).status(), "broadcast_pending");
+        let mut record = fx.store.load_transaction("signet", &txid).unwrap();
+        record.mark_broadcast();
+        fx.store.save_transaction("signet", &record).unwrap();
+        let mut request = fx.request(&id);
+        request.state = RequestState::BroadcastPending {
+            txid: "wrong-transaction".into(),
+            fee_sat: record.fee_sat,
+            at: 1,
+        };
+        fx.store.save_agent_request("signet", &request).unwrap();
+        crate::request::settle_broadcast(&fx.store, Network::Signet, &txid).unwrap();
+        list_reconciled(&fx.store, Network::Signet).unwrap();
+        assert_eq!(fx.request(&id).state, request.state);
+        assert_eq!(fx.count_events("broadcast"), 0);
+        request.state = RequestState::Signing {
+            approved_at: 1,
+            fee_sat: record.fee_sat,
+        };
+        fx.store.save_agent_request("signet", &request).unwrap();
+        let claim = fx
+            .store
+            .claim_agent_request("signet", "claude", &id)
+            .unwrap()
+            .unwrap();
+        assert!(crate::request::settle_broadcast(&fx.store, Network::Signet, &txid).is_err());
+        assert_eq!(fx.request(&id).state, request.state);
+        drop(claim);
+        // A file at the expected path is insufficient: embedded identity must match.
+        let path = fx
+            .store
+            .agent_requests_dir("signet")
+            .join("claude")
+            .join(format!("{id}.json"));
+        let mut wrong_identity = request.clone();
+        wrong_identity.agent = "other".into();
+        std::fs::write(&path, serde_json::to_vec(&wrong_identity).unwrap()).unwrap();
+        assert!(crate::request::settle_broadcast(&fx.store, Network::Signet, &txid).is_err());
+        assert_eq!(fx.request(&id).agent, "other");
+        std::fs::write(path, serde_json::to_vec(&request).unwrap()).unwrap();
+        crate::request::settle_broadcast(&fx.store, Network::Signet, &txid).unwrap();
+        assert_eq!(fx.request(&id).status(), "sent");
+    }
+
+    #[test]
+    fn lost_broadcast_response_recovers_the_exact_bytes_with_one_signature_and_draw() {
+        use std::io::{BufRead, BufReader, Read};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let probe = SignerProbe::default();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "broadcast never reached fixture");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("{err}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("POST /tx "));
+            let mut length = 0;
+            loop {
+                line.clear();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut bytes = vec![0; length];
+            reader.read_exact(&mut bytes).unwrap();
+            // The fixture accepted these bytes, then lost the response.
+            String::from_utf8(bytes).unwrap()
+        });
+        let config_path = fx.dir.path().join("config.toml");
+        let original = std::fs::read_to_string(&config_path).unwrap();
+        let mut config: toml::Value = toml::from_str(&original).unwrap();
+        config["providers"]["mock"].as_table_mut().unwrap().insert(
+            "capabilities".into(),
+            toml::Value::try_from(vec!["chain.sync", "chain.fees", "guard.native"]).unwrap(),
+        );
+        config["providers"].as_table_mut().unwrap().insert("broadcast".into(),
+            toml::Value::try_from(serde_json::json!({"network":"signet","driver":"esplora","url":url,"capabilities":["chain.broadcast"]})).unwrap());
+        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+        let Outcome::BroadcastPending { txid, .. } = approve(&fx, &id, &probe).unwrap() else {
+            panic!("response must be uncertain");
+        };
+        let received_hex = server.join().unwrap();
+        let saved = fx.store.load_transaction("signet", &txid).unwrap();
+        assert_eq!(saved.tx_hex, received_hex);
+        assert_eq!(saved.status, TransactionStatus::Pending);
+        let spent = fx.grant_state().spent_sat;
+        std::fs::write(&config_path, original).unwrap();
+        crate::commands::tx::broadcast(
+            &fx.store,
+            Network::Signet,
+            || Ok(fx.services()),
+            &txid,
+            true,
+        )
+        .unwrap();
+        crate::commands::tx::broadcast(
+            &fx.store,
+            Network::Signet,
+            || panic!("already broadcast"),
+            &txid,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            fx.store.load_transaction("signet", &txid).unwrap().tx_hex,
+            received_hex
+        );
+        assert_eq!(fx.request(&id).status(), "sent");
+        assert_eq!(probe.counts(), (1, 1));
+        assert_eq!(fx.grant_state().spent_sat, spent);
+        assert_eq!(fx.grant_state().tx_count, 1);
+        fx.assert_ledger_consistent();
     }
 }

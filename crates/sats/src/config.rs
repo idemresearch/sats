@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::store::{Store, write_atomic};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Config {
     pub network: String,
     /// Human-selected confirmation target per network. Providers report fee
@@ -22,6 +22,22 @@ pub struct Config {
     /// `crate::provider` for resolution rules.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub providers: BTreeMap<String, ProviderConfig>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let endpoints: BTreeMap<_, _> = self
+            .esplora
+            .iter()
+            .map(|(network, url)| (network, crate::provider::error::redact_url(url)))
+            .collect();
+        f.debug_struct("Config")
+            .field("network", &self.network)
+            .field("fee_targets", &self.fee_targets)
+            .field("esplora", &endpoints)
+            .field("providers", &self.providers)
+            .finish()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -49,7 +65,7 @@ impl std::fmt::Debug for ProviderConfig {
         f.debug_struct("ProviderConfig")
             .field("driver", &self.driver)
             .field("network", &self.network)
-            .field("url", &self.url)
+            .field("url", &crate::provider::error::redact_url(&self.url))
             .field("capabilities", &self.capabilities)
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .field("auth", &self.auth)
@@ -92,8 +108,26 @@ impl Config {
         }
         let text =
             fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-        let config: Config =
-            toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))?;
+        // TOML errors include source excerpts (and sometimes field values).
+        // The source may be a URL or authentication field, so retain only its
+        // location and never attach the original parser error as a source.
+        let config: Config = toml::from_str(&text).map_err(|error: toml::de::Error| {
+            let location = error
+                .span()
+                .map(|span| {
+                    let line = text.as_bytes()[..span.start.min(text.len())]
+                        .iter()
+                        .filter(|&&byte| byte == b'\n')
+                        .count()
+                        + 1;
+                    format!(" at line {line}")
+                })
+                .unwrap_or_default();
+            anyhow::anyhow!(
+                "invalid config {}{location}: invalid TOML or configuration fields",
+                path.display()
+            )
+        })?;
         config
             .validate()
             .with_context(|| format!("invalid config {}", path.display()))?;
@@ -191,7 +225,7 @@ mod tests {
         let provider = ProviderConfig {
             driver: "subfrost".into(),
             network: "signet".into(),
-            url: "https://signet.subfrost.io/v4/jsonrpc".into(),
+            url: "https://USERSECRET:PASSSECRET@signet.subfrost.io/PATHSECRET?unknown=QUERYSECRET#FRAGMENTSECRET".into(),
             capabilities: None,
             api_key: Some("subfrost-secret".into()),
             auth: None,
@@ -199,6 +233,43 @@ mod tests {
         let debug = format!("{provider:?}");
         assert!(!debug.contains("subfrost-secret"));
         assert_eq!(debug.matches("[REDACTED]").count(), 1);
+        let mut config = Config::default();
+        config.esplora.insert("signet".into(), provider.url.clone());
+        config.providers.insert("fixture".into(), provider);
+        let cli =
+            crate::provider::parse_cli_provider(&format!("esplora={}", config.esplora["signet"]))
+                .unwrap();
+        for debug in [format!("{config:#?}"), format!("{cli:#?}")] {
+            for secret in [
+                "USERSECRET",
+                "PASSSECRET",
+                "PATHSECRET",
+                "QUERYSECRET",
+                "FRAGMENTSECRET",
+                "subfrost-secret",
+            ] {
+                assert!(!debug.contains(secret));
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_provider_config_never_echoes_secret_source_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        for text in [
+            "network = 'signet'\n[providers.fixture]\nurl = 'PATHSECRET\n",
+            "network = 'signet'\n[providers.fixture]\ndriver = 'esplora'\nnetwork = 'signet'\nurl = 'http://host/private'\nauth = { bearer = ['BEARERSECRET'] }\n",
+        ] {
+            std::fs::write(store.config_path(), text).unwrap();
+            let error = Config::load(&store).unwrap_err();
+            for rendered in [format!("{error:#}"), format!("{error:#?}")] {
+                assert!(rendered.contains("invalid config"));
+                assert!(rendered.contains("line"));
+                assert!(!rendered.contains("PATHSECRET"));
+                assert!(!rendered.contains("BEARERSECRET"));
+            }
+        }
     }
 
     #[test]

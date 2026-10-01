@@ -1,8 +1,9 @@
 //! The human review queue: agent requests and their states.
 
 use std::collections::BTreeSet;
+use std::io::{IsTerminal, Write};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
 use sats_core::request::{AgentRequest, RequestState};
@@ -24,7 +25,7 @@ pub fn run(store: &Store, network: Network, all: bool, watch: bool, json: bool) 
     // here, so what the human sees is the durable truth.
     let requests: Vec<AgentRequest> = list_reconciled(store, network)?
         .into_iter()
-        .filter(|request| all || request.is_pending_approval())
+        .filter(|request| all || needs_attention(request))
         .collect();
 
     if json {
@@ -36,13 +37,21 @@ pub fn run(store: &Store, network: Network, all: bool, watch: bool, json: bool) 
         ui::dim(if all {
             "no agent requests"
         } else {
-            "no pending agent requests — sats agent requests --all shows settled ones"
+            "no agent requests need attention — sats agent requests --all shows settled ones"
         });
         return Ok(());
     }
 
-    let header = ["Id", "Agent", "Recipient", "Amount", "Status", "Age"];
-    let rows: Vec<[String; 6]> = requests
+    let header = [
+        "Id",
+        "Agent",
+        "Recipient",
+        "Amount",
+        "Status",
+        "Age",
+        "Next step",
+    ];
+    let rows: Vec<[String; 7]> = requests
         .iter()
         .map(|request| {
             [
@@ -55,6 +64,7 @@ pub fn run(store: &Store, network: Network, all: bool, watch: bool, json: bool) 
                     "{} ago",
                     ui::human_duration(now.saturating_sub(request.created_at))
                 ),
+                next_step(request),
             ]
         })
         .collect();
@@ -79,9 +89,138 @@ pub fn run(store: &Store, network: Network, all: bool, watch: bool, json: bool) 
     for row in &rows {
         println!("{}", line(row));
     }
-    if !all && requests.iter().any(|r| r.is_pending_approval()) {
+    if !all && requests.iter().any(|r| r.is_approvable()) {
         println!();
-        ui::dim("approve one:  sats agent approve <id>    dismiss one:  sats agent dismiss <id>");
+        ui::dim("review one:  sats agent approve    dismiss one:  sats agent dismiss <id>");
+    }
+    Ok(())
+}
+
+fn needs_attention(request: &AgentRequest) -> bool {
+    request.is_approvable()
+        || matches!(
+            request.state,
+            RequestState::Signing { .. }
+                | RequestState::BroadcastPending { .. }
+                | RequestState::Unresolved { .. }
+        )
+}
+
+fn next_step(request: &AgentRequest) -> String {
+    match &request.state {
+        RequestState::PendingApproval => "review for approval".into(),
+        RequestState::Failed { message, .. } => {
+            format!("review again; stopped before signing: {message}")
+        }
+        RequestState::Signing { .. } => "execution active; refresh to observe".into(),
+        RequestState::BroadcastPending { txid, .. } => {
+            format!("signed; broadcast unconfirmed; sats tx broadcast {txid}")
+        }
+        RequestState::Unresolved { txid, message, .. } => {
+            let target = txid.as_deref().unwrap_or("");
+            format!("inspect: sats status {target}; may be signed; never approve again; {message}")
+        }
+        _ => String::new(),
+    }
+}
+
+/// The human menu refreshes the existing reconciliation path. Only
+/// approvable states receive numbers; recovery rows cannot be selected.
+pub fn select_for_review(store: &Store, network: Network) -> Result<Option<AgentRequest>> {
+    if !std::io::stdin().is_terminal() {
+        bail!(
+            "an explicit request id is required when stdin is not a terminal: sats agent approve <id>"
+        );
+    }
+    let mut input = std::io::stdin().lock();
+    let mut out = std::io::stderr().lock();
+    loop {
+        let requests = list_reconciled(store, network)?;
+        let eligible = render_selection(&mut out, &requests)?;
+        match ui::review_choice(&mut input, &mut out, eligible.len())? {
+            ui::ReviewChoice::Select(index) => return Ok(Some(eligible[index].clone())),
+            ui::ReviewChoice::Refresh => {}
+            ui::ReviewChoice::Wait => std::thread::sleep(WATCH_POLL),
+            ui::ReviewChoice::Cancel => {
+                writeln!(out, "cancelled — no request authorized")?;
+                return Ok(None);
+            }
+        }
+    }
+}
+
+fn render_selection<'a>(
+    out: &mut impl Write,
+    requests: &'a [AgentRequest],
+) -> Result<Vec<&'a AgentRequest>> {
+    writeln!(
+        out,
+        "\nAgent requests — select one to review (selection does not authorize)"
+    )?;
+    let eligible: Vec<_> = requests.iter().filter(|r| r.is_approvable()).collect();
+    if eligible.is_empty() {
+        writeln!(out, "No requests available for approval.")?;
+    }
+    for (index, request) in eligible.iter().enumerate() {
+        writeln!(
+            out,
+            "{}. {}  {} sat → {}  [{}]  {}",
+            index + 1,
+            request.agent,
+            format_sats(request.amount_sat),
+            request.recipient,
+            request.id,
+            next_step(request),
+        )?;
+    }
+    for request in requests
+        .iter()
+        .filter(|r| needs_attention(r) && !r.is_approvable())
+    {
+        writeln!(
+            out,
+            "Attention: {}  {}  {}",
+            request.agent,
+            request.id,
+            next_step(request)
+        )?;
+    }
+    Ok(eligible)
+}
+
+/// Re-read the exact selected record, failing closed if it disappeared or
+/// changed. An old menu index must never select a different request.
+pub fn reread_selection(store: &Store, network: Network, selected: &AgentRequest) -> Result<()> {
+    let current = store
+        .load_agent_request(network_name(network), &selected.agent, &selected.id)?
+        .with_context(|| {
+            format!(
+                "selected request {} disappeared — run sats agent approve to refresh",
+                selected.id
+            )
+        })?;
+    validate_selection(selected, &current)
+}
+
+pub fn validate_selection(selected: &AgentRequest, current: &AgentRequest) -> Result<()> {
+    if !current.version_supported()
+        || !current.is_approvable()
+        || selected.id != current.id
+        || selected.network != current.network
+        || selected.agent != current.agent
+        || selected.grant_id != current.grant_id
+        || selected.idempotency_key != current.idempotency_key
+        || selected.recipient != current.recipient
+        || selected.amount_sat != current.amount_sat
+        || selected.intent_digest != current.intent_digest
+        || selected.created_at != current.created_at
+        || selected.updated_at != current.updated_at
+        || selected.state != current.state
+    {
+        bail!(
+            "selected request {} changed — run sats agent approve to review it again",
+            selected.id
+        );
     }
     Ok(())
 }

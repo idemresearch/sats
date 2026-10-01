@@ -91,6 +91,14 @@ pub struct RequestView {
     pub fee_sat: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub txid: Option<String>,
+    /// Present for signing receipts: whether an execution lock is held at
+    /// observation time. Inactivity never proves that no signature exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_active: Option<bool>,
+    /// Present for signing receipts: ask the human to reconcile the request.
+    /// Observation itself never reconciles, refunds, signs, or broadcasts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_reconciliation: Option<bool>,
     pub message: String,
 }
 
@@ -105,6 +113,8 @@ impl RequestView {
             amount_sat: None,
             fee_sat: None,
             txid: None,
+            execution_active: None,
+            needs_reconciliation: None,
             message,
         }
     }
@@ -119,6 +129,8 @@ impl RequestView {
             amount_sat: None,
             fee_sat: None,
             txid: None,
+            execution_active: None,
+            needs_reconciliation: None,
             message,
         }
     }
@@ -158,7 +170,7 @@ impl RequestView {
                 None,
                 None,
                 None,
-                "the human authorized it; sats is signing and broadcasting — poll \
+                "the human authorized it; signing outcome is not yet settled — poll \
                  check_request"
                     .into(),
             ),
@@ -181,7 +193,7 @@ impl RequestView {
                 None,
                 Some(*fee_sat),
                 Some(txid.clone()),
-                "signed but not yet broadcast — the human retries the broadcast; nothing \
+                "signed; broadcast unconfirmed — the human recovers the saved transaction; nothing \
                  for you to do"
                     .into(),
             ),
@@ -204,6 +216,8 @@ impl RequestView {
             amount_sat: Some(record.amount_sat),
             fee_sat,
             txid,
+            execution_active: None,
+            needs_reconciliation: None,
             message,
         }
     }
@@ -501,7 +515,7 @@ impl SatsMcp {
 /// directory, so another agent's record can never be exposed, and a
 /// malformed id — an idempotency key included — is answered as a typed
 /// not-found before anything touches the disk. Nothing here mutates: no
-/// claim, no event, no reconciliation.
+/// durable claim, no event, no reconciliation; the existing lock is only probed.
 fn check_request_record(
     store: &Store,
     net_name: &'static str,
@@ -514,12 +528,45 @@ fn check_request_record(
              returned, not your idempotency_key"
         ));
     }
-    match store.load_agent_request(net_name, agent, raw_id) {
-        Ok(Some(record)) => RequestView::of(&record),
+    let observed = (|| -> Result<Option<RequestView>> {
+        let Some(mut record) = store.load_agent_request(net_name, agent, raw_id)? else {
+            return Ok(None);
+        };
+        let active = request::observe_execution(store, net_name, &record)?;
+        if active == Some(false) {
+            // The writer may have settled between our first read and the
+            // lock probe. Prefer its durable outcome to stale signing.
+            record = store
+                .load_agent_request(net_name, agent, raw_id)?
+                .ok_or_else(|| anyhow::anyhow!("request disappeared during observation"))?;
+        }
+        let mut view = RequestView::of(&record);
+        if matches!(record.state, RequestState::Signing { .. }) {
+            view.execution_active = active;
+            view.needs_reconciliation = active.map(|active| !active);
+            view.message = if active == Some(true) {
+                "human-authorized execution is active — observe with check_request".into()
+            } else {
+                "execution is no longer active; a signature may exist — ask the human to run sats agent requests for reconciliation; do not file a replacement".into()
+            };
+        }
+        Ok(Some(view))
+    })();
+    match observed {
+        Ok(Some(view)) => view,
         Ok(None) => RequestView::not_found(format!(
             "no request {raw_id:?} recorded for agent {agent:?}"
         )),
-        Err(e) => RequestView::not_found(format!("cannot read request: {e:#}")),
+        Err(e) => {
+            let mut view = RequestView::error(
+                "store_error",
+                format!(
+                    "cannot read request: {e:#} — ask the human to inspect it; do not file a replacement"
+                ),
+            );
+            view.request_id = Some(raw_id.to_string());
+            view
+        }
     }
 }
 
@@ -545,5 +592,135 @@ impl ServerHandler for SatsMcp {
             self.agent,
             network_name(self.network),
         ))
+    }
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    const ID: &str = "r-0123456789abcdef0123456789abcdef";
+
+    fn signing_record() -> AgentRequest {
+        AgentRequest {
+            format_version: sats_core::request::REQUEST_FORMAT_VERSION,
+            id: ID.into(),
+            network: "signet".into(),
+            agent: "alice".into(),
+            grant_id: "grant".into(),
+            idempotency_key: Some("invoice".into()),
+            recipient: "recipient".into(),
+            amount_sat: 1_000,
+            intent_digest: "digest".into(),
+            created_at: 1,
+            updated_at: 1,
+            state: RequestState::Signing {
+                approved_at: 1,
+                fee_sat: 100,
+            },
+        }
+    }
+
+    #[test]
+    fn signing_observation_distinguishes_live_and_abandoned_without_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let record = signing_record();
+        let claim = store
+            .create_agent_request("signet", &record)
+            .unwrap()
+            .unwrap();
+        let base = store.agent_requests_dir("signet").join("alice");
+        let path = base.join(format!("{ID}.json"));
+        let lock_path = base.join(format!("{ID}.lock"));
+        let before = std::fs::read(&path).unwrap();
+        let lock_modified = std::fs::metadata(&lock_path).unwrap().modified().unwrap();
+        let active = check_request_record(&store, "signet", "alice", ID);
+        assert_eq!(active.status, "signing");
+        assert_eq!(active.execution_active, Some(true));
+        assert_eq!(active.needs_reconciliation, Some(false));
+        drop(claim);
+        for missing_lock in [false, true] {
+            if missing_lock {
+                std::fs::remove_file(&lock_path).unwrap();
+            }
+            let abandoned = check_request_record(&store, "signet", "alice", ID);
+            assert_eq!(abandoned.status, "signing");
+            assert_eq!(abandoned.execution_active, Some(false));
+            assert_eq!(abandoned.needs_reconciliation, Some(true));
+            assert!(abandoned.message.contains("a signature may exist"));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert_eq!(lock_path.exists(), !missing_lock);
+            if !missing_lock {
+                assert_eq!(
+                    std::fs::metadata(&lock_path).unwrap().modified().unwrap(),
+                    lock_modified
+                );
+            }
+        }
+        assert!(!dir.path().join("signet/events").exists());
+        assert!(!dir.path().join("signet/grants").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_execution_probe_is_a_store_error_not_inactivity() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        drop(
+            store
+                .create_agent_request("signet", &signing_record())
+                .unwrap(),
+        );
+        let lock_path = store
+            .agent_requests_dir("signet")
+            .join("alice")
+            .join(format!("{ID}.lock"));
+        std::fs::remove_file(&lock_path).unwrap();
+        std::os::unix::fs::symlink(&lock_path, &lock_path).unwrap();
+        let view = check_request_record(&store, "signet", "alice", ID);
+        assert_eq!(view.status, "error");
+        assert_eq!(view.error_code.as_deref(), Some("store_error"));
+        assert_eq!(view.request_id.as_deref(), Some(ID));
+        assert!(view.execution_active.is_none());
+    }
+
+    #[test]
+    fn unreadable_request_is_a_store_error_with_its_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let requests = store.agent_requests_dir("signet").join("alice");
+        std::fs::create_dir_all(&requests).unwrap();
+        let path = requests.join(format!("{ID}.json"));
+        // Corrupt bytes and an unreadable record (directory) both remain errors.
+        std::fs::write(&path, b"{").unwrap();
+        for corrupt in [true, false] {
+            if !corrupt {
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
+            }
+            let view = check_request_record(&store, "signet", "alice", ID);
+            assert_eq!(view.status, "error");
+            assert_eq!(view.error_code.as_deref(), Some("store_error"));
+            assert_eq!(view.request_id.as_deref(), Some(ID));
+            assert!(view.message.contains("do not file a replacement"));
+            // Visibility remains scoped to the authenticated agent.
+            assert_eq!(
+                check_request_record(&store, "signet", "bob", ID).status,
+                "not_found"
+            );
+        }
+    }
+
+    #[test]
+    fn absent_and_malformed_requests_still_have_absence_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        for id in [ID, "../../other", "my-idempotency-key"] {
+            let view = check_request_record(&store, "signet", "alice", id);
+            assert_eq!(view.status, "not_found");
+            assert!(view.error_code.is_none());
+        }
+        assert!(!store.agent_requests_dir("signet").exists());
     }
 }

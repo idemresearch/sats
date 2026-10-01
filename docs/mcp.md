@@ -25,22 +25,30 @@ sats agent grant claude \
   --max-fee 1000
 ```
 
-The grant prints a bearer token once. It is never stored, so copy it now;
-re-issue the grant if you lose it. The served process reads it from
-`SATS_AGENT_TOKEN`:
+The grant emits a bearer token that sats cannot show again. sats stores only
+its hash, so re-issue the grant if you lose it. Copy one of the two printed
+commands; each embeds the same token as `SATS_AGENT_TOKEN` and starts the same
+local stdio server:
 
 ```sh
-SATS_AGENT_TOKEN=<token> sats agent serve claude
+codex mcp add sats --env SATS_AGENT_TOKEN=<token> -- <pinned sats command>
+claude mcp add --transport stdio --scope local sats --env SATS_AGENT_TOKEN=<token> -- <pinned sats command>
 ```
 
-For Claude Code, for example:
+The `codex mcp add` command configures the MCP host shared by ChatGPT desktop,
+Codex CLI, and the Codex IDE extension. Restart ChatGPT desktop after adding
+the server. ChatGPT web cannot launch a local stdio server. The Claude Code
+command uses local scope for the current project and does not write a
+repository `.mcp.json`. Both clients save the raw token in their local
+configuration; sats stores only its hash.
 
-```sh
-claude mcp add sats --env SATS_AGENT_TOKEN=<token> -- sats agent serve claude
-```
-
-Use the same `--network`, `--provider`, and `SATS_DIR` values that identify the
-wallet and provider configuration the agent should use.
+The printed POSIX-shell commands pin the effective network and
+wallet/configuration locations, resolve relative directory overrides, and
+safely quote literal arguments. A different working directory or conflicting
+ambient defaults cannot redirect them. Provider credentials are not copied;
+provider settings are read from the original wallet configuration. If
+launching manually, select the same `--network` and wallet directory
+explicitly.
 
 At startup the server verifies:
 
@@ -146,7 +154,14 @@ an idempotency key is a malformed id here. It reads the durable record
 only: no chain access, no side effects. The result has the same shape
 as `request_send`; a `sent` request carries its `txid` and `fee_sat`. An
 unknown or malformed id is `status: "not_found"`, and another agent's
-requests are never visible.
+requests are never visible. A corrupt or unreadable record instead returns
+`status: "error"`, `error_code: "store_error"`, and the requested ID; ask the
+human to inspect it and never file a replacement to recover uncertainty.
+
+For `signing`, the result adds `execution_active` and `needs_reconciliation`.
+The existing execution lock is probed without creating or changing files. An
+inactive or missing lock means human reconciliation is needed, never that the
+request is unsigned. Observation itself never reconciles or changes budget.
 
 ## Request states
 
@@ -155,14 +170,14 @@ requests are never visible.
 | `pending_approval` | Inside the grant; awaiting the human | Relay the id; observe |
 | `denied` | Outside a grant boundary (`reason`); terminal | Report once; stop |
 | `dismissed` | The human declined; terminal | Stop; ask the human before proposing again |
-| `signing` | The human authorized it; sats is signing and broadcasting | Observe |
+| `signing` | Authorized execution is active, or durable state needs human reconciliation; see the observation flags | Observe; relay reconciliation guidance when needed |
 | `sent` | Broadcast; carries `txid` | Done |
-| `broadcast_pending` | Signed and persisted; the broadcast failed. The human retries it | Nothing |
-| `unresolved` | The signer was invoked and did not produce a durable, broadcastable result; a signature may exist. The human resolves it | Nothing; do not file it again |
-| `failed` | Execution stopped before the signer was invoked; the human may authorize again | Observe |
+| `broadcast_pending` | Signed and persisted; broadcast unconfirmed locally, including a lost response | The human recovers the saved transaction; keep observing |
+| `unresolved` | A signature may exist without a durable, broadcastable result. The human inspects it | Do not file it again |
+| `failed` | Preparation or execution stopped before signer invocation; the diagnostic describes the last attempt | Observe; only the human may review and authorize again |
 
 `error` is not a request state: it is a typed operational condition on the
-call itself, with an `error_code` and no record written.
+call itself, with an `error_code`; it does not file a replacement request.
 
 | `error_code` | Meaning |
 |---|---|
@@ -196,20 +211,25 @@ once and stop: re-filing the same proposal cannot expand authority.
 Nothing, on the agent's side. The human sees the request in
 `sats agent requests` (or the `--watch` stream, a trusted channel that
 does not rely on the agent relaying its own status) and runs
-`sats agent approve <id>`, which:
+`sats agent approve` to select one for review (or supplies its ID), which:
 
 1. prepares the transaction on current chain state, with no UTXO-safety
    bypasses;
 2. derives what the prepared transaction pays from the wallet's own
    descriptors and refuses if it disagrees with the recorded request;
 3. re-runs the grant's ladder with the real fee, and shows the human the
-   recipient, amount, fee, and total;
+   wallet, network, full recipient, amount, fee, and total;
 4. takes the wallet password — the authorization — and, under the grant
    lock, checks that the grant on file is the one that created the
    request, draws the budget on the grant's ledger under the request's
    id, and persists the request as `signing` before the signer is
    invoked;
 5. signs, persists the finalized transaction, and broadcasts.
+
+Preparation sync, guard, fee, or provider-resolution failures become observable
+`failed` attempts with no new draw. The same request may be reviewed again by
+the human; the agent only observes it with `check_request`, without repeatedly
+syncing balance/status or filing another request.
 
 A failure before the signer is invoked — the audit log cannot be
 written, the signer cannot be constructed — returns the draw and leaves
@@ -219,7 +239,9 @@ signature": an error, an unfinalized result, or a failure to finalize or
 save the transaction leaves the request `unresolved`, with the draw kept
 and the request never signed again. A broadcast failure after signing is
 `broadcast_pending`: the draw is final, the request is never signed
-again, and `sats tx broadcast <txid>` settles it to `sent`. `sats agent
+again, and `sats tx broadcast <txid>` rebroadcasts the saved bytes. If broadcast
+succeeded but the receipt write failed, listing or repeating that command
+repairs it from the attributed saved record without signing or drawing again. `sats agent
 dismiss <id>` declines a pending request.
 
 Provider HTTP requests time out after 30 seconds each; those limits apply
@@ -235,7 +257,7 @@ sats agent revoke claude
 
 Every request records the `grant_id` of the grant instance that
 created it and executes only under that instance. Revocation takes
-effect on the next call without restarting the MCP client, and a pending
+effect on the next filing without restarting the MCP client, and a pending
 request whose grant was revoked or re-issued is `denied` with reason
 `revoked` when a human tries to approve it — a new grant for the same
 agent never inherits old requests, and a client key reused under the new
@@ -246,6 +268,13 @@ Expired grants cannot start a new MCP server and are removed when discovered
 by grant-listing and startup paths. Re-issuing a grant mints a new token, so
 a server still holding the old one is refused on its next start, and a
 running server with a superseded token can file nothing.
+
+Existing sessions retain `get_balance`, `get_receive_address`, `get_grant`, and
+`check_request` after revocation, expiry, or token replacement. Grant inspection
+reports the current grant or inactivity; request visibility remains scoped to
+the session's agent. Stop the session to end its remaining reads. Bearer tokens
+authenticate filing; execution instead checks the original grant instance and
+fresh human authorization for the exact request.
 
 ## Transport rules
 

@@ -236,6 +236,7 @@ dependencies = [
  "bitcoin_hashes",
  "serde",
  "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]
@@ -1342,7 +1343,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "sats"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1373,7 +1374,7 @@ dependencies = [
 
 [[package]]
 name = "sats-alkanes"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "hex",
  "sats-core",
@@ -1384,7 +1385,7 @@ dependencies = [
 
 [[package]]
 name = "sats-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -1403,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "sats-web"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bdk_wallet",
  "bip39",

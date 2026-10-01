@@ -489,6 +489,28 @@ impl Store {
         }
     }
 
+    /// Observe the existing execution lock without creating files or changing
+    /// permissions. A missing lock means no live claim was observed, never
+    /// that the signer was not invoked. Other failures remain storage errors.
+    pub fn request_execution_active(&self, network: &str, agent: &str, id: &str) -> Result<bool> {
+        let path = self
+            .agent_requests_dir(network)
+            .join(agent_component(agent)?)
+            .join(format!("{}.lock", request_id_component(id)?));
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err).context("cannot inspect request execution lock"),
+        };
+        match file.try_lock() {
+            Ok(()) => Ok(false), // The temporary read-only probe releases on drop.
+            Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+            Err(std::fs::TryLockError::Error(err)) => {
+                Err(err).context("cannot inspect request execution lock")
+            }
+        }
+    }
+
     pub fn load_agent_request(
         &self,
         network: &str,
@@ -499,10 +521,13 @@ impl Store {
             .agent_requests_dir(network)
             .join(agent_component(agent)?)
             .join(format!("{}.json", request_id_component(id)?));
-        if !path.exists() {
-            return Ok(None);
-        }
-        let bytes = fs::read(&path)?;
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(err).with_context(|| format!("cannot read request {}", path.display()));
+            }
+        };
         let request: AgentRequest = serde_json::from_slice(&bytes)
             .with_context(|| format!("corrupt agent request {}", path.display()))?;
         Ok(Some(request))
@@ -748,6 +773,55 @@ pub fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
     }
     fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))?;
     Ok(())
+}
+
+/// Write a file the human named (a PSBT artifact) atomically and
+/// owner-only. Unlike `write_atomic`, the destination directory belongs to
+/// the user: it must already exist and its permissions are never changed.
+/// A bare file name lands in the working directory.
+pub fn write_artifact(path: &Path, bytes: &[u8]) -> Result<()> {
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} does not name a file", path.display()))?;
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    // A hidden, process-unique sibling: never clobbers a user's own file.
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = dir.join(tmp_name);
+    let written = (|| -> Result<()> {
+        let mut file =
+            create_private(&tmp).with_context(|| format!("cannot write {}", path.display()))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
+}
+
+/// Create a new file that is owner-only from its first byte.
+#[cfg(unix)]
+fn create_private(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn create_private(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 #[cfg(unix)]

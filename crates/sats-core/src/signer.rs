@@ -1,7 +1,5 @@
-//! The signer boundary. Everything above this trait is portable; each
-//! implementation is environment-specific. V1 ships `LocalSigner`;
-//! hardware and passkey backends are future implementations of the same
-//! trait.
+//! The signer boundary separates signing from transaction preparation.
+//! `LocalSigner` derives keys in the calling process.
 
 use bdk_wallet::SignOptions;
 use bdk_wallet::bitcoin::{Network, Psbt};
@@ -20,6 +18,8 @@ pub trait Signer {
 
 /// Signs with an in-memory BIP-39 mnemonic via an ephemeral BDK wallet.
 /// The private keys never touch persistence.
+/// The mnemonic contents are zeroized on normal drop; this does not cover
+/// separate strings or every copy of key material held by downstream libraries.
 pub struct LocalSigner {
     mnemonic: Mnemonic,
     network: Network,

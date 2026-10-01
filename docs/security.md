@@ -16,7 +16,7 @@ direction they serve is in [Direction](direction.md).
 descriptors. Two forms are used:
 
 - public descriptors create the persisted watch-only BDK wallet;
-- private descriptors are created in memory only when a signer is active.
+- private descriptors are created only in memory during key derivation or signing.
 
 The mnemonic is stored in `seed.sealed`, encrypted with Argon2id and
 XChaCha20-Poly1305. The sealed format is versioned and authenticated; its
@@ -32,6 +32,28 @@ request ids — are as private as the files; existing installations are
 re-hardened lazily as those directories are touched. The boundary protects
 against partial writes and other OS users, but not against a process
 already running as the wallet's user.
+
+## Process, memory, and durability limits
+
+`LocalSigner` runs inside the approving CLI process. No resident process
+retains an unsealed seed between operations, but human operations such as
+initialization, restoration, password verification, and signing can temporarily
+hold plaintext seed or key material. `bip39` zeroizes its mnemonic contents on
+normal drop. Ordinary phrase/display strings, restore-input buffers, compiler
+copies, and library-owned BIP-32, secp256k1, and BDK key material are not covered
+by a complete-erasure guarantee; aborts do not promise normal drop cleanup.
+
+The MCP contract limits the tools exposed to an agent. It does not isolate a
+hostile process running as the same OS user with shell/filesystem access: that
+process can tamper with wallet files or executables, inspect permitted memory,
+or intercept human input. Encrypted storage and PSBT verification provide no
+independent signing hardware and cannot protect a compromised operating system.
+
+Atomic file replacement syncs file contents before rename, but the parent
+directory is not explicitly synced. Process-crash recovery tests assume the
+completed writes remain durable; sudden power loss and filesystem/storage
+behavior can violate that assumption. Keep independent backups. The event log,
+request records, and wallet database are not a single cross-file transaction.
 
 ## Human signing
 
@@ -53,8 +75,8 @@ without retaining PSBT derivation metadata.
 ## Executing an agent request
 
 Agents create requests. Humans authorize requests. sats executes
-requests. There is no resident signer: no process holds an unsealed seed
-between executions. `sats agent approve` is the human-authorized
+requests. There is no resident signer retaining an unsealed seed between
+operations. `sats agent approve` is the human-authorized
 execution path, and it runs in the human's own process:
 
 1. the request is claimed (a per-request lock); the grant on file must
@@ -67,8 +89,8 @@ execution path, and it runs in the human's own process:
    descriptors and must equal the recorded request's recipient and amount;
 4. the grant's ladder re-runs with the real fee;
 5. the human sees recipient, amount, fee, total, and remaining budget, and
-   enters the wallet password — the authorization, and the only moment
-   key material is unsealed;
+   enters the wallet password — authorization for this execution, which
+   temporarily unseals key material in the approving CLI process;
 6. under the grant lock the budget is drawn on the grant's reservation
    ledger under the request's id and persisted, then the request is
    persisted as `signing` — before the signer is invoked, so `signing`
@@ -76,7 +98,7 @@ execution path, and it runs in the human's own process:
 7. the signer is constructed only now, signs, and the finalized
    transaction is persisted before broadcast;
 8. broadcast settles the request to `sent`, or to `broadcast_pending` if
-   the provider refused.
+   the provider refuses it or its response is lost.
 
 The irreversible boundary is the invocation of `Signer::sign`, not a
 successful write afterwards. Before it — the audit append, the signer's
@@ -116,8 +138,12 @@ guessed: a request left `signing` by a dead process becomes
 `broadcast_pending` or `sent` when a persisted transaction attributed to
 it — same agent, request id, and intent digest — exists, and otherwise
 `unresolved`, with nothing refunded and nothing signed again. A crash can
-therefore never cause a second signature for one authorized execution or
-a refund after a signature may exist.
+therefore cannot cause a second signature for one authorized execution or
+a refund after a signature may exist under the durability assumptions above.
+Preparation sync, guard, fee, and provider-resolution failures are recorded as
+`failed` with their diagnostic. These failures precede the signer and reserve
+no new budget. Locked rereads keep a concurrent settled or uncertain state
+from being replaced with a retryable attempt failure.
 
 Because execution happens in the approving process with the human's
 password, an approval is not a durable token another process trusts: a
@@ -159,14 +185,16 @@ the MCP boundary, and again inside the store.
 
 Creating the grant requires the human's wallet password, but nothing derived
 from it enters the grant: **the grant file holds no key material.** A random
-32-byte token is minted, printed once, and never persisted — only its hash
-is stored, compared in constant time. Reading a grant file yields a budget
-and a hash, and nothing that can spend.
+32-byte token is minted and emitted only while creating the grant. sats never
+persists it — only its hash is stored and compared in constant time. Reading a
+grant file yields a budget and a hash, and nothing that can spend.
 
 The token is what an agent presents. Pass it to the served process as
-`SATS_AGENT_TOKEN`; `sats agent grant` prints the exact `claude mcp add`
-line. Re-issuing a grant mints a new token and kills the old one, so
-rotation and revocation are the same act.
+`SATS_AGENT_TOKEN`; `sats agent grant` prints exact local setup commands for
+ChatGPT desktop/Codex and Claude Code. Both commands contain the same token.
+The selected MCP client saves that raw token in its local configuration, while
+sats retains only the hash. Re-issuing a grant mints a new token and kills the
+old one, so rotation and revocation are the same act.
 
 A grant names its network and authorizes only that network. Loading a grant
 checks the record's network against the one requested and refuses a
@@ -187,8 +215,7 @@ executor's signing boundary further without changing transaction planning.
 
 ### Grant format
 
-The on-disk grant format is `format_version: 1` — the first released
-schema. sats is pre-release, so earlier development shapes are not
+The on-disk grant format is `format_version: 1`, the current v0.0.1 schema. sats is pre-release, so earlier development shapes are not
 migrated: a record that does not parse as the current schema (for
 example, one spelling the removed development-era `auto` mode, or one
 missing a required field) fails with an error naming the fix — revoke
@@ -237,9 +264,9 @@ answers before the terminal ask, so a refusal names what was crossed
 instead of the generic ask. Every denial is a grant boundary; there is no
 approvable denial and no denial a human is asked about.
 
-Budget drawdown is amount plus fee, and only an authorized, signed
-execution draws it: a denial consumes nothing, and so does a pending
-request. Filing runs the full ladder — recipient rule included — with
+Budget drawdown is amount plus fee, reserved before invoking the signer:
+a denial consumes nothing, and so does an unexecuted pending request.
+A possibly signed outcome keeps its reservation. Filing runs the full ladder — recipient rule included — with
 the fee unknown, so a proposal outside the grant is recorded as denied
 before any network access. Execution prepares the transaction to learn
 the real fee and re-runs the ladder with it, under the grant lock, before
@@ -252,10 +279,11 @@ closed: if the system clock cannot be read, filing and execution refuse
 with the typed error `clock_unavailable` rather than evaluating expiry
 against a 1970 fallback that would treat every grant as live.
 
-After approval, sats reserves and persists the budget before signing. If
-signing fails and no signature exists, the reservation is refunded. Once a
-signature exists, the reservation remains even if saving or broadcast fails:
-the transaction is already spendable outside sats.
+After approval, sats reserves and persists the budget before signing. Only a
+provable failure before `Signer::sign` is invoked can refund that reservation.
+An error reported by the signer cannot prove that no signature exists. From
+invocation onward, uncertainty, persistence failure, and broadcast failure keep
+the draw and never authorize an automatic second signature.
 
 The decision, reservation, and persistence happen under an advisory
 per-network grant lock, shared with grant creation and revocation.
@@ -263,17 +291,18 @@ Concurrent sends — in one server or across processes — therefore serialize
 their budget decisions instead of double-drawing, and a revocation cannot
 be undone by an in-flight send's write.
 
-The grant file is reloaded for every send, and again under the lock before
-the budget draw, where the presented token is re-checked. Deleting the grant
-with `sats agent revoke` therefore takes effect on the next send call, even
-in an existing MCP session, and a grant replaced mid-flight refuses the older
-token.
+Filing reloads the grant and checks its bearer token under the grant lock.
+Execution reloads it at staging and under the lock before the budget draw,
+checking the original grant instance and the human-authorized request; it does
+not use a bearer-token check as signing authorization. Revocation stops new
+filings and approval under the old grant, including in an existing session.
+Read behavior is described under the MCP boundary below.
 
 ## Agent requests and the event log
 
 Every agent request is a durable record under
-`<network>/agent-requests/<agent>/`, keyed by the agent's optional
-`request_id`, carrying the canonical intent digest (network, agent,
+`<network>/agent-requests/<agent>/`, filed with a required agent-supplied
+`idempotency_key`, carrying the canonical intent digest (network, agent,
 normalized recipient, amount — never the fee) and its state:
 `pending_approval`, `denied`, `dismissed`, `signing`, `unresolved`,
 `sent`, `broadcast_pending`, or `failed` — and the `grant_id` of the
@@ -281,7 +310,7 @@ grant instance that created it. The record's id is global — `r-` plus
 32 hex characters — and is what humans approve and dismiss by. A keyed
 filing derives its id from the grant id, the agent, and the idempotency key,
 so the same key from two agents, or from the same agent under a
-re-issued grant, names two requests; a keyless filing gets a random id.
+re-issued grant, names two requests. Keyless filing is refused.
 Filing the same key with the same intent returns the existing record
 without writing; reusing a key for a different intent is a typed error
 that mutates nothing. The agent never executes and never retries to
@@ -295,10 +324,13 @@ write, so a revoke or re-issue cannot interleave, and the audit line is
 appended before the record is written, so no request exists on disk
 without its causal event.
 
-Each state transition — request received, denial, approval, dismissal,
-reservation, refund, signature, broadcast — appends one line to the
-per-network event log at `<network>/events/log.jsonl`, linked by request
-id and intent digest. Finalized transaction records carry an `origin`
+State transitions — request received, denial, approval, dismissal,
+reservation, refund, signature, broadcast — are journaled to the per-network
+event log at `<network>/events/log.jsonl`, linked by request id and intent
+digest. Filing requires its initial event write to succeed. Some later event
+writes are best-effort and warn on failure; recovery relies on durable request,
+grant, and transaction records, not proof that the log is complete.
+Finalized transaction records carry an `origin`
 field naming the surface, agent, request, and digest, so an agent-
 originated transaction is attributable after the fact, and so an
 interrupted execution can be reconciled from the record. Request records
@@ -337,8 +369,8 @@ the signer. Its trust model:
   (`sats agent dismiss`) needs no password: reducing authority stays
   cheap;
 - authorization executes only a proposal inside the grant. It never lifts
-  a grant boundary: not expiry or revocation (the kill switches that
-  withdraw all authority at once), not observe mode, not the recipient
+  a grant boundary: not expiry or revocation (which stop new proposals and
+  authorization under that grant), not observe mode, not the recipient
   allowlist, and not the amount, fee, or budget bounds, which are the
   human's pre-commitments that no amount of asking can move. The grant is
   re-read at staging and again under the grant lock before the
@@ -352,45 +384,54 @@ the signer. Its trust model:
   re-issuing the grant makes every request filed under it `denied` with
   reason `revoked` the moment a human tries to execute one; a new grant
   for the same agent never inherits requests it did not authorize;
-- the review — recipient, amount, real fee, total — is shown in every
+- interactive `sats agent approve` selects one exact request for review;
+  selection creates no durable authority or budget reservation. It requires a
+  separate confirmation even with `--yes`. Potentially signed recovery rows
+  cannot be selected for approval;
+- the review — wallet, network, full recipient, amount, real fee, total — is shown in every
   mode before the password, on stderr when stdout is a JSON stream, so
   the authorization is always bound to visible transaction details.
 
 ## MCP boundary
 
-The served process reads the wallet and files requests under the grant
-its bearer token names. It holds no key material, never prepares or signs
-a transaction, and never broadcasts; nothing in it can move money.
+The served process reads the wallet and files requests under the grant its
+bearer token names. It holds no key material, never prepares or signs a
+transaction, and never broadcasts. Startup requires a non-expired grant, a
+matching `SATS_AGENT_TOKEN`, a wallet on the selected network, and parseable
+configuration. Provider selection is deferred until a chain read needs it.
 
-It starts only when the named agent has a non-expired grant,
-`SATS_AGENT_TOKEN` matches that grant, and the wallet and provider
-configuration are valid. Each failure names its own remedy at
-`claude mcp add` time rather than mid-conversation.
+The five tools are `get_balance`, `get_receive_address`, `get_grant`,
+`request_send`, and `check_request`. Address creation advances the wallet's
+derivation index; it is not a read-only operation. Filing requires an
+`idempotency_key`. The token authenticates filing, never execution.
 
-It exposes only:
+An existing session retains balance/address/grant/request reads after grant
+revocation or expiry. `get_grant` reports the current grant or inactivity;
+new filings and approval under the revoked grant stop. Reissuing a grant
+rejects the old token for filing and subsequent startup. Stop the MCP session
+to end its remaining reads. Another agent's request directory stays invisible.
 
-- balance lookup;
-- fresh receive address;
-- the caller's grant status;
-- filing a send request — the one tool that touches authority, and it
-  cannot cause a signature: a request inside the grant waits for a human;
-- read-only status of the caller's own requests, so an agent can observe
-  a human decision without doing anything.
+`check_request` is provider-free and does not mutate records, reconcile,
+refund, sign, or broadcast. A signing receipt reports `execution_active` and
+`needs_reconciliation` from the existing execution lock. An absent lock never
+proves unsigned execution. Corrupt/unreadable requests return
+`status: error`, `error_code: store_error`, and their request ID; they are not
+reported as absent, and uncertainty must not be recovered by filing again.
 
 Agents never receive the password, mnemonic, raw signer, arbitrary PSBT
 signing tool, an unlock tool, or the CLI's UTXO-safety bypass flags.
-Expected policy denials are machine-readable `denied` requests, not
-errors that invite a retry. Operational conditions carry a typed
-`error_code` instead.
+Expected policy denials are successful machine-readable `denied` results;
+operational failures carry typed error codes. After filing, observe with
+`check_request`, rather than repeatedly syncing balance or status.
 
-MCP uses stdout as its protocol transport. Diagnostic information goes to
-stderr so logs cannot corrupt protocol frames.
+MCP owns stdout for protocol frames. Diagnostics go to stderr.
 
 ## Chain providers and asset guards
 
 Transaction preparation requires fresh wallet state. A chain sync failure
-stops every send mode — including `--dry-run` and `--export-psbt` — and MCP
-sends rather than allowing coin selection from stale data. Balance, status,
+stops every human send mode — including `--dry-run` and `--export-psbt` —
+and human-approved agent execution rather than selecting from stale data.
+MCP filing and observation never sync the chain. Balance, status,
 and history are different by design: when sync fails they may report cached
 state and say so.
 
@@ -399,7 +440,10 @@ UTXO protection has two layers:
 1. a local heuristic excludes outputs worth exactly 546 or 330 sats;
 2. every configured guard is asked which wallet outpoints carry assets.
 
-The protected sets are unioned. Guards are restrictive-only: they can exclude
+After fresh sync, a wallet with no unspent outputs returns funding guidance
+without guard or fee calls. With candidates present, the protected sets are
+unioned; if all are protected, preparation stops before fee estimation and
+explains that unprotected funding is needed. Guards are restrictive-only: they can exclude
 an outpoint but cannot make anything spendable or authorize a transaction. A
 configured guard that cannot answer fails closed. Only a human CLI invocation
 can bypass a guard or the dust heuristic, and each bypass applies to that
@@ -416,38 +460,34 @@ negative, or absurd rate (above 10,000 sat/vB) is a typed fee error rather
 than a number the endpoint chose. Malformed checkpoint data from a
 provider fails the sync instead of the process.
 
-Subfrost URLs may contain API keys in their paths, so that driver exposes only
-a redacted origin in errors and debug output. Esplora authentication is
-expected in the configured bearer header; its endpoint URL may be displayed
-in diagnostics. Do not embed Esplora credentials in URL paths or queries.
+Esplora and Subfrost diagnostics expose only a safe endpoint origin, omitting
+user-info, paths, queries, and fragments. Untrusted response text and nested
+transport error text are replaced with safe operation/error categories and
+HTTP/RPC codes. Configuration Debug output, parser errors, CLI errors, MCP
+receipts, and persisted preparation failures share this boundary. Network
+requests still use the configured endpoint and authentication, including
+Esplora bearer authentication on broadcast. Providers can still lie about
+chain state, fees, or asset data; redaction does not make them trustworthy.
 
-## Alkanes execution
+## Alkanes release boundary
 
-`sats alkanes execute` is human-only and deliberately narrow:
-
-- the OP_RETURN envelope is encoded locally by the `sats-alkanes` crate,
-  against the published reference encoding, frozen by byte-vector tests —
-  the provider composes nothing;
-- simulation and inspection results are advisory display from the
-  configured `alkanes.view` endpoint, never an authorization, and the
-  endpoint's network is validated before any result is shown;
-- the transaction pipeline is the ordinary send tail: dust and guard
-  exclusions with no escape flags, confirmation, password unlock, private
-  persistence before broadcast;
-- mainnet is refused in this release, and no agent surface exists — the
-  MCP server cannot reach any alkanes operation, and no grant can carry
-  alkanes authority.
-
-The wire dialect for the view calls has not been verified against a live
-endpoint; a wrong dialect fails closed as a view error rather than
-composing a transaction from misread data.
+Default v0.0.1 binaries expose Alkanes inspection and advisory simulation only.
+Alkanes execution is absent from default CLI help and dispatch. Pure
+composition code and the execution implementation remain in source; an
+explicit non-default development feature compiles the latter, retaining its
+mainnet refusal. It is not part of the default release execution surface.
+There is no Alkanes MCP tool or grant authority. The view dialect remains
+unverified against a live endpoint.
 
 ## PSBT and finalized-transaction boundary
 
 PSBTs are the preparation and signer contract. A normal human or agent send
 keeps the PSBT in memory. `sats send --export-psbt` is the explicit
 exception: it writes the unsigned PSBT to an owner-only file artifact the
-user names. Successful `sats psbt sign` converts an artifact into a
+user names. Artifacts are created owner-only from their first byte; the
+directory that holds them belongs to the user and keeps its permissions,
+unlike sats-managed state directories, which are restricted to the owner.
+Successful `sats psbt sign` converts an artifact into a
 private raw finalized-transaction record.
 
 `sats psbt sign FILE` accepts an external base64 or binary PSBT; a PSBT that
@@ -466,17 +506,17 @@ That is reported as partial rather than treated as a broadcastable success.
 | Stolen watch-only database | No private descriptors in SQLite | Address history and balances may be exposed |
 | Stolen sealed seed | Argon2id plus authenticated encryption | Password strength and offline guessing |
 | Read grant file | Holds a budget and a token hash, no key material | Reveals amounts and expiry |
-| Stolen agent token | Every request waits for a human's password-gated approval; caps and expiry enforced at filing and execution | Files requests in your review queue and reads what the grant exposes, until revoked or expired |
+| Stolen agent token | Every request waits for a human's password-gated approval; caps and expiry enforced at filing and execution | Can file within the grant; an authenticated session retains read access after revocation or expiry until stopped |
 | Lied-about send amount or fee | Recomputed from the PSBT against the wallet's descriptors | An understated input burns the caller's own budget on an unrelayable transaction |
 | Compromised served process | Holds a token, never a key; a forged approval record cannot sign without the password | Same as a stolen token |
 | Debugger attached to an approving process | Key material exists only for the duration of one approve | Seed recoverable during that window where ptrace is permitted |
 | Pre-daemon wrapped-seed grant on disk | Read, reported, and refused for signing | The file itself is a seed disclosure until the wallet is rotated |
-| Revoked agent session | Grant reloaded at every filing and under the lock at execution | A transaction signed before revocation remains valid |
+| Revoked agent session | Grant reloaded at every filing and under the lock at execution | Existing session reads continue until stopped; a transaction signed before revocation remains valid |
 | Provider outage | Planning and configured guards fail closed | Loss of availability |
 | Malicious asset guard | Restrictive-only result | Can hide funds; incomplete results can miss assets |
 | Broadcast failure | Finalized raw transaction saved before the attempt; the request is `broadcast_pending` with budget reserved | `sats tx broadcast` retries it |
 | Wrong Bitcoin network | Address and provider network validation | Misconfigured third-party responses remain possible |
-| Malicious alkanes view endpoint | Advisory display only; local encoding; mainnet refused | Can mislead the human reviewing a signet call |
+| Malicious alkanes view endpoint | Advisory display only; execution excluded from default release | Can mislead inspection or simulation |
 
 ## Operational guidance
 
@@ -485,9 +525,10 @@ That is reported as partial rather than treated as a broadcastable success.
 - Use a strong, unique wallet password.
 - Run sats only on a machine and user account you trust.
 - Keep grant budgets small, set fee caps, and prefer short expiries.
-- Keep `sats agent requests --watch` running while an agent works, and
-  review each request — recipient, amount, and the real fee — before
-  entering your password.
+- Use `sats agent approve` to select a request for review, and inspect wallet,
+  network, recipient, amount, and the real fee before entering your password.
+  `sats agent requests` also exposes recovery cases; `--watch` announces new
+  pending requests without changing their state.
 - Review `sats agent list` regularly and revoke unused grants.
 - Treat an agent token like the budget it unlocks: re-issue the grant to
   rotate it, and never commit one to a repository.

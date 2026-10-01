@@ -4,7 +4,7 @@ use sats_core::bitcoin::Network;
 use crate::cli::SendArgs;
 use crate::commands::prepare;
 use crate::provider::Services;
-use crate::store::{Store, write_atomic};
+use crate::store::{Store, write_artifact};
 use crate::{keys, spend, ui, walletd};
 
 pub fn run(
@@ -49,7 +49,7 @@ pub fn run(
 
     if let Some(file) = &args.export_psbt {
         // The PSBT names the wallet's UTXOs and change: owner-only perms.
-        write_atomic(file, prepared.psbt().to_string().as_bytes(), true)?;
+        write_artifact(file, prepared.psbt().to_string().as_bytes())?;
         if json {
             println!(
                 "{}",

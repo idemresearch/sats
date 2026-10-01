@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use sats_core::bitcoin::{Network, Transaction, consensus};
 use sats_core::plan::TransactionStatus;
 
@@ -16,12 +16,11 @@ use crate::{ui, walletd};
 pub fn broadcast(
     store: &Store,
     network: Network,
-    services: &Services,
+    resolve_services: impl FnOnce() -> Result<Services>,
     target: &str,
     json: bool,
 ) -> Result<()> {
-    let mut ctx = walletd::open(store, network)?;
-
+    let net_name = crate::config::network_name(network);
     let path = Path::new(target);
     if path.exists() {
         let text =
@@ -29,24 +28,33 @@ pub fn broadcast(
         let bytes = hex::decode(text.trim()).map_err(|e| anyhow!("not valid tx hex: {e}"))?;
         let tx: Transaction = consensus::encode::deserialize(&bytes)
             .map_err(|e| anyhow!("not a valid transaction: {e}"))?;
-        let txid = services.broadcast(&mut ctx, &tx)?;
+        let mut ctx = walletd::open(store, network)?;
+        let txid = resolve_services()?.broadcast(&mut ctx, &tx)?;
         report(json, &txid.to_string());
         return Ok(());
     }
 
-    let mut record = store.load_transaction(ctx.net_name, target)?;
+    let mut record = store.load_transaction(net_name, target)?;
 
     match record.status {
         TransactionStatus::Pending => {}
         TransactionStatus::Broadcast => {
-            bail!("transaction {} was already broadcast", record.txid)
+            // Retry the local receipt write even if a previous invocation
+            // broadcast successfully. No provider, replan, or signer is needed.
+            crate::request::settle_broadcast(store, network, &record.txid)?;
+            report(json, &record.txid);
+            return Ok(());
         }
     }
 
-    let txid = crate::spend::broadcast_record(store, &mut ctx, services, &mut record)?;
+    let mut ctx = walletd::open(store, network)?;
+    let services = resolve_services()?;
+    let txid = crate::spend::broadcast_record(store, &mut ctx, &services, &mut record)?;
     // An agent request signed earlier but never broadcast settles now.
     if let Err(err) = crate::request::settle_broadcast(store, network, &txid.to_string()) {
-        eprintln!("⚠ broadcast succeeded but the request record was not updated: {err:#}");
+        eprintln!(
+            "⚠ broadcast succeeded but the request record was not updated: {err:#}; retry: sats tx broadcast {txid}"
+        );
     }
     report(json, &txid.to_string());
     Ok(())

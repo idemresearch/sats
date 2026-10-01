@@ -9,7 +9,8 @@ of feature.
 - Rust 1.89 or newer (the workspace MSRV in `Cargo.toml`);
 - `rustfmt`, Clippy, and `rust-analyzer` (included in `rust-toolchain.toml`);
 - the `wasm32-unknown-unknown` target;
-- a POSIX shell for installer checks.
+- a POSIX shell for installer checks;
+- Python 3 (standard library only) for Unix terminal approval integration tests.
 
 ```sh
 rustup component add rustfmt clippy rust-analyzer
@@ -29,6 +30,16 @@ dependencies from a checkout:
 ```sh
 cargo install --locked --path crates/sats --no-default-features
 ```
+
+Default v0.0.1 binaries omit Alkanes execution. Its implementation can be
+compiled explicitly for development and exercised against deterministic fixtures:
+
+```sh
+cargo test -p sats --locked --features experimental-alkanes-execute --test alkanes
+```
+
+Do not use that feature for default release archives. Pure composition tests
+continue to run in the workspace gate.
 
 Use an isolated state directory for manual development runs:
 
@@ -54,6 +65,12 @@ cargo check -p sats-core --target wasm32-unknown-unknown
 cargo check -p sats-web --target wasm32-unknown-unknown
 ```
 
+Unix terminal tests open a controlling TTY to exercise hidden password entry;
+provider fixtures bind localhost sockets. Sandboxes must allow those operations.
+WASM dependency builds need a C compiler with WASM support; on macOS, LLVM
+Clang may be needed instead of Apple Clang through Cargo's target-specific
+`CC_wasm32_unknown_unknown` and `AR_wasm32_unknown_unknown` settings.
+
 Run the narrowest relevant unit or integration test during development, then
 run the full gate before reporting the work ready.
 
@@ -71,7 +88,7 @@ broadcast-timeout/accounting tests when updating the dependency.
 | Core unit tests | `crates/sats-core/src/` | Preparation, finalized records, authorization, sealing, seed derivation, signing, serialization, amount shorthand |
 | Native unit tests | `crates/sats/src/` | Config, providers, storage, and helpers |
 | Playground unit tests | `crates/sats-web/src/` | Simulated-chain wallet loop, grant lifecycle, denial shapes |
-| CLI integration | `crates/sats/tests/{cli,flow,alkanes}.rs` | Isolated wallet flows, failures, providers, guards, grants, request review, and the alkanes commands |
+| CLI integration | `crates/sats/tests/` including terminal, connection, preparation, receipt, and redaction fixtures | Isolated wallet flows, failures, providers, guards, grants, request review, and the alkanes commands |
 | MCP integration | `crates/sats/tests/mcp.rs` | Tool schemas, granted sends, idempotent retries, the approval loop, startup refusal, and live revocation |
 | Installer | `scripts/test-setup.sh` | Targets, checksums, version pinning, PATH edits, and atomic replacement |
 | WASM portability | CI `wasm-check` | `sats-core` and `sats-web` remain buildable for `wasm32-unknown-unknown` |

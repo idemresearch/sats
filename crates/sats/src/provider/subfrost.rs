@@ -22,7 +22,7 @@ use sats_core::bitcoin::{
 };
 use serde::de::DeserializeOwned;
 
-use super::error::{ProviderError, redact_url};
+use super::error::{ProviderError, redact_url, transport_error};
 
 /// Consecutive unused script pubkeys before a full scan stops — matches the
 /// esplora driver.
@@ -97,16 +97,6 @@ impl SubfrostClient {
         &self.display_url
     }
 
-    /// Scrub the full URL (which may carry a path key) out of transport
-    /// error text before it can reach a user-visible string.
-    fn scrub(&self, text: &str) -> String {
-        let scrubbed = text.replace(&self.url, &self.display_url);
-        match &self.api_key {
-            Some(api_key) => scrubbed.replace(api_key, "[REDACTED]"),
-            None => scrubbed,
-        }
-    }
-
     fn request(&self, body: &serde_json::Value) -> Result<minreq::Response, String> {
         let mut request = minreq::post(&self.url)
             .with_timeout(super::HTTP_TIMEOUT_SECS)
@@ -116,9 +106,9 @@ impl SubfrostClient {
         }
         request
             .with_json(body)
-            .map_err(|e| self.scrub(&e.to_string()))?
+            .map_err(|e| transport_error(&e))?
             .send()
-            .map_err(|e| self.scrub(&e.to_string()))
+            .map_err(|e| transport_error(&e))
     }
 
     fn call_inner<T: DeserializeOwned>(
@@ -142,7 +132,7 @@ impl SubfrostClient {
             if !(200..300).contains(&response.status_code) {
                 return Err(http_status_error(&response));
             }
-            let text = response.as_str().map_err(|e| self.scrub(&e.to_string()))?;
+            let text = response.as_str().map_err(|e| transport_error(&e))?;
             return parse_jsonrpc(text);
         }
         unreachable!("bounded JSON-RPC attempt loop always returns")
@@ -184,7 +174,7 @@ impl SubfrostClient {
         if echoed.trim() != txid.to_string() {
             return Err(ProviderError::Broadcast {
                 url: self.display_url.clone(),
-                message: format!("endpoint echoed unexpected txid {:?}", echoed.trim()),
+                message: "endpoint echoed unexpected txid".into(),
             });
         }
         Ok(txid)
@@ -687,23 +677,28 @@ fn http_status_error(response: &minreq::Response) -> String {
     format!("http {}", response.status_code)
 }
 
-/// Unwrap a JSON-RPC 2.0 envelope. A JSON-RPC error is an error string;
-/// a missing result is too.
+/// Unwrap a JSON-RPC 2.0 envelope. Responses can echo credentials in both
+/// error messages and malformed result values. Expose only locally defined
+/// categories/codes, never the server text or serde's value-bearing errors.
 fn parse_jsonrpc<T: DeserializeOwned>(body: &str) -> Result<T, String> {
     let envelope: serde_json::Value =
-        serde_json::from_str(body).map_err(|e| format!("invalid json-rpc response: {e}"))?;
+        serde_json::from_str(body).map_err(|_| "invalid json-rpc response".to_string())?;
     if let Some(error) = envelope.get("error").filter(|e| !e.is_null()) {
         let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
-        let message = error
-            .get("message")
-            .and_then(|m| m.as_str())
-            .unwrap_or("unknown error");
+        let message = match code {
+            -32700 => "parse error",
+            -32600 => "invalid request",
+            -32601 => "method not found",
+            -32602 => "invalid params",
+            -32603 => "internal error",
+            _ => "provider error",
+        };
         return Err(format!("rpc error {code}: {message}"));
     }
     let result = envelope
         .get("result")
         .ok_or_else(|| "json-rpc response has no result".to_string())?;
-    serde_json::from_value(result.clone()).map_err(|e| format!("unexpected result shape: {e}"))
+    serde_json::from_value(result.clone()).map_err(|_| "unexpected result shape".to_string())
 }
 
 /// An ord `output` result marks the outpoint protected iff it lists any
@@ -751,7 +746,7 @@ fn parse_bytecode_result(value: &serde_json::Value) -> Result<Vec<u8>, String> {
     if stripped.is_empty() {
         return Err("no bytecode at this alkane id".to_string());
     }
-    hex::decode(stripped).map_err(|e| format!("invalid bytecode hex: {e}"))
+    hex::decode(stripped).map_err(|_| "invalid bytecode hex".to_string())
 }
 
 #[cfg(test)]
@@ -1223,25 +1218,89 @@ mod tests {
     #[test]
     fn secrets_never_appear_in_errors() {
         let client = SubfrostClient::new(
-            "https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc".into(),
+            "https://USERSECRET:PASSSECRET@mainnet.subfrost.io/v4/SECRETKEY/jsonrpc?unknown=QUERYSECRET#FRAGMENTSECRET".into(),
             Some("HEADERSECRET".into()),
         );
         assert_eq!(client.display_url(), "https://mainnet.subfrost.io");
-        assert!(!format!("{client:?}").contains("SECRETKEY"));
-        assert!(!format!("{client:?}").contains("HEADERSECRET"));
-        let scrubbed = client.scrub(
-            "error connecting to https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc with HEADERSECRET: refused",
+        let secrets = [
+            "USERSECRET",
+            "PASSSECRET",
+            "SECRETKEY",
+            "QUERYSECRET",
+            "FRAGMENTSECRET",
+            "HEADERSECRET",
+        ];
+        for secret in secrets {
+            assert!(!format!("{client:#?}").contains(secret));
+        }
+        let echo = format!("{} Authorization: Bearer HEADERSECRET", client.url);
+        for body in [
+            serde_json::json!({"error": {"code": -32603, "message": echo}}),
+            serde_json::json!({"result": {"2": echo}}),
+        ] {
+            let message = parse_jsonrpc::<HashMap<u16, f64>>(&body.to_string()).unwrap_err();
+            super::super::error::assert_safe_error(client.sync_err(message.clone()), &secrets);
+            super::super::error::assert_safe_error(
+                client.guard_err("ord", message.clone()),
+                &secrets,
+            );
+            super::super::error::assert_safe_error(client.view_err(message), &secrets);
+        }
+    }
+
+    #[test]
+    fn endpoint_and_api_key_are_used_but_never_echoed_from_rpc_failures() {
+        let echo = "PATHSECRET QUERYSECRET HEADERSECRET USERSECRET";
+        let bad = response(
+            "200 OK",
+            "",
+            &serde_json::json!({
+                "error": {"code": -32001, "message": echo}
+            })
+            .to_string(),
         );
-        assert!(!scrubbed.contains("SECRETKEY"));
-        assert!(!scrubbed.contains("HEADERSECRET"));
-        let guard_err = client.guard_err(
-            "ord",
-            client.scrub("boom at https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc"),
+        let (origin, requests) = local_server(vec![
+            rpc_response(serde_json::json!({"2": 3.0})),
+            bad.clone(),
+            bad.clone(),
+            bad.clone(),
+            bad,
+            rpc_response(serde_json::json!(echo)),
+        ]);
+        let client = SubfrostClient::new(
+            format!("{origin}/arbitrary/PATHSECRET?unfamiliar=QUERYSECRET"),
+            Some("HEADERSECRET".into()),
         );
-        assert!(!guard_err.to_string().contains("SECRETKEY"));
-        let view_err = client
-            .view_err(client.scrub("boom at https://mainnet.subfrost.io/v4/SECRETKEY/jsonrpc"));
-        assert!(!view_err.to_string().contains("SECRETKEY"));
+        assert_eq!(client.fee_estimates().unwrap().get(&2), Some(&3.0));
+        let tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![],
+            output: vec![],
+        };
+        let outpoint = OutPoint::null();
+        for error in [
+            client.check_network(Network::Signet).unwrap_err(),
+            client.fee_estimates().unwrap_err(),
+            client.ord_protected(&[outpoint]).unwrap_err(),
+            client.alkanes_bytecode(2, 0).unwrap_err(),
+            client.broadcast(&tx).unwrap_err(),
+        ] {
+            super::super::error::assert_safe_error(
+                error,
+                &echo.split_whitespace().collect::<Vec<_>>(),
+            );
+        }
+        for request in requests {
+            assert!(
+                request.starts_with("POST /arbitrary/PATHSECRET?unfamiliar=QUERYSECRET HTTP/1.1")
+            );
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("x-subfrost-api-key: headersecret")
+            );
+        }
     }
 
     #[test]

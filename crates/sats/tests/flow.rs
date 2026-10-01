@@ -5,7 +5,6 @@
 mod common;
 
 use common::{ADDRESS, fund_wallet, init_wallet, json_stdout, sats, write_mock_provider};
-use predicates::prelude::*;
 use std::fs;
 use tempfile::TempDir;
 
@@ -61,12 +60,15 @@ fn send_broadcasts_and_status_history_see_it() {
     assert_eq!(history[1]["status"], "confirmed");
     assert_eq!(history[1]["net_sat"], 100_000);
 
-    // A broadcast transaction cannot be re-broadcast by id.
+    // Repeating recovery repairs local receipts without another network broadcast.
     sats(&dir)
         .args(["tx", "broadcast", &txid])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("already broadcast"));
+        .success();
+    assert_eq!(
+        fs::read_to_string(mockdata.join("broadcasts.log")).unwrap(),
+        log
+    );
 }
 
 #[test]

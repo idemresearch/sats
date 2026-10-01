@@ -62,6 +62,13 @@ pub fn run(
         .unwrap_or_else(|| sats_core::authz::default_max_fee_sat(budget));
     let net_name = network_name(network);
     let replacing = store.load_grant(net_name, agent)?.is_some();
+    // Resolve the launch context before issuing a token, so a path that
+    // cannot be represented in shell instructions does not strand a grant.
+    let mcp_command = if json {
+        None
+    } else {
+        Some(mcp_launch_command(store, net_name, agent)?)
+    };
 
     if !json {
         let mut rows = vec![
@@ -164,21 +171,87 @@ pub fn run(
             ui::ok(&format!("granted  {agent}"));
         }
         println!();
-        ui::warn("this token is shown once and is not stored — copy it now");
+        println!("Copy one command now; sats cannot recover its embedded token.");
         println!();
-        println!("  SATS_AGENT_TOKEN={}", *issued.secret);
+        let token_env = shell_quote(&format!("SATS_AGENT_TOKEN={}", *issued.secret));
+        let mcp_command = mcp_command.expect("human output has a launch command");
+        println!("ChatGPT desktop / Codex:");
+        println!("codex mcp add sats --env {token_env} -- {mcp_command}");
         println!();
-        ui::dim("add to Claude Code:");
-        ui::dim(&format!(
-            "  claude mcp add sats --env SATS_AGENT_TOKEN={} -- sats agent serve {agent}",
-            *issued.secret
-        ));
-        ui::dim("review asks:         sats agent requests --watch");
-        ui::dim("approve one:         sats agent approve <id>");
-        ui::dim(&format!("revoke any time:     sats agent revoke {agent}"));
-        ui::dim("the token cannot spend on its own: every send waits for your approval");
+        println!("Claude Code (current project):");
+        println!(
+            "claude mcp add --transport stdio --scope local sats --env {token_env} -- {mcp_command}"
+        );
+        println!();
+        if grant.mode == sats_core::authz::GrantMode::Ask {
+            println!("Approve: sats agent approve");
+        }
+        println!("Revoke:  sats agent revoke {agent}");
     }
     Ok(())
+}
+
+/// Pin the same configuration and data locations the grant used. An
+/// explicit directory takes precedence over SATS_DIR. When the default
+/// config and data directories are identical, one explicit --dir is the
+/// shortest equivalent command. A split default layout retains the directory
+/// resolver's roots and removes a future client's SATS_DIR in the launched
+/// process itself.
+fn mcp_launch_command(store: &Store, network: &str, agent: &str) -> Result<String> {
+    let mut args = Vec::new();
+    let config_path = store.config_path();
+    let seed_path = store.seed_path();
+    let shared_default_dir = match (config_path.parent(), seed_path.parent()) {
+        (Some(config_dir), Some(data_dir)) if config_dir == data_dir => Some(data_dir),
+        _ => None,
+    };
+    let pinned_dir = store.dir_override().or(shared_default_dir);
+
+    if pinned_dir.is_none() {
+        let dirs = directories::BaseDirs::new().context("cannot determine home directory")?;
+        args.extend(["env".into(), "-u".into(), "SATS_DIR".into()]);
+        for (name, path) in [
+            ("HOME", dirs.home_dir()),
+            ("XDG_CONFIG_HOME", dirs.config_dir()),
+            ("XDG_DATA_HOME", dirs.data_dir()),
+        ] {
+            args.push(format!("{name}={}", absolute_shell_path(path)?));
+        }
+    }
+    args.extend(["sats".into(), "--network".into(), network.into()]);
+    if let Some(dir) = pinned_dir {
+        args.extend(["--dir".into(), absolute_shell_path(dir)?]);
+    }
+    args.extend(["agent".into(), "serve".into()]);
+    if agent.starts_with('-') {
+        args.push("--".into());
+    }
+    args.push(agent.into());
+    Ok(args
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
+fn absolute_shell_path(path: &std::path::Path) -> Result<String> {
+    std::path::absolute(path)
+        .context("cannot resolve wallet location for MCP instructions")?
+        .to_str()
+        .map(str::to_owned)
+        .context("wallet location is not UTF-8; cannot print lossless MCP shell instructions")
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&b))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
 }
 
 fn validate_agent_name(agent: &str) -> Result<()> {
