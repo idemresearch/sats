@@ -7,11 +7,11 @@ import "./globals.css";
 export const metadata: Metadata = {
   metadataBase: siteUrl(),
   title: {
-    default: "sats — a tiny Bitcoin wallet",
+    default: "sats — a self-custodial Bitcoin wallet for humans and agents",
     template: "%s · sats",
   },
   description:
-    "A tiny on-chain Bitcoin wallet for humans and agents. AI asks, you approve, keys stay yours: every agent payment waits for your one-time approval.",
+    "A self-custodial Bitcoin wallet with maker-checker built in. Agents propose payments within limits you set, you approve each one. Keys stay yours.",
   alternates: {
     canonical: "./",
   },

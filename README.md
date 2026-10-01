@@ -1,232 +1,122 @@
 # sats
 
-**A tiny Bitcoin wallet for humans and agents.**
+**The self-custodial Bitcoin wallet for humans and agents.**
+AI asks. You approve. Keys stay yours.
 
-**AI asks. You approve. Keys stay yours.**
+You spend directly. Agents spend through maker-checker: an agent proposes a
+payment within limits you set, you check and approve it, and sats signs
+exactly that payment, once, with a record of which agent and request it came
+from. Your keys never leave your machine.
 
-Run an on-chain wallet from your terminal, or let an AI agent use it
-without giving it your keys: the agent can read the wallet and propose
-payments inside a budget you set, and every agent send waits for your
-one-time approval. The approving CLI process temporarily unseals the seed
-and signs that request. There is no autonomous spend mode: an unapproved agent
-request can never reach the signer, even if the agent misbehaves.
+Today sats ships as a command-line wallet and an MCP server for agents.
 
-[Docs](docs/README.md) · [Direction](docs/direction.md) ·
-[CLI](docs/cli.md) · [MCP](docs/mcp.md) ·
-[Architecture](docs/architecture.md) · [Security](docs/security.md)
+[Try it in the browser](https://sats.sh) · [Docs](docs/README.md) ·
+[CLI](docs/cli.md) · [Agents](docs/mcp.md) · [Security](docs/security.md)
 
 > [!WARNING]
-> sats is experimental. Signet is the default; use small amounts and short
-> agent grants while evaluating it.
->
-> An obsolete pre-release grant format stored recoverable key material in
-> the grant file. Those grants are refused. If an agent with
-> shell access ever ran while one existed, move the funds to a fresh wallet —
-> see [Security](docs/security.md).
+> sats 0.0.1 is experimental. It defaults to signet, where coins have no
+> value. Read the [security model](docs/security.md) before using mainnet, and
+> keep amounts and agent budgets small.
 
 ## Install
 
-For a published release, the installer selects a binary for macOS or Linux
-on x86_64 or ARM64:
+macOS and Linux, x86_64 or ARM64:
 
 ```sh
 curl -fsSL https://sats.sh/setup.sh | sh
 ```
 
-The installer verifies the release checksum, installs `sats` to
-`~/.local/bin`, and adds that directory to your shell path when needed.
-Pin a release or choose another install directory with environment variables:
-
-```sh
-curl -fsSL https://sats.sh/setup.sh \
-  | SATS_VERSION=0.0.1 SATS_INSTALL_DIR="$HOME/bin" sh
-```
-
-To build from a checkout instead:
+The installer verifies the release checksum and installs `sats` to
+`~/.local/bin`. Set `SATS_VERSION` to pin a release or `SATS_INSTALL_DIR` to
+install elsewhere. To build from source:
 
 ```sh
 cargo install --locked --path crates/sats
 ```
 
-## Try it
-
-Signet is the default, so the complete flow can be tested without real funds.
-Initialize, print a receive address, and fund it from a signet faucet:
+## Use it
 
 ```sh
-sats init
-sats receive
+sats init                # create a wallet; write down the words it shows
+sats receive             # get an address, then fund it from a signet faucet
 sats balance
-sats send tb1p... 25k
-sats status
+sats send tb1p... 25k    # shows amount and fee, asks, signs, broadcasts
 sats history
 ```
 
-`send` prepares the transaction, shows its amount and fee, asks for
-confirmation, signs locally, saves the finalized transaction, and broadcasts.
-`send --dry-run` prices the same spend without persisting anything. The
-explicit PSBT lifecycle runs on file artifacts, step by step:
-
-```sh
-sats send tb1p... 25k --export-psbt spend.psbt
-sats psbt inspect spend.psbt
-sats psbt sign spend.psbt
-sats tx broadcast <txid>
-```
-
-After signing, sats keeps private raw transaction hex for broadcast retry; it
-does not retain the signed PSBT. `sats psbt sign tx.psbt` also signs external
-PSBTs from other wallets. Amounts are integer sats with shorthand: `25k` is
-25,000 and `1.5m` is 1,500,000.
-
-See the [CLI reference](docs/cli.md) for all commands, flags, configuration,
-and machine-readable output.
+Amounts are whole sats: `25k` is 25,000 and `1.5m` is 1,500,000. Add
+`--dry-run` to price a send without making it. Restore, PSBT workflows, and
+JSON output are in the [CLI reference](docs/cli.md).
 
 ## Let an agent ask
 
-Grant an agent the authority to file requests:
+**1. Grant the agent a budget.**
 
 ```sh
-sats agent grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
-# Copy one printed command for ChatGPT desktop/Codex or Claude Code.
-# Each command embeds the same one-time token and pins this wallet and network.
+sats agent grant claude --budget 50k --for 24h --max-tx 10k
 ```
 
-The rule: **agents create requests, humans authorize requests, sats
-executes requests.** The agent receives five tools: `get_balance`,
+sats prints a setup command for Claude Code and one for ChatGPT desktop/Codex.
+Run one of them. It contains a token that is shown only once.
+
+**2. The agent files a request.** It has five tools: `get_balance`,
 `get_receive_address`, `get_grant`, `request_send`, and `check_request`.
-It can read the wallet and file a request; it cannot approve, unlock,
-sign, or broadcast, and it takes no action after filing. The normal
-result of `request_send(address, amount_sat, idempotency_key)` is a pending
-request. The idempotency key is required —
+A payment request comes back `pending_approval` and waits for you.
 
-```json
-{
-  "status": "pending_approval",
-  "request_id": "r-8c1f0a2b9d3e4f57a1b2c3d4e5f60718",
-  "recipient": "tb1p...",
-  "amount_sat": 4500,
-  "message": "filed for human review — the human approves with: sats agent approve r-8c1f0a2b9d3e4f57a1b2c3d4e5f60718; poll check_request to observe the result, and do not file it again"
-}
+**3. You approve it, or don't.**
+
+```sh
+sats agent requests --watch   # see new requests as they arrive
+sats agent approve            # review recipient, amount, and real fee; enter your password
 ```
 
-You review requests with `sats agent requests` (or stream them with
-`--watch`, a trusted channel that does not rely on the agent relaying its
-own status). Run `sats agent approve` in a terminal to select one for review;
-selection alone authorizes nothing. The CLI prepares that exact request and
-shows its recipient, amount, real fee, total, wallet, and network. After
-confirmation and your password, it reserves the budget, signs, saves, and
-broadcasts. The agent observes the
-result with `check_request`. `sats agent dismiss <id>` declines a request.
-`sats agent log` keeps the full causal chain from request through decision
-to transaction.
+Approval signs and broadcasts that one payment, and the agent sees the result
+through `check_request`. Use `sats agent dismiss <id>` to decline a request
+and `sats agent revoke claude` to cut the agent off.
 
-The grant's boundaries are hard, and approval works only inside them:
-within `--max-tx` a request waits for you; above it — or over the fee cap
-or budget — it is refused outright with no approval path, and only
-changing the grant escalates. A `--to` allowlist refuses recipients
-outside it; `--mode observe` makes a grant read-only.
+Grant limits are hard. sats refuses a request outright, with no approval
+path, if it is over `--max-tx`, over the fee cap, over the remaining budget,
+or to a recipient outside a `--to` allowlist. See
+[MCP and agent grants](docs/mcp.md) for the full tool contract.
 
-The token names a policy; it opens nothing. No resident process retains an
-unsealed seed between operations. Human commands can temporarily decrypt it;
-approval unseals it for one execution, and
-sats derives what the transaction actually pays from the PSBT rather than
-believing what it was told.
+## What makes it different
 
-`sats agent list` shows current authority. `sats agent revoke claude`
-stops new filings in an existing MCP session and blocks approval of requests
-under that grant. Existing sessions retain their read tools; stop the session
-to end those reads. See the [MCP guide](docs/mcp.md) for tool contracts and
-integration details, and [Direction](docs/direction.md) for the trust
-model this implements.
+- **Self-custody.** Your seed is sealed on your machine with Argon2id and
+  XChaCha20-Poly1305 and unsealed only for the command you run. The wallet
+  database is watch-only. No custodian or server ever holds your keys.
+- **Maker-checker for agent payments.** The agent makes a request and you
+  check it. The MCP server holds no key material and has no tool to approve,
+  sign, or broadcast, so an agent can never approve its own request. There
+  is no autonomous spend mode, and a leaked agent token can only file
+  requests you will see.
+- **Hard limits per agent.** Each grant sets a budget, a per-payment cap, a
+  fee cap, an optional recipient allowlist, and an expiry. sats refuses
+  anything outside them, and approval can't override them. Revoking a grant
+  stops new requests and approvals immediately.
+- **Verified execution.** sats recomputes what the transaction actually pays
+  and signs only if it matches the recipient and amount you approved, and
+  only once. Every signed transaction is saved before broadcast, so a failed
+  broadcast can be retried without signing again.
+- **Attribution.** Each saved agent transaction names the agent and request
+  behind it, and an append-only event log traces every request.
 
-## Safety model
-
-- The seed is sealed with Argon2id and XChaCha20-Poly1305. The SQLite wallet
-  database is watch-only and never contains private keys.
-- A grant file holds a budget and the SHA-256 of a bearer token. It contains
-  no key material: reading it gets you nothing that can spend.
-- No agent-originated request reaches the signer without your explicit
-  authorization bound to exactly that request. There is no autonomous
-  mode and no resident unlocked signer; a grant file in a retired
-  development shape fails closed with a recreate hint and is never
-  rewritten.
-- The approving process recomputes a transaction's payment and fee from
-  the PSBT against the wallet's own descriptors and refuses on
-  disagreement with the recorded request; a foreign input is refused
-  outright.
-- Agent authorization is deterministic. Budget is reserved and persisted,
-  and the request recorded as signing, before the signer is invoked,
-  because a signed transaction is already spendable. A request that
-  signed, or may have signed, is never signed again and never refunded;
-  a reservation is refunded only when the signer provably was never invoked.
-  A request executes only
-  under the grant that created it.
-- Finalized transactions are written privately before broadcast, by the
-  process that signed them, so a lost response can be recovered by
-  rebroadcasting saved bytes. Filesystem and power-loss limits are described
-  in the security guide.
-- Planning excludes common inscription postage outputs by default and unions
-  those exclusions with every configured asset guard.
-- A configured guard fails closed. Agents cannot use `--allow-dust` or
-  `--no-guards`.
-- A stolen agent token cannot spend: it can only file requests you will
-  see in `sats agent requests`, bounded by the grant until it expires —
-  and never touch the seed. Keep budgets small and expiries short anyway.
-
-Read the full [security and trust model](docs/security.md) before using
-mainnet.
-
-## One engine, two native surfaces
-
-`crates/sats-core` is the portable wallet engine: transaction planning,
-authorization, seed sealing, and the signer boundary, with no filesystem,
-network, clock, or async-runtime dependencies. `crates/sats` supplies native
-storage, providers, terminal output, the CLI, and the MCP server.
-
-PSBTs are the preparation and signer contract. They stay in memory for normal
-sends and leave the wallet only as explicit `--export-psbt` file artifacts.
-Once fully signed, sats persists private raw transaction hex instead; a
-provider then broadcasts it. An approved agent request uses the same
-preparation and safety path as a human send, in the human's process, with
-the grant re-checked against the real fee before signing.
-
-See [Architecture](docs/architecture.md) for module ownership and end-to-end
-flows, or [AGENTS.md](AGENTS.md) for the implementation rules used by coding
-agents and contributors.
+sats also fails closed. It won't spend on stale chain data or while a
+configured asset guard is down, and by default it never spends 546- or
+330-sat outputs, which may carry inscriptions. The
+[security model](docs/security.md) covers the details and the limits.
 
 ## Networks and providers
 
-Wallets are namespaced by network and share one sealed seed. Supported
-networks are `mainnet`, `signet`, `testnet4`, and `regtest`; mainnet is always
-an explicit choice.
+Signet is the default. `mainnet`, `testnet4`, and `regtest` are available
+with `--network`, and mainnet is always an explicit choice. Each network has
+its own wallet, derived from the same seed.
 
-Chain access and optional asset protection come from typed providers.
-With no provider configuration, sats uses the appropriate mempool.space
-Esplora endpoint for chain sync, fee estimates, and broadcast. Guards are
-never enabled implicitly.
+sats uses mempool.space for chain data unless you configure another provider.
+Optional asset guards, such as Subfrost for ord and Alkanes, are never
+enabled implicitly. See [Providers and guards](docs/providers.md).
 
-```toml
-# ~/.config/sats/config.toml
-network = "mainnet"
+## Contributing
 
-[providers.subfrost]
-driver = "subfrost"
-network = "mainnet"
-url = "https://mainnet.subfrost.io/v4/jsonrpc"
-```
-
-See [Providers and guards](docs/providers.md) for capabilities, resolution
-precedence, split-provider configuration, and fail-closed behavior.
-
-## Development
-
-```sh
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --locked
-cargo check -p sats-core --target wasm32-unknown-unknown
-```
-
-Start with [CONTRIBUTING.md](CONTRIBUTING.md). Release maintainers should also
-read [docs/releasing.md](docs/releasing.md).
+Start with [CONTRIBUTING.md](CONTRIBUTING.md). [AGENTS.md](AGENTS.md) holds the
+implementation rules for contributors and coding agents, and
+[Architecture](docs/architecture.md) maps the code.

@@ -1,6 +1,6 @@
 [package]
 name = "sats"
-description = "A small, sharp Bitcoin wallet CLI — signing for humans and agents"
+description = "A self-custodial Bitcoin wallet for humans and agents, with maker-checker for agent payments"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

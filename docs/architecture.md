@@ -1,11 +1,7 @@
 # Architecture
 
-sats is a native Bitcoin wallet with a portable core. Agents create
-requests, humans authorize requests, sats executes requests: the MCP
-server files a request under a grant, the human reviews it and executes
-it with `sats agent approve`, and the agent observes the result. No
-agent-originated request reaches the signer unapproved; the direction this
-implements is in [Direction](direction.md).
+How sats is built: a portable core, a native crate for the CLI and MCP
+server, and the one spend path that humans and agents share.
 
 ## System shape
 
@@ -22,112 +18,90 @@ flowchart TD
     Native --> Providers
 ```
 
-A human send unlocks the seed for the duration of one command. An agent
-cannot sign at all: for a payment, the served process files a request. Its
-other tools read or sync watch-only state and reveal receive addresses.
-`sats agent approve` prepares the transaction, derives what
-it pays from the wallet's descriptors, re-checks the grant with the real
-fee, takes the human's password, reserves the budget, signs, persists, and
-broadcasts — in the human's process, for exactly one request.
+A human send unseals the seed for one command. An agent never signs: the MCP
+server files a request, and `sats agent approve` executes it in the human's
+process, for exactly that request. Both paths share preparation, protection,
+fee estimation, and the sign-then-persist-then-broadcast tail.
 
-`crates/sats-core` owns deterministic wallet and authorization behavior.
-`crates/sats` owns environment effects: command parsing, terminal rendering,
-files, SQLite, network clients, provider selection, passwords, and MCP stdio.
+`sats-core` owns deterministic wallet and authorization behavior. `sats` owns
+everything with side effects: argument parsing, terminal output, files,
+SQLite, network clients, provider selection, passwords, and MCP stdio.
 
 ## Crates
 
 ### `sats-core`
 
 The portable engine has no filesystem, network, clock, terminal, or async
-runtime dependencies. Callers provide time and operate on a BDK wallet they
-own.
+runtime. Callers pass in time and own the BDK wallet.
 
-| Module | Responsibility |
+| Module | Owns |
 |---|---|
-| `authz` | Grant model, spend request, the deterministic verdict ladder (every proposal is ask or deny), reservation and refund |
-| `request` | The request record and its state machine, with the signature boundary structural |
+| `authz` | Grants, the verdict ladder (every proposal is ask or deny), reservations, refunds |
+| `request` | The request record and its state machine |
 | `intent` | The canonical send intent and its digest |
-| `event` | The causal event kinds appended per request transition |
-| `token` | Agent capability tokens: mint, hash, constant-time verify |
-| `verify` | Recomputing a PSBT's payments and fee from the wallet's own descriptors |
-| `engine` | In-memory PSBT preparation and conservative UTXO exclusion |
+| `event` | Event kinds appended per request transition |
+| `token` | Agent tokens: mint, hash, constant-time verify |
+| `verify` | Recomputing a PSBT's payments and fee from the wallet's descriptors |
+| `engine` | PSBT preparation and conservative UTXO exclusion |
 | `plan` | Prepared spends and finalized transaction records |
-| `seed` | BIP-39 generation and parsing; BIP-86 public and private descriptors |
-| `seal` | Versioned Argon2id/XChaCha20-Poly1305 secret envelopes |
-| `signer` | Environment-neutral signer trait and local mnemonic signer |
-| `error`, `fmt`, `amount` | Typed errors, satoshi formatting, and shorthand amount parsing |
+| `seed` | BIP-39 mnemonics; BIP-86 public and private descriptors |
+| `seal` | Versioned Argon2id/XChaCha20-Poly1305 envelopes |
+| `signer` | The `Signer` trait and the local mnemonic signer |
+| `error`, `fmt`, `amount` | Typed errors, sat formatting, amount shorthand |
 
 ### `sats`
 
-The native crate composes the portable core with operating-system and network
-adapters.
-
-| Module | Responsibility |
+| Module | Owns |
 |---|---|
-| `main`, `cli` | Parse global flags and commands, resolve the selected network, dispatch workflows |
-| `commands` | Human CLI workflows and their text/JSON presentation |
-| `config` | TOML configuration and canonical network names |
-| `store` | XDG paths, atomic files, finalized transactions, grants, requests, the event log, and sensitive-file permissions |
-| `walletd` | SQLite-backed watch-only BDK wallet creation, loading, and persistence |
-| `provider` | Typed capabilities, driver resolution, chain access, and UTXO guards |
-| `keys`, `password` | Unlock the master seed; prove the password without keeping anything |
-| `request` | The native request workflow: create, dismiss, reconcile, and the human-authorized executor (`stage`, `commit`) |
-| `spend` | The shared signing and broadcast tail: persist before broadcast |
-| `mcp` | MCP stdio server and tool schemas — reads the wallet and files requests |
+| `main`, `cli` | Flag parsing, network selection, dispatch. `main.rs` is a composition root only. |
+| `commands` | Human CLI workflows and their text and JSON output |
+| `config` | TOML configuration and network names |
+| `store` | Paths, atomic files, permissions, transactions, grants, requests, the event log |
+| `walletd` | The SQLite-backed watch-only BDK wallet |
+| `provider` | Capabilities, driver resolution, chain access, UTXO guards |
+| `keys`, `password` | Unsealing the seed; verifying the password without keeping anything |
+| `request` | Request create, dismiss, reconcile, and the executor (`stage`, `commit`) |
+| `spend` | The shared tail: sign, persist, then broadcast |
+| `mcp` | The MCP stdio server and tool schemas |
 | `ui` | Terminal presentation |
-
-`main.rs` is the composition root. Leaf feature logic belongs in the owning
-module, not in dispatch.
 
 ### `sats-alkanes`
 
-Pure Alkanes protocol composition: alkane ids, LEB128 varints, cellpack
-call encoding, the protostone/runestone OP_RETURN envelope, bytecode
-code-hashing, and tolerant simulation-result views. Byte encodings are
-derived from the published alkanes-rs reference and frozen by unit
-vectors. The default v0.0.1 CLI exposes inspection and simulation only;
-execution source is gated behind a non-default development feature. Environment-agnostic like `sats-core`: chain access, funding,
-and signing stay with the `sats` crate.
+Pure Alkanes encoding: alkane ids, LEB128 varints, cellpacks, the
+protostone/runestone envelope, bytecode hashing, and tolerant simulation
+views. Encodings follow the published alkanes-rs reference, frozen by unit
+vectors. Like `sats-core`, it does no I/O. Default builds expose inspection
+and simulation only; execution sits behind a non-default development
+feature.
 
 ### `sats-web`
 
-The website playground: `sats-core` compiled to WebAssembly behind a small
-JSON API for the interactive terminal at the project website. Only the chain
-is simulated (an in-memory faucet and instant confirmation); planning, UTXO
-exclusion, signing, sealing, and grant authorization run the same core code
-as the native surfaces. There is no separate process in a web page, so the playground
-demonstrates the grant model without the process boundary that enforces it
-natively. It holds no compatibility surface — the CLI and MCP schemas remain
-the stable contracts — and it must never gain filesystem, network, or
-native-store dependencies.
+`sats-core` compiled to WebAssembly for the website playground. Only the
+chain is simulated. Planning, UTXO exclusion, signing, sealing, and grant
+checks run the same core code as the native binary. A web page has no
+process boundary, so the playground demonstrates the grant model without
+the separation that enforces it natively. It is not a compatibility surface
+and must never gain filesystem, network, or store dependencies.
 
 ## Persistent state
 
-Without `SATS_DIR`, configuration and data use platform XDG locations.
-`SATS_DIR` places both under one directory, which is useful for tests and
-isolated runs.
+`config.toml` lives in the config directory and everything else in the data
+directory (see [CLI](cli.md#configuration)). `SATS_DIR` puts both in one
+directory.
 
-| State | Path relative to the data/config root | Contents |
+| State | Path | Contents |
 |---|---|---|
-| Configuration | `config.toml` | Default network and typed providers |
-| Master seed | `seed.sealed` | Password-sealed mnemonic |
-| Wallet | `<network>/wallet.sqlite` | Public descriptors and BDK changes only |
-| Finalized transactions | `<network>/transactions/<txid>.json` | Private raw transaction hex, pending/broadcast status, payment metadata, and the originating request |
-| Grants | `<network>/grants/<agent>.json` | Authority mode, limits, accounting, and the bearer token's hash — no key material |
-| Agent requests | `<network>/agent-requests/<agent>/<id>.json` | One durable record per request: canonical intent digest, idempotency key, and its state |
-| Request claims | `<network>/agent-requests/<agent>/<id>.lock` | Private OS file lock held while one process executes or reconciles the request |
-| Event log | `<network>/events/log.jsonl` | Append-only causal record of the agent path: one JSON line per state transition |
+| Configuration | `config.toml` | Default network, fee targets, providers |
+| Seed | `seed.sealed` | Password-sealed mnemonic, shared by every network |
+| Wallet | `<network>/wallet.sqlite` | Public descriptors and BDK chain state |
+| Transactions | `<network>/transactions/<txid>.json` | Raw signed hex, broadcast status, payment metadata, `origin` |
+| Grants | `<network>/grants/<agent>.json` | Mode, limits, accounting, token hash. No key material. |
+| Requests | `<network>/agent-requests/<agent>/<id>.json` | Intent digest, idempotency key, state, `grant_id` |
+| Request locks | `<network>/agent-requests/<agent>/<id>.lock` | OS file lock held while a process executes or reconciles |
+| Event log | `<network>/events/log.jsonl` | Append-only, one JSON line per transition |
 
-Wallet state, transactions, requests, and grants are namespaced
-by Bitcoin network. The sealed master seed is shared so each network derives
-from the same mnemonic. Sensitive files are written atomically with
-restrictive permissions.
-
-Native HTTP uses a pinned local `minreq` patch for bounded TCP address
-fallback. A failed address cannot consume the whole request deadline while
-other DNS candidates remain. No HTTP bytes are sent during this fallback;
-provider identity, TLS hostname verification and broadcast retry semantics
-remain unchanged. The portable core has no transport dependency.
+Sensitive files are written atomically and owner-only. See
+[Security](security.md#keys-and-wallet-state).
 
 ## Human send
 
@@ -148,20 +122,13 @@ sequenceDiagram
     C->>S: mark transaction broadcast
 ```
 
-The shared preparation pipeline validates the address before network I/O and
-freshly syncs the wallet. An empty wallet returns funding guidance before
-guard or fee calls. Otherwise it builds the union of dust and configured-guard
-exclusions; fully protected funds stop before fee estimation. Remaining
-candidates receive fee estimation and `sats-core` PSBT preparation. Preparation fails rather than using stale state after a sync failure.
+Preparation validates the address before any network I/O and refuses to plan
+on stale state. The PSBT stays in memory. Raw signed hex is saved before
+broadcast, so a failed broadcast leaves an exact retry.
 
-The prepared PSBT stays in memory during a normal send. After finalization,
-sats writes private raw transaction hex before any broadcast attempt. A
-broadcast failure therefore leaves a pending transaction that can be retried
-without retaining the signed PSBT.
+## Agent request
 
-## Agent request: file, authorize, execute
-
-Filing happens in the served process and touches nothing but the store:
+Filing happens in the MCP server and touches only the store:
 
 ```mermaid
 sequenceDiagram
@@ -198,73 +165,31 @@ sequenceDiagram
     C->>S: record sent, or broadcast_pending
 ```
 
-The grant is re-read under the lock before the reservation, so revocation
-or a tightened boundary between the review and the password still
-refuses, and a request executes only under the grant instance that
-created it. The reservation — a ledger entry on the grant keyed by the
-request id — and the `signing` record are persisted before the signer
-is constructed, so no denied or unauthorized request can reach it.
-Budget is returned only before `Signer::sign` is invoked; nothing the
-signer reports afterwards is trusted to mean "no signature", so any
-failure from the invocation on leaves `unresolved`: never refunded,
-never signed again. Once the transaction record exists the reservation
-is final, the request is never signed again, and a failed broadcast
-leaves `broadcast_pending` for `sats tx broadcast` to settle.
+The reservation and the `signing` record are durable before the signer is
+constructed, which is why `request::execute::commit` takes the signer as a
+factory. What happens on failure at each step, and how a crash is
+reconciled, is specified in [Security](security.md#approving-a-request).
 
-A `signing` record left by a dead process is reconciled by the next
-listing or approve from the durable truth: a transaction attributed to
-the request (`origin` agent, request id, and intent digest all match)
-means `broadcast_pending` or `sent`; none means `unresolved`, with
-nothing refunded. MCP observation only probes the existing execution lock:
-it reports active execution or required human reconciliation without changing
-records or contacting a provider. The ledger is reconciled the same way: a draw whose
-request is `pending_approval`, `failed`, or `denied` was orphaned by a
-crash before `signing` or before the refund reached disk and is
-returned once; every other draw stays.
-
-Preparation failures are recorded as `failed` before any signer invocation,
-with a locked reread that cannot overwrite an uncertain or settled execution.
-A successful broadcast whose receipt write failed can be repaired by human
-listing or `sats tx broadcast <txid>`. An already-broadcast saved record needs
-no provider, second signature, or additional budget draw for that repair.
-Transaction status reports chain observations even for locally pending records,
-and JSON distinguishes fresh, offline, and failed synchronization.
-
-Transitions — received, denied, approved, dismissed, reserved, signed,
-broadcast, refunded, failed — are journaled to the per-network event log.
-Some recovery and post-signing journal failures produce warnings; recovery
-uses durable request, grant, and transaction records rather than assuming
-the event log is complete. Finalized transactions carry an `origin` naming the surface, agent,
-request, and canonical intent digest.
-
-## Provider model
+## Providers
 
 A provider is bound to one network and advertises audited capabilities:
-
-- `chain.sync`;
-- `chain.fees`;
-- `chain.broadcast`;
-- `guard.ord`;
-- `guard.alkanes`;
-- `guard.native` for deterministic tests;
-- `alkanes.view` for the explicit `sats alkanes` contract tools.
-
-Provider resolution is configuration work and performs no network I/O.
-Operations validate the selected network when they execute. See
-[Providers and guards](providers.md) for precedence and configuration.
+`chain.sync`, `chain.fees`, `chain.broadcast`, `guard.ord`, `guard.alkanes`,
+`guard.native` (tests), and `alkanes.view`. Resolution is pure configuration
+work with no network I/O. Operations check the network when they run. See
+[Providers](providers.md).
 
 ## Change map
 
-| Change | Primary owner | Required checks |
+| Change | Owner | Prove it with |
 |---|---|---|
-| Transaction selection, preparation, or finalized-record metadata | `sats-core::engine`, `sats-core::plan` | Core unit tests plus CLI/MCP integration paths |
-| Grant rule or accounting | `sats-core::authz` | Decision edge cases, persistence ordering, MCP denial tests |
-| What a PSBT is taken to do | `sats-core::verify` | Adversarial derivation tests: forged hints, extra outputs, foreign inputs |
-| Request creation, execution, or reconciliation | `request` | Executor unit tests with the signer probe, `crates/sats/tests/mcp.rs` |
-| Human command or flag | `cli`, `commands`, `main` dispatch | CLI integration test and `docs/cli.md` |
-| MCP tool or result schema | `mcp::server` | MCP integration test and `docs/mcp.md` |
-| Provider driver or capability | `provider`, `config` | Mocked driver, network mismatch, ambiguity and failure tests |
-| Persisted state | `store`, `walletd`, relevant core model | Backward-reading and atomic-write tests |
-| Key or signing behavior | `seed`, `seal`, `signer`, `keys` | Security-focused unit and end-to-end signing tests |
+| Coin selection, preparation, transaction records | `sats-core::engine`, `plan` | Core unit tests plus CLI and MCP paths |
+| Grant rule or accounting | `sats-core::authz` | Decision edge cases, persistence order, MCP denial tests |
+| What a PSBT is taken to pay | `sats-core::verify` | Adversarial tests: forged hints, extra outputs, foreign inputs |
+| Request creation, execution, reconciliation | `request` | Executor tests with the signer probe; `tests/mcp.rs` |
+| CLI command or flag | `cli`, `commands`, `main` | CLI integration test; `docs/cli.md` |
+| MCP tool or schema | `mcp::server` | MCP integration test; `docs/mcp.md` |
+| Provider driver or capability | `provider`, `config` | Mocked driver; network mismatch, ambiguity, failure tests |
+| Persisted state | `store`, `walletd`, core model | Read and atomic-write tests |
+| Keys or signing | `seed`, `seal`, `signer`, `keys` | Security unit tests and end-to-end signing |
 
-Read [AGENTS.md](../AGENTS.md) before implementing any of these changes.
+Read [AGENTS.md](../AGENTS.md) before making any of these changes.

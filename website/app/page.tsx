@@ -35,10 +35,10 @@ export default function Home() {
         </h1>
 
         <p className="hero-copy">
-          A small, native wallet that lives in your terminal. Spend directly,
-          or let an AI agent ask: it proposes payments inside a budget you
-          set, and every send waits for your approval. AI asks. You approve.
-          Keys stay yours.
+          A self-custodial wallet with maker-checker built in. You spend
+          directly. Agents propose payments within limits you set, you
+          approve each one, and sats signs exactly that payment, once. AI
+          asks. You approve. Keys stay yours.
         </p>
 
         <div className="hero-actions">

@@ -1,123 +1,108 @@
 # MCP and agent grants
 
-`sats agent serve` exposes a deliberately small wallet surface to one named
-agent over Model Context Protocol stdio. The rule it implements:
+Connect an AI agent to sats over MCP. The agent can read the wallet and file
+payment requests; only you can approve them.
 
-> **Agents create requests. Humans authorize requests. sats executes
-> requests.**
+`sats agent serve <name>` runs a stdio MCP server for one named agent, under
+the grant its token names. The server holds no key material and never
+prepares, signs, or broadcasts. The flow:
 
-The served process reads the wallet and files requests under the grant its
-bearer token names. It holds no key material and never prepares, signs, or
-broadcasts a transaction. A request is executed only when a human
-authorizes it with `sats agent approve`, in the human's own process, with
-the wallet password; the agent takes no action after filing and observes
-the result with `check_request`.
+1. The agent calls `request_send`. sats records the request as
+   `pending_approval`, or `denied` if it crosses a grant limit.
+2. You run `sats agent approve`, review the payment, and enter your password.
+   That command signs and broadcasts, in your process.
+3. The agent observes the result with `check_request`. It never retries or
+   files again to make a payment happen.
 
 ## Connect an agent
 
-Initialize and fund a wallet, then create a grant:
+Create a grant on a funded wallet:
 
 ```sh
-sats agent grant claude \
-  --budget 50k \
-  --for 24h \
-  --max-tx 10k \
-  --max-fee 1000
+sats agent grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
 ```
 
-The grant emits a bearer token that sats cannot show again. sats stores only
-its hash, so re-issue the grant if you lose it. Copy one of the two printed
-commands; each embeds the same token as `SATS_AGENT_TOKEN` and starts the same
-local stdio server:
+sats prints two setup commands that embed the same token as
+`SATS_AGENT_TOKEN`. Run the one for your client:
 
 ```sh
+# ChatGPT desktop, Codex CLI, and the Codex IDE extension
 codex mcp add sats --env SATS_AGENT_TOKEN=<token> -- <pinned sats command>
+
+# Claude Code, scoped to the current project
 claude mcp add --transport stdio --scope local sats --env SATS_AGENT_TOKEN=<token> -- <pinned sats command>
 ```
 
-The `codex mcp add` command configures the MCP host shared by ChatGPT desktop,
-Codex CLI, and the Codex IDE extension. Restart ChatGPT desktop after adding
-the server. ChatGPT web cannot launch a local stdio server. The Claude Code
-command uses local scope for the current project and does not write a
-repository `.mcp.json`. Both clients save the raw token in their local
-configuration; sats stores only its hash.
+- **The token is shown once.** sats stores only its hash. If you lose it,
+  re-issue the grant.
+- **Restart ChatGPT desktop** after adding the server. ChatGPT on the web
+  can't launch a local stdio server.
+- **Claude Code uses local scope** and writes no repository `.mcp.json`.
+- **The client stores the raw token** in its local configuration.
+- **The command is pinned.** It fixes the network and the wallet and
+  configuration paths, with relative paths made absolute and arguments
+  safely quoted, so a different working directory can't redirect it.
+  Provider credentials aren't copied; the server reads them from the
+  wallet's configuration. If you launch the server by hand, pass the same
+  `--network` and wallet directory.
 
-The printed POSIX-shell commands pin the effective network and
-wallet/configuration locations, resolve relative directory overrides, and
-safely quote literal arguments. A different working directory or conflicting
-ambient defaults cannot redirect them. Provider credentials are not copied;
-provider settings are read from the original wallet configuration. If
-launching manually, select the same `--network` and wallet directory
-explicitly.
+At startup the server checks that the grant exists and hasn't expired, that
+`SATS_AGENT_TOKEN` matches it, that a wallet exists on the network, and that
+the configuration parses. It doesn't select a provider until `get_balance`
+needs one, so an ambiguous provider setup never blocks the other tools.
 
-At startup the server verifies:
+## Tools
 
-- the named grant exists and has not expired;
-- `SATS_AGENT_TOKEN` is present and matches that grant;
-- the selected network wallet exists.
-
-Malformed configuration, authentication, and missing-wallet errors are reported
-before serving. Provider selection is deferred until `get_balance` needs chain
-access. Ambiguous providers do not block startup, request filing or observation,
-grant inspection, or address creation.
-
-## Tool surface
-
-Five tools. The agent reads, files, and observes; it cannot approve,
-unlock, sign, execute, or broadcast.
+| Tool | Does | Touches the chain |
+|---|---|---|
+| `get_balance` | Sync and return the balance | Yes |
+| `get_receive_address` | Reveal and persist the next receive address | No |
+| `get_grant` | Return the agent's own grant | No |
+| `request_send` | File a payment request | No |
+| `check_request` | Read one of the agent's own requests | No |
 
 ### `get_balance`
-
-Syncs the wallet through the configured provider and returns:
 
 ```json
 { "balance_sat": 118500, "pending_sat": 0, "synced": true, "network": "signet" }
 ```
 
-`synced: false` means the chain could not be reached and the value is from
-cache. Invalid or ambiguous provider selection returns an error instead of a
-cached balance.
+`synced: false` means the chain was unreachable and the balance is cached. An
+invalid or ambiguous provider configuration returns an error, not a cached
+balance.
 
 ### `get_receive_address`
-
-Reveals and persists the next external receive address:
 
 ```json
 { "address": "tb1p...", "index": 3, "network": "signet" }
 ```
 
-It is annotated as not read-only, because revealing an address advances
-the wallet's derivation index.
+The tool is annotated as not read-only, because each call advances the
+wallet's derivation index.
 
 ### `get_grant`
 
-The agent's own grant: budget, spent, remaining, per-transaction caps,
-mode, recipient allowlist, and expiry. `active: false` means the grant was
-revoked or has expired, and the message names the command a human runs to
-issue one.
+Returns budget, spent, remaining, caps, mode, recipient allowlist, and expiry.
+`active: false` means the grant was revoked or expired, and the message names
+the command a human runs to issue a new one.
 
 ### `request_send`
 
-Files a request to send bitcoin.
+Parameters:
 
-Parameters: `address`, `amount_sat`, and `idempotency_key` (required;
-1–64 characters of `A-Za-z0-9_-`). The key is the agent's retry
-handle: a repeated call with the same key and the identical address and
-amount returns the existing request instead of filing a second one, so
-a lost response or a retried tool call never files twice; reusing the
-key for a different send is a typed error. The key is scoped to the
-grant it was filed under: after a revoke and re-issue, the same key
-files a new request rather than returning the old grant's.
+- `address`: the recipient, valid for the grant's network.
+- `amount_sat`: the amount in sats.
+- `idempotency_key`: required. 1–64 characters of `A-Za-z0-9_-`.
 
-The `request_id` the result returns is the server's request id — `r-`
-plus 32 hex characters, globally unique across agents — and is the
-handle the human approves or dismisses by and the agent observes with.
-It is never the key: passing a returned `request_id` back as an
-`idempotency_key` files a new request.
+The key is the agent's retry handle. Repeating a call with the same key,
+address, and amount returns the existing request instead of filing another,
+so a lost response never files twice. Reusing a key for a different send is
+the error `idempotency_key_conflict`. Keys are scoped to a grant: after a
+re-issue, the same key files a new request.
 
-The grant's full verdict ladder runs at filing, with the fee unknown. A
-proposal inside every boundary is recorded as `pending_approval` and
-returned as a successful result:
+sats runs the grant's full [authorization ladder](security.md#the-authorization-ladder)
+with the fee unknown. A proposal inside every limit is the normal, successful
+result:
 
 ```json
 {
@@ -129,8 +114,7 @@ returned as a successful result:
 }
 ```
 
-That is the normal result, not a failure. A proposal outside a boundary is
-recorded as `denied`, with a `reason`:
+A proposal outside a limit is recorded as `denied`, with a `reason`:
 
 ```json
 {
@@ -143,110 +127,84 @@ recorded as `denied`, with a `reason`:
 }
 ```
 
-Denied is terminal. No approval lifts a grant boundary; the only
-escalation is the human changing the grant.
+`request_id` is the server's id: `r-` plus 32 hex characters, unique across
+agents. Humans approve and dismiss by it, and the agent observes by it. It is
+not an idempotency key. Passing it back as one files a new request.
 
 ### `check_request`
 
-Returns the state of one of this agent's own requests, by the `request_id`
-a `request_send` result returned. It deals in server request ids only:
-an idempotency key is a malformed id here. It reads the durable record
-only: no chain access, no side effects. The result has the same shape
-as `request_send`; a `sent` request carries its `txid` and `fee_sat`. An
-unknown or malformed id is `status: "not_found"`, and another agent's
-requests are never visible. A corrupt or unreadable record instead returns
-`status: "error"`, `error_code: "store_error"`, and the requested ID; ask the
-human to inspect it and never file a replacement to recover uncertainty.
+Takes a `request_id` and returns that request in the same shape as
+`request_send`. A `sent` result adds `txid` and `fee_sat`. The tool reads the
+local record only. It never contacts the chain or changes anything.
 
-For `signing`, the result adds `execution_active` and `needs_reconciliation`.
-The existing execution lock is probed without creating or changing files. An
-inactive or missing lock means human reconciliation is needed, never that the
-request is unsigned. Observation itself never reconciles or changes budget.
+- An unknown or malformed id, including an idempotency key, returns
+  `status: "not_found"`. Other agents' requests are never visible.
+- An unreadable record returns `status: "error"` with
+  `error_code: "store_error"` and the id. Ask the human to inspect it. Never
+  file a replacement.
+- A `signing` result adds `execution_active` and `needs_reconciliation`,
+  read from the execution lock without changing it. An inactive lock means a
+  human must reconcile, never that the request is unsigned.
 
 ## Request states
 
-| `status` | Meaning | What the agent does |
+| `status` | Meaning | The agent should |
 |---|---|---|
-| `pending_approval` | Inside the grant; awaiting the human | Relay the id; observe |
-| `denied` | Outside a grant boundary (`reason`); terminal | Report once; stop |
-| `dismissed` | The human declined; terminal | Stop; ask the human before proposing again |
-| `signing` | Authorized execution is active, or durable state needs human reconciliation; see the observation flags | Observe; relay reconciliation guidance when needed |
-| `sent` | Broadcast; carries `txid` | Done |
-| `broadcast_pending` | Signed and persisted; broadcast unconfirmed locally, including a lost response | The human recovers the saved transaction; keep observing |
-| `unresolved` | A signature may exist without a durable, broadcastable result. The human inspects it | Do not file it again |
-| `failed` | Preparation or execution stopped before signer invocation; the diagnostic describes the last attempt | Observe; only the human may review and authorize again |
+| `pending_approval` | Inside the grant, waiting for the human | Relay the id and observe |
+| `denied` | Outside a grant limit (see `reason`); terminal | Report once and stop |
+| `dismissed` | The human declined; terminal | Stop; ask before proposing again |
+| `signing` | Approval is executing, or needs human reconciliation | Observe; relay guidance if `needs_reconciliation` |
+| `sent` | Broadcast; has `txid` | Done |
+| `broadcast_pending` | Signed and saved; broadcast not confirmed | Observe; the human rebroadcasts |
+| `unresolved` | A signature may exist without a saved result | Don't file again; the human inspects |
+| `failed` | Stopped before signing; see the diagnostic | Observe; only the human can retry |
 
-`error` is not a request state: it is a typed operational condition on the
-call itself, with an `error_code`; it does not file a replacement request.
+What each state means for signing and budget is in
+[Security](security.md#the-signing-boundary).
+
+## Errors
+
+An error is a failed call, not a request state. It never files a request.
 
 | `error_code` | Meaning |
 |---|---|
-| `invalid_agent` | The agent name is not 1–32 characters of `a-z0-9_-` |
-| `invalid_idempotency_key` | The key is missing or not 1–64 characters of `A-Za-z0-9_-` |
-| `invalid_address` | The address does not parse, or is for another network |
-| `idempotency_key_conflict` | The key was already used for a different send; `request_id` names it |
-| `no_grant` | No grant on file: nothing can be authenticated, so nothing is written |
-| `unauthorized` | The presented token does not authorize this agent's grant |
-| `clock_unavailable` | The system clock cannot be read; expiry cannot be evaluated |
-| `store_error` | The request store could not be read or written |
+| `invalid_agent` | The agent name isn't 1–32 characters of `a-z0-9_-` |
+| `invalid_idempotency_key` | The key is missing or isn't 1–64 characters of `A-Za-z0-9_-` |
+| `invalid_address` | The address doesn't parse or is for another network |
+| `idempotency_key_conflict` | The key was used for a different send; `request_id` names it |
+| `no_grant` | No grant on file, so nothing is written |
+| `unauthorized` | The token doesn't match this agent's grant |
+| `clock_unavailable` | The system clock can't be read, so expiry can't be checked |
+| `store_error` | The request store couldn't be read or written |
 
 ## Denial reasons
 
+Every reason is a grant limit. Report it to the human once and stop, because
+filing the same proposal again can't expand authority.
+
 | `reason` | Meaning |
 |---|---|
-| `expired` | The grant's expiry has been reached |
-| `over_max_tx` | Recipient amount exceeds the per-transaction cap |
-| `over_max_fee` | The real fee, at execution, exceeds the fee cap |
-| `over_budget` | Amount plus fee exceeds remaining budget |
-| `amount_overflow` | Amount plus fee overflows |
+| `expired` | The grant has expired |
 | `observe_only` | The grant is observe-only |
-| `revoked` | The grant that created the request was revoked or re-issued; a request never executes under another grant |
-| `recipient_not_allowed` | The recipient is outside the grant's standing allowlist |
+| `amount_overflow` | Amount plus fee overflows |
+| `recipient_not_allowed` | The recipient isn't on the grant's allowlist |
+| `over_max_tx` | The amount exceeds the per-transaction cap |
+| `over_max_fee` | The real fee, known at approval, exceeds the fee cap |
+| `over_budget` | Amount plus fee exceeds the remaining budget |
+| `revoked` | The grant that created the request was revoked or re-issued |
 
-Every reason is a grant boundary. An agent should report it to its human
-once and stop: re-filing the same proposal cannot expand authority.
+## After filing
 
-## What happens after filing
+Nothing happens on the agent's side. The human finds the request with
+`sats agent requests` (or `--watch`) and approves or dismisses it; see
+[Reviewing agent requests](cli.md#reviewing-agent-requests). Approval
+prepares the transaction on fresh chain state, verifies it matches the
+request, re-checks the grant with the real fee, and signs only after the
+human enters the wallet password.
 
-Nothing, on the agent's side. The human sees the request in
-`sats agent requests` (or the `--watch` stream, a trusted channel that
-does not rely on the agent relaying its own status) and runs
-`sats agent approve` to select one for review (or supplies its ID), which:
-
-1. prepares the transaction on current chain state, with no UTXO-safety
-   bypasses;
-2. derives what the prepared transaction pays from the wallet's own
-   descriptors and refuses if it disagrees with the recorded request;
-3. re-runs the grant's ladder with the real fee, and shows the human the
-   wallet, network, full recipient, amount, fee, and total;
-4. takes the wallet password — the authorization — and, under the grant
-   lock, checks that the grant on file is the one that created the
-   request, draws the budget on the grant's ledger under the request's
-   id, and persists the request as `signing` before the signer is
-   invoked;
-5. signs, persists the finalized transaction, and broadcasts.
-
-Preparation sync, guard, fee, or provider-resolution failures become observable
-`failed` attempts with no new draw. The same request may be reviewed again by
-the human; the agent only observes it with `check_request`, without repeatedly
-syncing balance/status or filing another request.
-
-A failure before the signer is invoked — the audit log cannot be
-written, the signer cannot be constructed — returns the draw and leaves
-the request `failed`, which the human may authorize again. Once the
-signer has been invoked, nothing it reports is trusted to mean "no
-signature": an error, an unfinalized result, or a failure to finalize or
-save the transaction leaves the request `unresolved`, with the draw kept
-and the request never signed again. A broadcast failure after signing is
-`broadcast_pending`: the draw is final, the request is never signed
-again, and `sats tx broadcast <txid>` rebroadcasts the saved bytes. If broadcast
-succeeded but the receipt write failed, listing or repeating that command
-repairs it from the attributed saved record without signing or drawing again. `sats agent
-dismiss <id>` declines a pending request.
-
-Provider HTTP requests time out after 30 seconds each; those limits apply
-to the human's approve command, not to the served process, which never
-touches the chain for a request.
+If preparation fails because of a sync, guard, fee, or provider problem, the
+request becomes `failed` and the human can try again. The agent keeps
+observing with `check_request`. It shouldn't poll the balance or file again.
 
 ## Revocation and expiry
 
@@ -255,29 +213,20 @@ sats agent list
 sats agent revoke claude
 ```
 
-Every request records the `grant_id` of the grant instance that
-created it and executes only under that instance. Revocation takes
-effect on the next filing without restarting the MCP client, and a pending
-request whose grant was revoked or re-issued is `denied` with reason
-`revoked` when a human tries to approve it — a new grant for the same
-agent never inherits old requests, and a client key reused under the new
-grant files a new request. A transaction signed before revocation
-remains valid.
+- Revocation takes effect on the next filing, without restarting the client.
+- A request executes only under the grant instance that created it. A
+  pending request whose grant was revoked or re-issued becomes `denied` with
+  reason `revoked` when the human tries to approve it.
+- Re-issuing a grant mints a new token. A running server with the old token
+  can't file, and the old token can't start a server.
+- Expired grants can't start a server and are removed when listing or
+  startup finds them.
+- A running session keeps `get_balance`, `get_receive_address`, `get_grant`,
+  and `check_request` after revocation or expiry. Stop the session to end
+  them.
+- A transaction signed before revocation stays valid.
 
-Expired grants cannot start a new MCP server and are removed when discovered
-by grant-listing and startup paths. Re-issuing a grant mints a new token, so
-a server still holding the old one is refused on its next start, and a
-running server with a superseded token can file nothing.
+## Transport
 
-Existing sessions retain `get_balance`, `get_receive_address`, `get_grant`, and
-`check_request` after revocation, expiry, or token replacement. Grant inspection
-reports the current grant or inactivity; request visibility remains scoped to
-the session's agent. Stop the session to end its remaining reads. Bearer tokens
-authenticate filing; execution instead checks the original grant instance and
-fresh human authorization for the exact request.
-
-## Transport rules
-
-MCP protocol frames use stdout. Human-readable startup information and
-diagnostics use stderr. Code running inside the MCP server must not print
-arbitrary messages to stdout.
+MCP frames use stdout, and startup messages and diagnostics use stderr.
+Code inside the server must never print to stdout.

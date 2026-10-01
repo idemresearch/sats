@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "sats",
     version,
-    about = "Bitcoin signing for humans and agents",
+    about = "A self-custodial Bitcoin wallet for humans and agents",
     disable_help_subcommand = true
 )]
 pub struct Cli {

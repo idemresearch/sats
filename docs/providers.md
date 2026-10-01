@@ -1,72 +1,59 @@
 # Providers and UTXO guards
 
-sats treats every external Bitcoin service as a typed provider bound to one
-network. Providers advertise audited capabilities; commands ask for a
-capability rather than depending directly on a particular API.
+Choose where sats gets chain data, fee estimates, and broadcast, and which
+asset indexers, if any, protect your UTXOs.
 
-Guard decisions remain presence-only: sats never interprets protocol
-values when deciding which outpoints to exclude from coin selection, and
-it does not parse inscriptions, runestones, or other asset protocols.
-The one deliberate exception is the explicit `sats alkanes` command
-family, a minimal Alkanes client: sats encodes only call envelopes it
-constructs itself (in the `sats-alkanes` crate, against the published
-reference encoding) and displays view results without trusting them.
+A provider is an external service bound to one Bitcoin network. Commands ask
+for a capability, such as "sync" or "broadcast", rather than a specific API.
+You don't need any configuration to start.
 
-## Capabilities
+## Defaults
 
-| Capability | Used for |
-|---|---|
-| `chain.sync` | Full or incremental BDK wallet synchronization |
-| `chain.fees` | Fee-rate estimates |
-| `chain.broadcast` | Raw transaction broadcast |
-| `guard.ord` | Excluding outpoints reported by an ord-compatible view |
-| `guard.alkanes` | Excluding outpoints reported with alkanes balances |
-| `guard.native` | Deterministic native guard contract used by tests |
-| `alkanes.view` | Contract bytecode fetch and call simulation for `sats alkanes` |
+With no provider configured, sats uses Esplora for chain sync, fees, and
+broadcast:
 
-Configuration accepts exact names and the aliases `chain` and `guard`.
-`alkanes.view` is deliberately outside the `guard` alias — a view reads
-contracts, a guard protects UTXOs. Without a `capabilities` filter, Esplora
-and Subfrost provide chain operations. Subfrost guards and Alkanes views
-require an explicit capability opt-in.
-
-## Drivers
-
-| Driver | Chain capabilities | Guard capabilities | Views |
-|---|---|---|---|
-| `esplora` | sync, fees, broadcast | none | none |
-| `subfrost` | sync, fees, broadcast | ord, alkanes | alkanes.view |
-
-The Subfrost driver maps the provider's namespaced JSON-RPC methods onto the
-fixed sats capability contract, using `btc_sendrawtransaction` for broadcast.
-On a fresh wallet, Subfrost derives and queries scripts lazily, stopping after
-20 consecutive unused scripts on each of the receive and change keychains.
-Activity resets that keychain's gap; transaction-history pagination is
-completed for each script before advancing to the next one.
-Guard answers are presence-only; protocol values are not interpreted by sats.
-Like guards, `alkanes.view` never
-resolves from the legacy or built-in fallback tiers: configuring one is an
-explicit trust decision, and the endpoint's network is validated before any
-view result is used.
-
-## Default behavior
-
-When no explicit provider supplies a chain capability, sats falls back to an
-Esplora endpoint:
-
-| Network | Default |
+| Network | Default endpoint |
 |---|---|
 | `mainnet` | `https://mempool.space/api` |
 | `signet` | `https://mempool.space/signet/api` |
 | `testnet4` | `https://mempool.space/testnet4/api` |
 | `regtest` | `http://localhost:3002` |
 
-Defaults cover chain operations only. sats never supplies or enables a
-default asset guard.
+sats never enables an asset guard by default. Configuring one is an explicit
+trust decision.
+
+## Drivers and capabilities
+
+| Capability | Used for | `esplora` | `subfrost` |
+|---|---|---|---|
+| `chain.sync` | Wallet synchronization | ✓ | ✓ |
+| `chain.fees` | Fee-rate estimates | ✓ | ✓ |
+| `chain.broadcast` | Raw transaction broadcast | ✓ | ✓ |
+| `guard.ord` | Excluding outputs an ord-compatible index reports | | opt-in |
+| `guard.alkanes` | Excluding outputs that hold Alkanes balances | | opt-in |
+| `alkanes.view` | Bytecode and simulation for `sats alkanes` | | opt-in |
+| `guard.native` | Deterministic guard used by tests | | |
+
+Without a `capabilities` filter, a provider supplies chain capabilities only.
+Guards and views must be listed explicitly. The aliases `chain` and `guard`
+cover their groups. `alkanes.view` is not part of `guard`, because a view
+reads contracts while a guard protects UTXOs.
+
+Guard answers are presence-only: sats never parses inscriptions, runestones,
+or other asset data to decide what to exclude. The one exception is
+`sats alkanes`, which encodes only calls it builds itself (in the
+`sats-alkanes` crate) and displays view results without trusting them.
+
+The Subfrost driver maps Subfrost's JSON-RPC methods onto these capabilities
+and broadcasts with `btc_sendrawtransaction`. On a fresh wallet it derives
+scripts lazily and stops after 20 consecutive unused scripts on each of the
+receive and change keychains.
 
 ## Configuration
 
-Configure providers under `[providers.<name>]`:
+Providers live under `[providers.<name>]` in the [config file](cli.md#configuration).
+The name is a local label. Every entry declares the one network its endpoint
+serves.
 
 ```toml
 network = "mainnet"
@@ -77,33 +64,12 @@ network = "mainnet"
 url = "https://mainnet.subfrost.io/v4/jsonrpc"
 ```
 
-Provider names are local labels. Each entry must declare the one Bitcoin
-network its endpoint serves. Subfrost needs no capability list for ordinary
-chain synchronization, fee estimation, and broadcast.
+### Split responsibilities
 
-### Fee policy
-
-Providers report fee estimates; the human-owned configuration chooses which
-confirmation target sats uses. Targets are scoped by network, accept 1–1008
-blocks, and default to 2 when omitted:
+Use `capabilities` to divide work between providers, for example Esplora for
+chain access and Subfrost as an asset guard:
 
 ```toml
-[fee_targets]
-signet = 1008
-```
-
-The target applies to shared transaction preparation, including MCP sends.
-A human CLI `--fee-rate` remains an explicit per-invocation override. Agents
-cannot choose a target or fee rate; their grant's absolute fee cap still
-authorizes or refuses the fee derived from the prepared transaction.
-
-### Restrict capabilities
-
-Use a capability filter to split responsibilities:
-
-```toml
-network = "mainnet"
-
 [providers.chain]
 driver = "esplora"
 network = "mainnet"
@@ -117,29 +83,13 @@ url = "https://mainnet.subfrost.io/v4/jsonrpc"
 capabilities = ["guard"]
 ```
 
-Exact capability names allow finer splits:
-
-```toml
-[providers.sync]
-driver = "esplora"
-network = "mainnet"
-url = "https://example-a.invalid/api"
-capabilities = ["chain.sync"]
-
-[providers.relay]
-driver = "esplora"
-network = "mainnet"
-url = "https://example-b.invalid/api"
-capabilities = ["chain.fees", "chain.broadcast"]
-```
-
-The resolver prefers the provider selected for sync when it also offers fees
-or broadcast. Otherwise each chain capability must resolve to one candidate;
-multiple equally eligible candidates are an explicit ambiguity error.
+Exact names allow finer splits, such as `["chain.sync"]` on one provider and
+`["chain.fees", "chain.broadcast"]` on another. sats prefers the sync
+provider for fees and broadcast when it offers them. Otherwise each chain
+capability must resolve to exactly one provider, and two equal candidates
+are an ambiguity error.
 
 ### Authentication
-
-Esplora providers accept an optional bearer token:
 
 ```toml
 [providers.private_esplora]
@@ -148,109 +98,99 @@ network = "mainnet"
 url = "https://bitcoin.example/api"
 
 [providers.private_esplora.auth]
-bearer = "replace-with-token"
-```
+bearer = "replace-with-token"     # sent on reads and broadcast
 
-Subfrost API keys use the provider's dedicated header:
-
-```toml
 [providers.subfrost]
 driver = "subfrost"
 network = "signet"
 url = "https://signet.subfrost.io/v4/jsonrpc"
-api_key = "replace-with-key"
+api_key = "replace-with-key"      # sent in Subfrost's API-key header
 ```
 
-Keep configuration permissions restrictive. Both Esplora and Subfrost expose
-only a safe URL origin in diagnostics and Debug output: user-info, arbitrary
-paths, queries, and fragments are omitted. Untrusted response bodies and
-nested error strings are replaced with safe operation categories and HTTP/RPC
-codes. This also applies to persisted preparation diagnostics.
+Keep the config file's permissions restrictive. Diagnostics and debug output
+show only a provider's origin. User-info, paths, queries, fragments, and
+response bodies are omitted, including from failures saved on agent requests.
+Credentials are never copied into the MCP setup commands.
 
-Network requests retain the configured endpoint and credentials. Use
-`auth.bearer` for Esplora (reads and broadcast), and the direct `api_key` field
-for Subfrost. Credentials are never added to generated MCP connection commands.
+### Fee targets
 
-## Resolution precedence
+Providers estimate fees; you choose the confirmation target, per network, from
+1 to 1008 blocks (default 2):
+
+```toml
+[fee_targets]
+signet = 1008
+```
+
+The target applies to every send, including approved agent requests. A human
+`--fee-rate` overrides it for one command. Agents can't choose a target or
+rate, and their grant's fee cap still applies to the real fee.
+
+## Resolution order
 
 For the selected network:
 
-1. one or more CLI `--provider` values replace the configured provider set;
-2. matching `[providers.*]` entries supply explicit capabilities;
-3. the legacy `[esplora]` map may supply missing chain capabilities;
-4. built-in Esplora defaults supply any remaining chain capabilities.
+1. `--provider` values on the command line replace all configured providers;
+2. `[providers.*]` entries supply their capabilities;
+3. a legacy `[esplora]` map of network to URL fills missing chain capabilities;
+4. the built-in defaults fill any chain capability still missing.
 
-Guards never come from legacy or built-in fallback tiers.
+Guards and `alkanes.view` come only from `[providers.*]` entries that list
+them. Resolution does no network I/O. Each operation checks the provider's
+network when it runs.
 
-One-shot override:
+## One-off overrides
 
 ```sh
 sats --provider esplora=https://mempool.space/signet/api balance
 sats --provider subfrost=https://signet.subfrost.io/v4/jsonrpc balance
 ```
 
-The syntax is `KIND=URL`. It is repeatable, but CLI entries have no capability
-filter; supplying two drivers that both advertise `chain.sync` is ambiguous.
-An explicit CLI override has no hidden fallback behind it, so its selected
-driver must provide every capability needed by the command.
+The syntax is `KIND=URL`, and it's repeatable. Overrides provide chain
+capabilities only and have no fallback behind them. Two overrides that both
+offer `chain.sync` are ambiguous.
+
+> **Overrides drop guards.** An override replaces every configured provider,
+> including asset guards. A `send` or `agent approve` run with `--provider`
+> queries no guard and relies on the 546/330-sat heuristic alone.
 
 ## UTXO protection
 
-Before planning, sats gathers the wallet's current unspent outputs and builds
-one exclusion set:
+Before selecting coins, sats builds one exclusion set:
 
-1. unless `--allow-dust`, add outputs worth exactly 546 or 330 sats;
-2. unless `--no-guards`, ask every configured guard about those outpoints;
-3. union all answers and pass the resulting outpoints into BDK coin
-   selection as unspendable.
+1. outputs worth exactly 546 or 330 sats, common inscription postage, unless
+   `--allow-dust`;
+2. every output a configured guard reports, unless `--no-guards`;
+3. the union of both, passed to coin selection as unspendable.
 
-The local postage check is a heuristic. False positives can be bypassed by a
-human for one invocation; values other than 546 and 330 require a guard for
-protection.
+The postage check is a heuristic. Assets on other values need a guard. A
+human can bypass either layer for one command. Agents never can.
 
-Guards are restrictive-only. They can cause a spend to be refused by marking
-too many outputs, but they cannot add a wallet UTXO, select an input, or
-authorize a signature.
+Guards can only remove candidates. A wrong guard can block a spend by
+over-protecting, or miss an asset, but it can never add an input or authorize
+a signature. A configured guard that can't answer stops the spend.
 
 ## Failure behavior
 
-Esplora and Subfrost set a 30-second HTTP request timeout. Esplora retries a
-retryable GET response at most twice (three attempts with backoff). Subfrost
-retries one safe JSON-RPC read after an HTTP 429, honoring `Retry-After` up to
-60 seconds and waiting 60 seconds when the header is absent. Transport
-timeouts are not retried, and neither driver automatically retries broadcast.
-For a hostname with multiple DNS addresses, each nonfinal TCP connection
-attempt is capped at two seconds (or the remaining request deadline, if
-shorter). The last address gets the remaining deadline. This lets a healthy
-address answer when an earlier one is unreachable, without pinning IPs,
-changing providers, disabling TLS verification or resending an HTTP request.
-Single-address hosts retain the full remaining request timeout. Mempool
-remains the default; Subfrost is used only when explicitly configured.
-
-This is a request limit, not a deadline for an entire wallet scan: sync and
-guards can require multiple requests. OS DNS resolution can also outlast the
-HTTP client's timeout. A broadcast timeout is an uncertain outcome, not proof
-that the transaction was rejected; the signed transaction and reserved budget
-remain durable for recovery.
-
-- Chain sync validates the provider's genesis/network before applying data.
-- Planning fails rather than using stale wallet state after sync failure.
-- Fee estimation failure asks a human CLI caller to supply `--fee-rate`.
-- Fee estimates are bounded: a non-finite, negative, or absurd rate (above
-  10,000 sat/vB) from an endpoint is a typed fee error, never a fee.
-- Malformed checkpoint data from an endpoint fails the sync with a typed
-  error rather than the process.
-- A configured guard failure stops planning.
-- `--no-guards` and `--allow-dust` are human, per-invocation escape hatches.
-- MCP sends have no escape hatches and always use the safe defaults.
-
-Balance is intentionally more tolerant than spending: if sync fails it may
-show cached state and reports `synced: false`.
+- Sync checks the provider's genesis block, and so its network, before
+  using any data.
+- A sync failure stops every send. `balance`, `status`, and `history` fall
+  back to cached data and say so.
+- A fee estimate that is non-finite, negative, or above 10,000 sat/vB is an
+  error, never a fee. When estimation fails, a human can pass `--fee-rate`.
+- Malformed checkpoint data fails the sync, not the process.
+- Each HTTP request times out after 30 seconds. Esplora retries a retryable
+  GET up to twice with backoff. Subfrost retries one safe read after HTTP
+  429, honoring `Retry-After` up to 60 seconds. Timeouts and broadcasts are
+  never retried automatically.
+- For hosts with several DNS addresses, each attempt before the last one is
+  capped at 2 seconds, so a healthy address can still answer. TLS
+  verification and the request itself are unchanged.
+- The 30-second limit is per request, not per wallet scan. A broadcast
+  timeout is an uncertain outcome, not a rejection: the signed transaction
+  stays saved for `sats tx broadcast`.
 
 ## Adding a driver
 
-Provider work is security-sensitive. Follow the recipe in
-[AGENTS.md](../AGENTS.md): declare an audited capability set, keep resolution
-free of network I/O, validate the Bitcoin network at operation time, provide
-a display-safe error URL, and test ambiguity and failure paths with
-deterministic mocks.
+Provider code is security-sensitive. Follow the recipe in
+[AGENTS.md](../AGENTS.md#new-provider-or-capability).

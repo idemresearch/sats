@@ -1,16 +1,16 @@
 # Development
 
-Read [AGENTS.md](../AGENTS.md) before changing implementation code. It defines
-module ownership, security invariants, and the checks required for each kind
-of feature.
+Build, test, and verify sats locally. Read [AGENTS.md](../AGENTS.md) first:
+it defines module ownership, the security invariants, and per-feature
+recipes.
 
 ## Requirements
 
-- Rust 1.89 or newer (the workspace MSRV in `Cargo.toml`);
-- `rustfmt`, Clippy, and `rust-analyzer` (included in `rust-toolchain.toml`);
+- Rust 1.89 or newer (the workspace MSRV), with `rustfmt`, Clippy, and
+  `rust-analyzer` from `rust-toolchain.toml`;
 - the `wasm32-unknown-unknown` target;
-- a POSIX shell for installer checks;
-- Python 3 (standard library only) for Unix terminal approval integration tests.
+- a POSIX shell, for installer tests;
+- Python 3 (standard library only), for terminal approval tests.
 
 ```sh
 rustup component add rustfmt clippy rust-analyzer
@@ -21,38 +21,22 @@ rustup target add wasm32-unknown-unknown
 
 ```sh
 cargo build --locked
-cargo run -- --help
-```
-
-The default build includes MCP. To install a human-only binary without MCP
-dependencies from a checkout:
-
-```sh
-cargo install --locked --path crates/sats --no-default-features
-```
-
-Default v0.0.1 binaries omit Alkanes execution. Its implementation can be
-compiled explicitly for development and exercised against deterministic fixtures:
-
-```sh
-cargo test -p sats --locked --features experimental-alkanes-execute --test alkanes
-```
-
-Do not use that feature for default release archives. Pure composition tests
-continue to run in the workspace gate.
-
-Use an isolated state directory for manual development runs:
-
-```sh
 SATS_DIR="$(mktemp -d)" cargo run -- init
 ```
 
-Signet is the default. Never point a development smoke test at a real wallet
-directory or put a real mnemonic in a command, fixture, log, or screenshot.
+Always use an isolated `SATS_DIR` for manual runs. Never point a development
+build at a real wallet, or put a real mnemonic in a command, fixture, log, or
+screenshot.
+
+| Build | Command |
+|---|---|
+| Without MCP | `cargo install --locked --path crates/sats --no-default-features` |
+| With Alkanes execution (development only, never released) | `cargo test -p sats --locked --features experimental-alkanes-execute --test alkanes` |
 
 ## Verification gate
 
-The full local gate matching CI is:
+Run the narrowest relevant test while you work. Before calling a change
+ready, run the full gate, which matches CI:
 
 ```sh
 sh -n setup.sh scripts/test-setup.sh
@@ -65,80 +49,79 @@ cargo check -p sats-core --target wasm32-unknown-unknown
 cargo check -p sats-web --target wasm32-unknown-unknown
 ```
 
-Unix terminal tests open a controlling TTY to exercise hidden password entry;
-provider fixtures bind localhost sockets. Sandboxes must allow those operations.
-WASM dependency builds need a C compiler with WASM support; on macOS, LLVM
-Clang may be needed instead of Apple Clang through Cargo's target-specific
-`CC_wasm32_unknown_unknown` and `AR_wasm32_unknown_unknown` settings.
+Terminal tests open a controlling TTY for hidden password entry, and provider
+fixtures bind localhost sockets, so sandboxes must allow both. WASM
+dependency builds need a C compiler with WASM support. On macOS you may need
+LLVM Clang instead of Apple Clang, set through `CC_wasm32_unknown_unknown`
+and `AR_wasm32_unknown_unknown`.
 
-Run the narrowest relevant unit or integration test during development, then
-run the full gate before reporting the work ready.
+Then exercise the freshly built binary on the path you changed, with an
+isolated `SATS_DIR`. For MCP changes, run the local binary as the stdio
+server and call the affected tool. Report exactly what you ran. If something
+couldn't be run, say so rather than calling the change complete.
 
 ## Test layers
 
-The root Cargo patch selects `vendor/minreq`, based on upstream 2.14.1, for
-bounded TCP address fallback. See its [patch note](../vendor/minreq/SATS-PATCH.md)
-for provenance and the exact changed files. The native Esplora test module
-includes the patched connector directly, so its deterministic deadline and
-fallback tests run in the normal workspace gate. Keep these tests and the
-broadcast-timeout/accounting tests when updating the dependency.
-
 | Layer | Location | Covers |
 |---|---|---|
-| Core unit tests | `crates/sats-core/src/` | Preparation, finalized records, authorization, sealing, seed derivation, signing, serialization, amount shorthand |
-| Native unit tests | `crates/sats/src/` | Config, providers, storage, and helpers |
-| Playground unit tests | `crates/sats-web/src/` | Simulated-chain wallet loop, grant lifecycle, denial shapes |
-| CLI integration | `crates/sats/tests/` including terminal, connection, preparation, receipt, and redaction fixtures | Isolated wallet flows, failures, providers, guards, grants, request review, and the alkanes commands |
-| MCP integration | `crates/sats/tests/mcp.rs` | Tool schemas, granted sends, idempotent retries, the approval loop, startup refusal, and live revocation |
-| Installer | `scripts/test-setup.sh` | Targets, checksums, version pinning, PATH edits, and atomic replacement |
-| WASM portability | CI `wasm-check` | `sats-core` and `sats-web` remain buildable for `wasm32-unknown-unknown` |
+| Core unit | `crates/sats-core/src/` | Preparation, authorization, sealing, seeds, signing, amounts |
+| Native unit | `crates/sats/src/` | Config, providers, storage, the executor with a signer probe |
+| Playground unit | `crates/sats-web/src/` | Simulated wallet loop, grant lifecycle, denials |
+| CLI integration | `crates/sats/tests/` | Wallet flows, failures, providers, guards, grants, request review, Alkanes |
+| MCP integration | `crates/sats/tests/mcp.rs` | Tool schemas, filing, idempotency, the approval loop, startup refusal, revocation |
+| Installer | `scripts/test-setup.sh` | Targets, checksums, version pinning, PATH edits, atomic replacement |
+| WASM | CI `wasm-check` | `sats-core` and `sats-web` build for `wasm32-unknown-unknown` |
 
-Network-dependent behavior should be covered with deterministic providers and
-temporary state. Unit and integration tests must not require public services,
-credentials, or real funds.
+Tests must not need public services, credentials, or real funds. Cover network
+behavior with deterministic providers and temporary state.
 
-## Manual verification
+### Vendored `minreq`
 
-Tests do not replace exercising a user-facing change. Run the freshly built
-binary with an isolated `SATS_DIR` and use a path that demonstrates the
-changed behavior. For MCP changes, launch the local binary as the stdio server
-and exercise the affected tool contract.
-
-Report exactly which commands ran. If the environment cannot exercise a
-required path, state that limitation rather than declaring unverified behavior
-complete.
-
-## Documentation
-
-Repository prose documents shipped behavior only:
-
-- `README.md` is the product entry point and short quickstart;
-- `docs/cli.md` and `docs/mcp.md` describe user-facing contracts;
-- `docs/architecture.md` and `docs/security.md` describe current boundaries;
-- `docs/providers.md` describes the shipped provider model;
-- `AGENTS.md` describes how to change the system safely.
-
-Do not add roadmap queues, target dates, or speculative designs. Work that is
-not implemented belongs in the maintainer's issue or private planning system.
-
-When commands or schemas change, update their focused reference rather than
-growing the README. CLI help, MCP schemas, tests, and typed Rust contracts
-remain authoritative.
+The root `[patch.crates-io]` selects `vendor/minreq`, based on upstream
+2.14.1. It caps each non-final TCP connection attempt at 2 seconds, so one
+unreachable DNS address can't consume the whole request deadline. No HTTP
+bytes are sent during fallback, and TLS verification is unchanged. The
+Esplora test module includes the patched connector directly, so its deadline
+and fallback tests run in the normal gate. Keep those tests and the
+broadcast-timeout tests when updating the dependency. Provenance is in
+[SATS-PATCH.md](../vendor/minreq/SATS-PATCH.md).
 
 ## Website playground
 
-The website's interactive terminal runs `sats-web` — `sats-core` compiled to
-WebAssembly against a simulated in-memory chain. The generated module in
-`website/public/playground/` is committed so the site deploys without a Rust
-toolchain. After changing `sats-core` or `sats-web`, regenerate it with:
+The site's terminal runs `sats-web` against a simulated chain. The generated
+module in `website/public/playground/` is committed, so the site deploys
+without Rust. After changing `sats-core` or `sats-web`, regenerate it:
 
 ```sh
 cargo install wasm-bindgen-cli --version <pinned in Cargo.toml>
 sh scripts/build-playground.sh
 ```
 
+## Writing docs
+
+`docs/cli.md`, `mcp.md`, `providers.md`, `security.md`, `architecture.md`,
+and `direction.md` are also published on the website. Keep them lean:
+
+- **One fact, one home.** Link instead of restating. Commands and flags go in
+  `cli.md`, the agent contract in `mcp.md`, configuration in `providers.md`,
+  failure and signing semantics in `security.md`, code structure in
+  `architecture.md`, and rationale in `direction.md`. The README is a
+  pitch and quickstart only.
+- **Open with one sentence under 160 characters.** The site uses a page's
+  first paragraph as its description.
+- **Write for the reader of that page.** User pages say what you see and
+  what to do. Locks, ledgers, and crash windows belong in `security.md`.
+- **Use tables for anything enumerable,** such as flags, states, errors, and
+  paths.
+- **Document shipped behavior only.** No roadmaps, dates, or speculative
+  designs.
+- **Use plain blockquotes for callouts in `docs/`.** The site doesn't render
+  GitHub's `> [!NOTE]` syntax.
+
+CLI help, MCP schemas, tests, and typed contracts are authoritative. When
+prose disagrees with them, fix it in the same change.
+
 ## Release builds
 
 Release builds optimize for size, use fat LTO, abort on panic, and strip
-symbols. Stable tags publish four native archives. See
-[Releasing](releasing.md) for the tag and asset process.
+symbols. See [Releasing](releasing.md).
