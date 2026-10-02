@@ -37,11 +37,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
     // Workflows with local branches resolve only when they reach chain work.
     let overrides = cli.provider;
-    let services = |config: &Config| provider::resolve(config, &overrides, network);
+    let services = |config: &Config| provider::resolve(config, overrides.as_ref(), network);
 
     match cli.command {
         Command::Init { words, restore } => {
-            commands::init::run(&store, config, network, words, restore, &overrides)
+            commands::init::run(&store, config, network, words, restore, overrides.as_ref())
         }
         Command::Balance { offline } => {
             commands::balance::run(&store, network, || Ok(services(&config)?), offline, json)
@@ -109,13 +109,19 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         },
         Command::Providers { command } => match command {
             None | Some(cli::ProvidersCommand::List) => {
-                commands::providers::list(&config, &overrides, network, json)
+                commands::providers::list(&config, overrides.as_ref(), network, json)
             }
-            Some(cli::ProvidersCommand::Login(args)) => {
-                commands::providers::login(&store, config, network, &args, json)
+            Some(cli::ProvidersCommand::Add(args)) => {
+                commands::providers::add(&store, config, network, &args, json)
             }
-            Some(cli::ProvidersCommand::Logout { name }) => {
-                commands::providers::logout(&store, config, &name, json)
+            Some(cli::ProvidersCommand::Use { source }) => {
+                commands::providers::use_chain(&store, config, network, source, json)
+            }
+            Some(cli::ProvidersCommand::Protect { state }) => {
+                commands::providers::protect(&store, config, network, state, json)
+            }
+            Some(cli::ProvidersCommand::Remove { kind }) => {
+                commands::providers::remove(&store, config, network, kind, json)
             }
         },
         Command::Alkanes { command } => match command {

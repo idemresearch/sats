@@ -1,364 +1,296 @@
-//! `sats providers`: see which provider serves what, and set one up by
-//! logging in with its API key.
+//! `sats providers`: where a network's chain data comes from, and whether
+//! its assets are protected.
 //!
-//! Login is a human trust decision written to the config file: it names the
-//! endpoint, stores the credential, and — only when asked — enables asset
-//! guards. It checks resolution and the endpoint's network before saving,
-//! so a typo or wrong key never becomes the provider the next send uses.
+//! Every change is a human trust decision written to the config file. A
+//! change that points at an endpoint is resolved and checked against the
+//! network before it is saved, so a typo or wrong key never becomes the
+//! provider the next send uses. Asset protection is turned on only by an
+//! explicit flag, answer, or `protect on`, and never off as a side effect.
 
-use std::collections::BTreeSet;
 use std::io::IsTerminal;
 
 use anyhow::{Context, Result, bail};
 use sats_core::bitcoin::Network;
 use zeroize::Zeroizing;
 
-use crate::cli::{LoginArgs, LoginProvider};
-use crate::config::{AuthConfig, Config, ProviderConfig, network_name};
-use crate::provider::{self, AuthKind, Capability, CliProvider};
+use crate::cli::{AddArgs, ChainArg, ProviderArg, Toggle};
+use crate::config::{
+    ChainChoice, Config, EsploraConfig, RedactedUrl, SubfrostConfig, network_name,
+};
+use crate::provider::{self, CliProvider, Endpoint, Overview, Source};
 use crate::store::Store;
 use crate::ui;
 
-/// The capability set `--assets` enables on Subfrost: chain access, both
-/// asset guards, and the Alkanes view.
-const SUBFROST_ASSETS: [&str; 3] = ["chain", "guard", "alkanes.view"];
-
 pub fn list(
     config: &Config,
-    overrides: &[CliProvider],
+    overrides: Option<&CliProvider>,
     network: Network,
     json: bool,
 ) -> Result<()> {
-    let net_name = network_name(network);
-    let providers = match provider::describe(config, overrides, network) {
-        Ok(providers) => providers,
-        Err(err) => {
-            // The list is where a broken configuration gets diagnosed: show
-            // the entries as written, then fail with the resolution error.
-            if !json {
-                println!("{net_name} providers (not resolvable)");
-                println!();
-                configured_table(config, net_name);
-                println!();
-            }
-            return Err(err.into());
-        }
-    };
-
-    if json {
-        let list: Vec<_> = providers
-            .iter()
-            .map(|p| {
-                serde_json::json!({
-                    "name": p.name,
-                    "driver": p.driver,
-                    "url": p.url,
-                    "source": p.source.as_str(),
-                    "auth": p.auth.as_str(),
-                    "serves": p.serves.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
-                })
-            })
-            .collect();
-        println!(
-            "{}",
-            serde_json::json!({ "network": net_name, "providers": list })
-        );
-        return Ok(());
-    }
-
-    println!("{net_name} providers");
-    println!();
-    let rows: Vec<[String; 5]> = providers
-        .iter()
-        .map(|p| {
-            [
-                p.name.clone(),
-                p.driver.to_string(),
-                p.url.clone(),
-                auth_label(p.auth).to_string(),
-                serves_label(&p.serves),
-            ]
-        })
-        .collect();
-    table(&["Name", "Driver", "Endpoint", "Auth", "Serves"], &rows);
-    println!();
-
-    if !overrides.is_empty() {
-        ui::dim("--provider replaces every configured provider for this run");
-    }
-    if providers.iter().any(|p| p.serves.is_empty()) {
-        ui::dim("— : configured, but another provider serves its capabilities");
-    }
-    if !providers
-        .iter()
-        .flat_map(|p| &p.serves)
-        .any(|c| c.is_guard())
-    {
-        ui::dim("asset guards: none — only the 546/330-sat postage check protects inscriptions");
-    }
-    if overrides.is_empty() && !providers.iter().any(|p| p.driver == "subfrost") {
-        let url = if provider::subfrost::default_url(network).is_some() {
-            ""
-        } else {
-            " --url URL"
-        };
-        ui::dim(&format!(
-            "add Subfrost (chain data, asset guards): sats providers login subfrost{url}"
-        ));
-    }
-    let elsewhere = config
-        .providers
-        .values()
-        .filter(|p| p.network != net_name)
-        .count();
-    if elsewhere > 0 {
-        ui::dim(&format!(
-            "{elsewhere} more configured for other networks — select one with --network"
-        ));
-    }
-    Ok(())
+    show(config, overrides, network, json)
 }
 
-pub fn login(
+pub fn add(
     store: &Store,
     mut config: Config,
     network: Network,
-    args: &LoginArgs,
+    args: &AddArgs,
     json: bool,
 ) -> Result<()> {
     let net_name = network_name(network);
-    let driver = match args.kind {
-        LoginProvider::Subfrost => "subfrost",
-        LoginProvider::Esplora => "esplora",
-    };
-    if args.assets && args.kind != LoginProvider::Subfrost {
-        bail!("--assets is a Subfrost option: esplora serves chain data only");
-    }
-    let url = match (&args.url, args.kind) {
-        (Some(url), _) => url.clone(),
-        (None, LoginProvider::Subfrost) => provider::subfrost::default_url(network)
-            .with_context(|| {
-                format!("Subfrost has no default endpoint for {net_name} — pass --url")
-            })?
-            .to_string(),
-        (None, LoginProvider::Esplora) => bail!("esplora needs an endpoint: pass --url"),
-    };
-    let name = entry_name(&config, driver, net_name, args.name.as_deref())?;
-    let existing = config.providers.get(&name);
-    let current = existing.and_then(|e| {
-        e.api_key
-            .clone()
-            .or_else(|| e.auth.as_ref().and_then(|a| a.bearer.clone()))
-    });
-
-    let capabilities = if args.assets {
-        Some(SUBFROST_ASSETS.map(String::from).to_vec())
-    } else if let Some(entry) = existing {
-        entry.capabilities.clone()
-    } else if args.kind == LoginProvider::Subfrost
-        && !json
-        && std::io::stdin().is_terminal()
-        && ui::confirm(
-            "also protect inscription and Alkanes UTXOs with Subfrost?",
-            false,
-        )?
-    {
-        Some(SUBFROST_ASSETS.map(String::from).to_vec())
-    } else {
-        None
-    };
-    let replaced = config.providers.insert(
-        name.clone(),
-        ProviderConfig {
-            driver: driver.to_string(),
-            network: net_name.to_string(),
-            url,
-            capabilities,
-            api_key: None,
-            auth: None,
-        },
-    );
-    // Refuse a configuration the next command could not resolve (an
-    // ambiguous chain provider, a bad capability) before asking for the
-    // key. Resolution never depends on the credential's value.
-    let providers = provider::describe(&config, &[], network)
-        .with_context(|| format!("{name} was not saved"))?;
-
-    let credential = read_credential(args.kind, current)?.map(|secret| secret.to_string());
-    let entry = config.providers.get_mut(&name).expect("inserted above");
+    let updated;
     match args.kind {
-        LoginProvider::Subfrost => entry.api_key = credential,
-        LoginProvider::Esplora => {
-            entry.auth = credential.map(|token| AuthConfig {
-                bearer: Some(token),
-            })
-        }
-    }
-
-    let status = ui::StatusLine::start(&format!("checking {driver} on {net_name}…"));
-    let checked = provider::check_entry(&name, &config.providers[&name], network);
-    status.finish();
-    checked.with_context(|| {
-        format!("{name} was not saved — check the URL and key, then log in again")
-    })?;
-    config.save(store)?;
-
-    let serves = providers
-        .iter()
-        .find(|p| p.name == name)
-        .map(|p| p.serves.clone())
-        .unwrap_or_default();
-    let auth = config.providers[&name].api_key.is_some()
-        || config.providers[&name]
-            .auth
-            .as_ref()
-            .is_some_and(|a| a.bearer.is_some());
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "name": name,
-                "driver": driver,
-                "network": net_name,
-                "url": crate::provider::error::redact_url(&config.providers[&name].url),
-                "authenticated": auth,
-                "updated": replaced.is_some(),
-                "serves": serves.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
-            })
-        );
-        return Ok(());
-    }
-    ui::ok(&format!(
-        "{} {name}  {net_name}",
-        if replaced.is_some() {
-            "updated"
-        } else {
-            "logged in to"
-        }
-    ));
-    ui::kv_rows(&[
-        (
-            "Endpoint",
-            crate::provider::error::redact_url(&config.providers[&name].url),
-        ),
-        (
-            "Auth",
-            if auth {
-                "stored in config.toml"
-            } else {
-                "none"
+        ProviderArg::Subfrost => {
+            if args.url.is_none()
+                && config.net(network).subfrost_url.is_none()
+                && provider::subfrost::default_url(network).is_none()
+            {
+                bail!("Subfrost has no default endpoint for {net_name} — pass --url");
             }
-            .into(),
-        ),
-        ("Serves", serves_label(&serves)),
-    ]);
-    if driver == "subfrost" && !serves.iter().any(|c| c.is_guard()) {
-        let named = if name == "subfrost" {
-            String::new()
-        } else {
-            format!(" --name {name}")
-        };
-        ui::dim(&format!(
-            "asset guards are off — to enable them: sats providers login subfrost{named} --assets"
-        ));
-    }
-    Ok(())
-}
-
-pub fn logout(store: &Store, mut config: Config, name: &str, json: bool) -> Result<()> {
-    let Some(entry) = config.providers.remove(name) else {
-        let known: Vec<&str> = config.providers.keys().map(String::as_str).collect();
-        if known.is_empty() {
-            bail!("no provider named {name:?}: none are configured");
+            let current = config.subfrost.as_ref().map(|s| s.api_key.clone());
+            updated = current.is_some();
+            let api_key = read_credential("Subfrost API key", current, true)?
+                .context("no Subfrost API key")?;
+            config.subfrost = Some(SubfrostConfig { api_key });
+            let net = config.net_mut(network);
+            if let Some(url) = &args.url {
+                net.subfrost_url = Some(RedactedUrl(url.clone()));
+            }
+            net.chain = Some(ChainChoice::Subfrost);
+            if args.protect
+                || (!net.protect_assets
+                    && !json
+                    && std::io::stdin().is_terminal()
+                    && ui::confirm(
+                        "also turn on asset protection (Subfrost checks every output before a send)?",
+                        false,
+                    )?)
+            {
+                net.protect_assets = true;
+            }
         }
-        bail!(
-            "no provider named {name:?} (configured: {})",
-            known.join(", ")
-        );
+        ProviderArg::Esplora => {
+            if args.protect {
+                bail!(
+                    "--protect is a Subfrost option: Esplora can't tell which outputs carry assets"
+                );
+            }
+            let url = args
+                .url
+                .clone()
+                .context("esplora needs an endpoint: pass --url")?;
+            let existing = config.net(network).esplora.clone();
+            updated = existing.is_some();
+            // A stored token is only ever kept for the same server: it must
+            // not follow a new URL.
+            let current = existing.filter(|e| e.url.0 == url).and_then(|e| e.bearer);
+            let bearer = read_credential("bearer token", current, false)?;
+            let net = config.net_mut(network);
+            net.esplora = Some(EsploraConfig {
+                url: RedactedUrl(url),
+                bearer,
+            });
+            net.chain = Some(ChainChoice::Esplora);
+        }
+    }
+
+    check_and_save(store, &config, network, true)?;
+    let name = match args.kind {
+        ProviderArg::Subfrost => "subfrost",
+        ProviderArg::Esplora => "esplora",
     };
-    config.save(store)?;
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "name": name,
-                "driver": entry.driver,
-                "network": entry.network,
-                "removed": true,
-            })
-        );
-        return Ok(());
+    if !json {
+        let verb = if updated { "updated" } else { "added" };
+        ui::ok(&format!("{verb} {name}  {net_name}"));
+        println!();
     }
-    ui::ok(&format!("logged out of {name}  {}", entry.network));
-    ui::dim("its endpoint and credential are removed from config.toml");
-    Ok(())
+    show(&config, None, network, json)
 }
 
-/// The config entry a login writes. An explicit name must not repurpose an
-/// entry for another driver or network. Otherwise reuse the one entry this
-/// driver already has on the network (a re-login rotates its key), or take
-/// the driver's name, then `<driver>-<network>`.
-fn entry_name(
+pub fn use_chain(
+    store: &Store,
+    mut config: Config,
+    network: Network,
+    source: ChainArg,
+    json: bool,
+) -> Result<()> {
+    let choice = match source {
+        ChainArg::Mempool => ChainChoice::Mempool,
+        ChainArg::Subfrost => ChainChoice::Subfrost,
+        ChainArg::Esplora => ChainChoice::Esplora,
+    };
+    config.net_mut(network).chain = Some(choice);
+    check_and_save(store, &config, network, false)?;
+    if !json {
+        ui::ok(&format!(
+            "{} chain data: {}",
+            network_name(network),
+            choice.as_str()
+        ));
+        println!();
+    }
+    show(&config, None, network, json)
+}
+
+pub fn protect(
+    store: &Store,
+    mut config: Config,
+    network: Network,
+    state: Toggle,
+    json: bool,
+) -> Result<()> {
+    let net_name = network_name(network);
+    match state {
+        Toggle::On => {
+            // Name the missing indexer; any other problem with the setup is
+            // reported as itself.
+            let before = provider::overview(&config, None, network)
+                .context("asset protection was not turned on")?;
+            if before.alkanes.is_none() {
+                bail!(
+                    "asset protection needs Subfrost on {net_name} — run `sats providers add subfrost` first"
+                );
+            }
+            config.net_mut(network).protect_assets = true;
+            let services = provider::resolve(&config, None, network)?;
+            let status = ui::StatusLine::start(&format!("checking Subfrost on {net_name}…"));
+            let checked = services.check_index();
+            status.finish();
+            checked.context("asset protection was not turned on")?;
+            config.save(store)?;
+            if !json {
+                ui::ok(&format!("asset protection on  {net_name}"));
+                ui::dim(
+                    "before every send, Subfrost is asked which outputs carry inscriptions, runes, or Alkanes;\n\
+                     if it can't answer, the send stops (a human can skip the check once with --no-guards)",
+                );
+                println!();
+            }
+        }
+        Toggle::Off => {
+            config.net_mut(network).protect_assets = false;
+            config.save(store)?;
+            if !json {
+                ui::warn(&format!(
+                    "asset protection off  {net_name} — only the 546/330-sat postage check protects inscriptions"
+                ));
+                println!();
+            }
+        }
+    }
+    show(&config, None, network, json)
+}
+
+pub fn remove(
+    store: &Store,
+    mut config: Config,
+    network: Network,
+    provider: ProviderArg,
+    json: bool,
+) -> Result<()> {
+    let mut reverted = Vec::new();
+    match provider {
+        ProviderArg::Subfrost => {
+            let set_up = config.subfrost.is_some()
+                || config
+                    .networks()
+                    .iter()
+                    .any(|(_, net)| net.subfrost_url.is_some());
+            if !set_up {
+                bail!("Subfrost isn't set up");
+            }
+            let protected: Vec<&str> = config
+                .networks()
+                .iter()
+                .filter(|(_, net)| net.protect_assets)
+                .map(|(name, _)| *name)
+                .collect();
+            if let Some(first) = protected.first() {
+                bail!(
+                    "asset protection uses Subfrost on {} — turn it off first: \
+                     sats --network {first} providers protect off",
+                    protected.join(", ")
+                );
+            }
+            config.subfrost = None;
+            for net in [
+                Network::Bitcoin,
+                Network::Signet,
+                Network::Testnet4,
+                Network::Regtest,
+            ] {
+                let settings = config.net_mut(net);
+                settings.subfrost_url = None;
+                if settings.chain == Some(ChainChoice::Subfrost) {
+                    settings.chain = None;
+                    reverted.push(net);
+                }
+            }
+        }
+        ProviderArg::Esplora => {
+            let net = config.net_mut(network);
+            if net.esplora.take().is_none() {
+                bail!("no Esplora server is set up for {}", network_name(network));
+            }
+            if net.chain == Some(ChainChoice::Esplora) {
+                net.chain = None;
+                reverted.push(network);
+            }
+        }
+    }
+    config.save(store)?;
+    if !json {
+        ui::ok(match provider {
+            ProviderArg::Subfrost => "removed subfrost and its key",
+            ProviderArg::Esplora => "removed esplora and its token",
+        });
+        for net in reverted {
+            ui::warn(&format!(
+                "{} chain data is back to the default: {}",
+                network_name(net),
+                ChainChoice::default_for(net).as_str()
+            ));
+        }
+        println!();
+    }
+    show(&config, None, network, json)
+}
+
+/// Resolve the changed configuration, check the chain source against the
+/// network (and the indexer, when protection is on and it differs), then
+/// save. Nothing is written unless every check passes.
+fn check_and_save(
+    store: &Store,
     config: &Config,
-    driver: &str,
-    net_name: &str,
-    requested: Option<&str>,
-) -> Result<String> {
-    if let Some(name) = requested {
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-        {
-            bail!("provider names use letters, digits, '-' and '_'");
-        }
-        if let Some(entry) = config.providers.get(name)
-            && (entry.driver != driver || entry.network != net_name)
-        {
-            bail!(
-                "{name:?} is already configured as {} for {} — choose another --name",
-                entry.driver,
-                entry.network
-            );
-        }
-        return Ok(name.to_string());
+    network: Network,
+    credential: bool,
+) -> Result<()> {
+    let net_name = network_name(network);
+    let services = provider::resolve(config, None, network).context("nothing was saved")?;
+    let status = ui::StatusLine::start(&format!("checking {net_name} chain data…"));
+    let mut checked = services.check_chain();
+    if checked.is_ok() && config.net(network).protect_assets {
+        checked = services.check_index();
     }
-    let same: Vec<&str> = config
-        .providers
-        .iter()
-        .filter(|(_, p)| p.driver == driver && p.network == net_name)
-        .map(|(name, _)| name.as_str())
-        .collect();
-    match same.as_slice() {
-        [one] => return Ok(one.to_string()),
-        [] => {}
-        many => bail!(
-            "several {driver} providers on {net_name} ({}) — pick one with --name",
-            many.join(", ")
-        ),
-    }
-    [driver.to_string(), format!("{driver}-{net_name}")]
-        .into_iter()
-        .find(|candidate| !config.providers.contains_key(candidate))
-        .with_context(|| format!("pick a name for this {driver} provider with --name"))
+    status.finish();
+    let hint = if credential {
+        "nothing was saved — check the URL and key, then try again"
+    } else {
+        "nothing was saved"
+    };
+    checked.context(hint)?;
+    config.save(store)
 }
 
 /// Hidden entry on a terminal, one line on stdin otherwise. Never a CLI
-/// argument: argv and shell history leak. Empty input keeps the entry's
-/// current credential; Subfrost requires one, Esplora may run without.
-fn read_credential(
-    provider: LoginProvider,
-    current: Option<String>,
-) -> Result<Option<Zeroizing<String>>> {
-    let label = match provider {
-        LoginProvider::Subfrost => "Subfrost API key",
-        LoginProvider::Esplora => "bearer token",
-    };
+/// argument: argv and shell history leak. Empty input keeps the current
+/// credential; a required one must exist.
+fn read_credential(label: &str, current: Option<String>, required: bool) -> Result<Option<String>> {
     let input = if std::io::stdin().is_terminal() {
-        let hint = match (&current, provider) {
-            (Some(_), _) => " (enter keeps the current one)",
-            (None, LoginProvider::Esplora) => " (enter for none)",
-            (None, LoginProvider::Subfrost) => "",
+        let hint = match (&current, required) {
+            (Some(_), _) => " (enter keeps the saved one)",
+            (None, false) => " (enter for none)",
+            (None, true) => "",
         };
         Zeroizing::new(rpassword::prompt_password(format!("{label}{hint}: "))?)
     } else {
@@ -368,194 +300,180 @@ fn read_credential(
     };
     let input = input.trim();
     if !input.is_empty() {
-        return Ok(Some(Zeroizing::new(input.to_string())));
+        return Ok(Some(input.to_string()));
     }
-    match (current, provider) {
-        (Some(current), _) => Ok(Some(Zeroizing::new(current))),
-        (None, LoginProvider::Esplora) => Ok(None),
-        (None, LoginProvider::Subfrost) => {
-            bail!("no {label}: enter it at the prompt, or pipe it on stdin")
+    match current {
+        Some(current) => Ok(Some(current)),
+        None if required => bail!("no {label}: enter it at the prompt, or pipe it on stdin"),
+        None => Ok(None),
+    }
+}
+
+/// Print what the network uses. When it can't be resolved, show the
+/// settings as written and fail with the resolution error, so the list is
+/// where a broken setup gets diagnosed.
+fn show(
+    config: &Config,
+    overrides: Option<&CliProvider>,
+    network: Network,
+    json: bool,
+) -> Result<()> {
+    let net_name = network_name(network);
+    let view = match provider::overview(config, overrides, network) {
+        Ok(view) => view,
+        Err(err) => {
+            if !json {
+                println!("{net_name} providers, as configured");
+                println!();
+                configured(config, network);
+                println!();
+            }
+            return Err(err.into());
         }
+    };
+    if json {
+        println!("{}", overview_json(net_name, &view));
+        return Ok(());
     }
-}
 
-/// Entries as written, for when resolution fails: no serving information,
-/// and the same redaction as everywhere else.
-fn configured_table(config: &Config, net_name: &str) {
-    let rows: Vec<[String; 5]> = config
-        .providers
-        .iter()
-        .filter(|(_, p)| p.network == net_name)
-        .map(|(name, p)| {
-            let auth = if p.api_key.is_some() {
-                AuthKind::ApiKey
-            } else if p.auth.as_ref().is_some_and(|a| a.bearer.is_some()) {
-                AuthKind::Bearer
-            } else {
-                AuthKind::None
-            };
-            [
-                name.clone(),
-                p.driver.clone(),
-                crate::provider::error::redact_url(&p.url),
-                auth_label(auth).to_string(),
-                p.capabilities
-                    .as_ref()
-                    .map(|c| c.join(", "))
-                    .unwrap_or_else(|| "default".into()),
-            ]
-        })
-        .collect();
-    if rows.is_empty() {
-        ui::dim("no providers configured for this network");
-    } else {
-        table(
-            &["Name", "Driver", "Endpoint", "Auth", "Capabilities"],
-            &rows,
-        );
-    }
-}
-
-fn auth_label(auth: AuthKind) -> &'static str {
-    match auth {
-        AuthKind::None => "—",
-        AuthKind::ApiKey => "api key",
-        AuthKind::Bearer => "bearer",
-    }
-}
-
-/// Compact capability list: the three chain capabilities together read
-/// as `chain`.
-fn serves_label(serves: &[Capability]) -> String {
-    if serves.is_empty() {
-        return "—".into();
-    }
-    let set: BTreeSet<Capability> = serves.iter().copied().collect();
-    let chain = [
-        Capability::ChainSync,
-        Capability::ChainFees,
-        Capability::ChainBroadcast,
+    println!("{net_name} providers");
+    println!();
+    let chain = &view.chain;
+    let note = match chain.source {
+        Source::Default => " (default)",
+        Source::Override => " (--provider)",
+        Source::Config => "",
+    };
+    let rows = [
+        [
+            "Chain data".to_string(),
+            format!("{}{note}", chain.provider),
+            endpoint_detail(chain),
+        ],
+        match &view.protection {
+            Some(endpoint) => [
+                "Asset protection".into(),
+                "on".into(),
+                format!("{} checks every output before a send", endpoint.provider),
+            ],
+            None => [
+                "Asset protection".into(),
+                "off".into(),
+                "only the 546/330-sat postage check".into(),
+            ],
+        },
+        match &view.alkanes {
+            Some(endpoint) => [
+                "Alkanes views".into(),
+                endpoint.provider.into(),
+                endpoint_detail(endpoint),
+            ],
+            None => ["Alkanes views".into(), "—".into(), "needs Subfrost".into()],
+        },
     ];
-    let grouped = chain.iter().all(|c| set.contains(c));
-    let mut parts = Vec::new();
-    if grouped {
-        parts.push("chain");
+    table(&rows);
+    println!();
+    if view.alkanes.is_none() {
+        let url = if provider::subfrost::default_url(network).is_some() {
+            ""
+        } else {
+            " --url URL"
+        };
+        ui::dim(&format!(
+            "add Subfrost for asset protection and Alkanes views: sats providers add subfrost{url}"
+        ));
+    } else if view.protection.is_none() {
+        ui::dim("turn on asset protection: sats providers protect on");
     }
-    parts.extend(
-        set.iter()
-            .filter(|c| !(grouped && chain.contains(c)))
-            .map(|c| c.as_str()),
-    );
-    parts.join(", ")
+    Ok(())
 }
 
-fn table<const N: usize>(header: &[&str; N], rows: &[[String; N]]) {
-    let mut widths: Vec<usize> = header.iter().map(|h| h.chars().count()).collect();
+fn endpoint_detail(endpoint: &Endpoint) -> String {
+    match endpoint.auth {
+        provider::AuthKind::None => endpoint.url.clone(),
+        provider::AuthKind::ApiKey => format!("{}  api key", endpoint.url),
+        provider::AuthKind::Bearer => format!("{}  bearer token", endpoint.url),
+    }
+}
+
+fn endpoint_json(endpoint: &Endpoint) -> serde_json::Value {
+    serde_json::json!({
+        "provider": endpoint.provider,
+        "url": endpoint.url,
+        "auth": endpoint.auth.as_str(),
+        "source": endpoint.source.as_str(),
+    })
+}
+
+fn overview_json(net_name: &str, view: &Overview) -> serde_json::Value {
+    serde_json::json!({
+        "network": net_name,
+        "chain": endpoint_json(&view.chain),
+        "asset_protection": view.protection.as_ref().map(endpoint_json),
+        "alkanes_views": view.alkanes.as_ref().map(endpoint_json),
+    })
+}
+
+/// The network's settings as written, display-safe, for a configuration
+/// that does not resolve.
+fn configured(config: &Config, network: Network) {
+    let net = config.net(network);
+    let chain = match net.chain {
+        Some(choice) => choice.as_str().to_string(),
+        None => format!("{} (default)", ChainChoice::default_for(network).as_str()),
+    };
+    let redact = crate::provider::error::redact_url;
+    let rows = [
+        ["Chain data".to_string(), chain, String::new()],
+        [
+            "Asset protection".into(),
+            if net.protect_assets { "on" } else { "off" }.into(),
+            String::new(),
+        ],
+        [
+            "Subfrost".into(),
+            if config.subfrost.is_some() {
+                "key saved"
+            } else {
+                "no key"
+            }
+            .into(),
+            net.subfrost_url
+                .as_ref()
+                .map(|u| redact(&u.0))
+                .unwrap_or_default(),
+        ],
+        [
+            "Esplora".into(),
+            if net.esplora.is_some() {
+                "set up"
+            } else {
+                "—"
+            }
+            .into(),
+            net.esplora
+                .as_ref()
+                .map(|e| redact(&e.url.0))
+                .unwrap_or_default(),
+        ],
+    ];
+    table(&rows);
+}
+
+fn table(rows: &[[String; 3]]) {
+    let mut widths = [0usize; 3];
     for row in rows {
         for (w, cell) in widths.iter_mut().zip(row.iter()) {
             *w = (*w).max(cell.chars().count());
         }
     }
-    let line = |cells: &[String]| {
-        cells
+    for row in rows {
+        let line = row
             .iter()
             .zip(&widths)
             .map(|(c, w)| format!("{c:<w$}"))
             .collect::<Vec<_>>()
-            .join("  ")
-            .trim_end()
-            .to_string()
-    };
-    ui::dim(&line(&header.map(String::from)));
-    for row in rows {
-        println!("{}", line(row));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn entry(driver: &str, network: &str) -> ProviderConfig {
-        ProviderConfig {
-            driver: driver.into(),
-            network: network.into(),
-            url: "https://example.com".into(),
-            capabilities: None,
-            api_key: None,
-            auth: None,
-        }
-    }
-
-    #[test]
-    fn login_names_reuse_rotate_or_avoid_collisions() {
-        let mut config = Config::default();
-        assert_eq!(
-            entry_name(&config, "subfrost", "signet", None).unwrap(),
-            "subfrost"
-        );
-
-        // A re-login on the same network rotates the existing entry,
-        // whatever it is called.
-        config
-            .providers
-            .insert("assets".into(), entry("subfrost", "signet"));
-        assert_eq!(
-            entry_name(&config, "subfrost", "signet", None).unwrap(),
-            "assets"
-        );
-
-        // Another network's entry keeps its name; the new one is suffixed.
-        config
-            .providers
-            .insert("subfrost".into(), entry("subfrost", "mainnet"));
-        assert_eq!(
-            entry_name(&config, "subfrost", "testnet4", None).unwrap(),
-            "subfrost-testnet4"
-        );
-
-        // Two candidates on one network: the human picks.
-        config
-            .providers
-            .insert("more".into(), entry("subfrost", "signet"));
-        let err = entry_name(&config, "subfrost", "signet", None).unwrap_err();
-        assert!(err.to_string().contains("--name"));
-    }
-
-    #[test]
-    fn explicit_login_names_never_repurpose_another_entry() {
-        let mut config = Config::default();
-        config
-            .providers
-            .insert("chain".into(), entry("esplora", "signet"));
-        for (driver, network) in [("subfrost", "signet"), ("esplora", "mainnet")] {
-            assert!(entry_name(&config, driver, network, Some("chain")).is_err());
-        }
-        assert_eq!(
-            entry_name(&config, "esplora", "signet", Some("chain")).unwrap(),
-            "chain"
-        );
-        for bad in ["", "a b", "x.y", "cli:subfrost"] {
-            assert!(entry_name(&config, "subfrost", "signet", Some(bad)).is_err());
-        }
-    }
-
-    #[test]
-    fn serves_label_groups_chain_capabilities() {
-        assert_eq!(serves_label(&[]), "—");
-        assert_eq!(
-            serves_label(&[
-                Capability::ChainSync,
-                Capability::ChainFees,
-                Capability::ChainBroadcast,
-                Capability::GuardOrd,
-                Capability::AlkanesView,
-            ]),
-            "chain, guard.ord, alkanes.view"
-        );
-        assert_eq!(
-            serves_label(&[Capability::ChainSync, Capability::GuardAlkanes]),
-            "chain.sync, guard.alkanes"
-        );
+            .join("  ");
+        println!("{}", line.trim_end());
     }
 }

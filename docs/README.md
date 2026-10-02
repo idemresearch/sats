@@ -6,8 +6,8 @@ Learn the wallet on signet first. Mainnet is always an explicit choice.
 
 - [CLI reference](cli.md): commands, flags, configuration, and JSON output.
 - [MCP and agent grants](mcp.md): connect an agent and understand its tools.
-- [Providers and guards](providers.md): chain access and optional asset
-  protection.
+- [Providers and asset protection](providers.md): where chain data comes from,
+  and protecting inscriptions and Alkanes.
 - [Security and trust model](security.md): keys, grants, signing, and failure
   behavior.
 

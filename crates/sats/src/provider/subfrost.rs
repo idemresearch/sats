@@ -1039,10 +1039,10 @@ mod tests {
     fn sync_services(url: String) -> provider::Services {
         provider::resolve(
             &Config::default(),
-            &[provider::CliProvider {
+            Some(&provider::CliProvider {
                 kind: provider::DriverKind::Subfrost,
                 url,
-            }],
+            }),
             Network::Signet,
         )
         .unwrap()

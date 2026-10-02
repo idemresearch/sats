@@ -6,23 +6,15 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
-    #[error("no {cap} provider configured for {network} — see `sats providers`")]
-    NoProvider {
-        cap: &'static str,
+    /// A configured choice that cannot be served: the reason names the fix.
+    #[error("{network} providers: {reason}")]
+    Setup {
         network: &'static str,
+        reason: String,
     },
 
-    #[error(
-        "multiple {cap} providers for {network} ({names}) — restrict one with capabilities = [...] or remove it"
-    )]
-    Ambiguous {
-        cap: &'static str,
-        network: &'static str,
-        names: String,
-    },
-
-    #[error("invalid provider {name:?}: {reason}")]
-    BadConfig { name: String, reason: String },
+    #[error("Alkanes views on {network} need Subfrost — run `sats providers add subfrost`")]
+    NoAlkanesView { network: &'static str },
 
     #[error("provider {name:?} ({url}) serves a different network than {expected}")]
     WrongNetwork {

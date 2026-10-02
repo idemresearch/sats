@@ -325,8 +325,9 @@ fn check_connection(
     };
     // Config-selected network must be pinned just as an explicit override of
     // a conflicting configured network is.
+    // Credentialed, and unresolvable: protection is on with no Subfrost.
     let providers = format!(
-        "[providers.first]\ndriver = \"esplora\"\nnetwork = \"{network}\"\nurl = \"http://127.0.0.1:1/private-provider-secret\"\nauth = {{ bearer = \"private-bearer-secret\" }}\n[providers.second]\ndriver = \"esplora\"\nnetwork = \"{network}\"\nurl = \"http://127.0.0.1:2/private-provider-secret\"\n"
+        "[{network}]\nchain = \"esplora\"\nprotect_assets = true\n\n[{network}.esplora]\nurl = \"http://127.0.0.1:1/private-provider-secret\"\nbearer = \"private-bearer-secret\"\n"
     );
     let configured_network = if directory.is_some() {
         "mainnet"
@@ -395,7 +396,8 @@ fn check_connection(
         assert!(!line.contains("private-bearer-secret"));
     }
     // The future client's defaults and this wallet's config may both change.
-    // Ambiguous providers prove startup, filing and observation stay local.
+    // An unresolvable provider setup proves startup, filing and observation
+    // stay local.
     fs::write(&config, format!("network = \"mainnet\"\n{providers}")).unwrap();
     let grant_path = data
         .join(network)

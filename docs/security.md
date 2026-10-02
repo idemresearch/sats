@@ -300,9 +300,10 @@ Coin selection excludes the union of two layers:
 Guards can only exclude outputs. They can't make anything spendable or
 authorize a spend. A configured guard that can't answer fails closed. Only a
 human CLI invocation can bypass a guard or the dust heuristic, and only for
-that invocation. A `--provider` override also replaces configured guards for
-that one command, on `send` and `agent approve` alike. sats enables no asset guard by default, because configuring
-one is a trust decision. A dishonest guard can deny service by over-protecting
+that invocation. A `--provider` override replaces only the chain source, so
+configured asset protection still applies. sats enables no asset guard by
+default, because turning protection on is a trust decision, and nothing turns
+it off as a side effect. A dishonest guard can deny service by over-protecting
 outputs, and an incomplete one can miss an asset.
 
 Provider data is untrusted. A fee rate that is non-finite, negative, or above
@@ -312,10 +313,11 @@ paths, queries, or response bodies. Credentials still go to the configured
 endpoint. Redaction does not make a provider honest.
 
 Provider credentials live in `config.toml`, which sats writes owner-only.
-`sats providers login` reads a key from a hidden prompt or stdin, never from
-the command line, and checks the endpoint before saving it. It is a human CLI
-command: no MCP tool configures providers, and the MCP server only uses the
-providers already configured.
+`sats providers add` reads a key from a hidden prompt or stdin, never from
+the command line, and checks the endpoint before saving it. A saved Esplora
+token never follows a new URL, and the Subfrost key is never sent to a
+`--provider` override. Configuring providers is a human CLI task: no MCP
+tool configures them, and the MCP server only uses what is configured.
 
 ## PSBTs
 

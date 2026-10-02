@@ -705,7 +705,7 @@ mod tests {
             std::fs::write(
                 dir.path().join("config.toml"),
                 format!(
-                    "network = \"signet\"\n\n[providers.mock]\ndriver = \"mock\"\nnetwork = \"signet\"\nurl = \"file://{}\"\n",
+                    "network = \"signet\"\n\n[signet]\nchain = \"esplora\"\nprotect_assets = true\nsubfrost_url = \"file://{0}\"\n\n[signet.esplora]\nurl = \"file://{0}\"\n",
                     mockdata.display()
                 ),
             )
@@ -748,7 +748,7 @@ mod tests {
 
         fn services(&self) -> Services {
             let config = Config::load(&self.store).unwrap();
-            crate::provider::resolve(&config, &[], Network::Signet).unwrap()
+            crate::provider::resolve(&config, None, Network::Signet).unwrap()
         }
 
         /// Persist a signet grant for `agent` and hand back its token.
@@ -2491,16 +2491,9 @@ mod tests {
             // The fixture accepted these bytes, then lost the response.
             String::from_utf8(bytes).unwrap()
         });
-        let config_path = fx.dir.path().join("config.toml");
-        let original = std::fs::read_to_string(&config_path).unwrap();
-        let mut config: toml::Value = toml::from_str(&original).unwrap();
-        config["providers"]["mock"].as_table_mut().unwrap().insert(
-            "capabilities".into(),
-            toml::Value::try_from(vec!["chain.sync", "chain.fees", "guard.native"]).unwrap(),
-        );
-        config["providers"].as_table_mut().unwrap().insert("broadcast".into(),
-            toml::Value::try_from(serde_json::json!({"network":"signet","driver":"esplora","url":url,"capabilities":["chain.broadcast"]})).unwrap());
-        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+        // Mock sync and fees; broadcast through the real Esplora transport.
+        let broadcast_via = fx.mockdata.join("broadcast-via");
+        std::fs::write(&broadcast_via, &url).unwrap();
         let Outcome::BroadcastPending { txid, .. } = approve(&fx, &id, &probe).unwrap() else {
             panic!("response must be uncertain");
         };
@@ -2509,7 +2502,7 @@ mod tests {
         assert_eq!(saved.tx_hex, received_hex);
         assert_eq!(saved.status, TransactionStatus::Pending);
         let spent = fx.grant_state().spent_sat;
-        std::fs::write(&config_path, original).unwrap();
+        std::fs::remove_file(&broadcast_via).unwrap();
         crate::commands::tx::broadcast(
             &fx.store,
             Network::Signet,

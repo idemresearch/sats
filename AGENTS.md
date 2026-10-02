@@ -20,7 +20,7 @@ Primary references:
 - [Security](docs/security.md): key, grant, signing, and provider invariants.
 - [CLI](docs/cli.md): current user-facing commands and configuration.
 - [MCP](docs/mcp.md): agent tool contracts and denial semantics.
-- [Providers](docs/providers.md): capability resolution and UTXO guards.
+- [Providers](docs/providers.md): chain sources and asset protection.
 - [Development](docs/development.md): local workflow and verification.
 
 ## Product contract
@@ -89,7 +89,7 @@ advice for exactly that file.
 | `crates/sats/src/main.rs` | Composition and command dispatch only |
 | `crates/sats/src/cli.rs` | Clap command and flag definitions |
 | `crates/sats/src/commands/` | Human CLI workflows and rendering |
-| `crates/sats/src/provider/` | Native chain providers, capability resolution, and guards |
+| `crates/sats/src/provider/` | Native chain providers, per-network resolution, and guards |
 | `crates/sats/src/store.rs` | Paths, atomic files, permissions, finalized transactions, grants, requests, and the event log |
 | `crates/sats/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
 | `crates/sats/src/request/` | The native request workflow: create, dismiss, reconcile, and the human-authorized executor |
@@ -229,7 +229,11 @@ and rendering belong to callers.
 - Union every configured guard result with the local dust heuristic.
 - A configured guard fails closed unless a human explicitly uses the
   per-invocation CLI bypass.
-- Do not ship or silently enable a default third-party asset guard.
+- Do not ship or silently enable a default third-party asset guard, and never
+  turn asset protection off as a side effect of another change.
+- Each network has exactly one chain source for sync, fees, and broadcast.
+  A `--provider` override replaces only that source; configured protection
+  still applies, and a saved credential never follows an override URL.
 - Validate that a provider serves the selected Bitcoin network.
 - Treat authentication material as secret in errors and debug output. Keep
   Subfrost path credentials behind its redacted display URL, never print
@@ -283,15 +287,17 @@ Call it from the shared native workflow so CLI and MCP cannot diverge.
 5. Add or extend `crates/sats/tests/mcp.rs`.
 6. Update `docs/mcp.md`.
 
-### New provider or capability
+### New provider
 
-1. Add the audited capability to `provider::Capability` only if necessary.
-2. Implement the driver under `crates/sats/src/provider/`.
+1. Implement the driver under `crates/sats/src/provider/` as an audited
+   enum variant, not a plugin surface.
+2. Add it as a per-network choice in `config.rs` and the `sats providers`
+   commands; do not reintroduce user-facing capability routing.
 3. Keep resolution pure and network I/O inside driver operations.
 4. Give the driver a display-safe URL and keep credentials out of every error
    surface.
-5. Test network mismatch, unavailable service, ambiguous configuration, and
-   the successful path with deterministic mocks.
+5. Test network mismatch, unavailable service, a choice that can't be served,
+   and the successful path with deterministic mocks.
 6. Update `docs/providers.md`.
 
 ### State format change

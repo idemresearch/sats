@@ -1,11 +1,13 @@
 //! Preparation sequencing through the real CLI with disposable wallets.
-//! Local HTTP fixtures count guard and fee requests; the existing mock
-//! sync provider keeps funding deterministic and can fail each fresh sync.
+//! A local Subfrost-shaped guard (ord and Alkanes) and a local Esplora fee
+//! endpoint count their requests; the mock chain source keeps funding
+//! deterministic and can fail each fresh sync.
 
 mod common;
 
 use std::fs;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use common::{ADDRESS, HttpServer, fund_wallet, init_wallet, json_stdout, sats};
 use predicates::prelude::*;
@@ -23,6 +25,10 @@ struct Fixture {
     chain: std::path::PathBuf,
     outpoints: Vec<OutPoint>,
     guard: HttpServer,
+    /// `ord_output` calls: one per queried outpoint while ord answers.
+    ord_calls: Arc<AtomicUsize>,
+    /// Outpoints the Alkanes index reports as carrying balances.
+    alkanes: Arc<Mutex<Vec<OutPoint>>>,
     fees: HttpServer,
 }
 
@@ -33,27 +39,39 @@ impl Fixture {
         let outpoints = fund_wallet(&dir, values);
         let chain = dir.path().join("chain");
         fs::create_dir(&chain).unwrap();
-        let guard = HttpServer::start(move |request| {
+        let ord_calls = Arc::new(AtomicUsize::new(0));
+        let alkanes = Arc::new(Mutex::new(Vec::<OutPoint>::new()));
+        let (ord_count, alkanes_answer) = (Arc::clone(&ord_calls), Arc::clone(&alkanes));
+        let guard = HttpServer::start_with_body(move |request, body| {
             assert!(request.starts_with("POST / "), "{request}");
-            Some(match guard_answer {
-                GuardAnswer::Unavailable => (503, "guard unavailable".into()),
-                GuardAnswer::Clear | GuardAnswer::Protected => (
-                    200,
+            let call: serde_json::Value = serde_json::from_str(body).unwrap();
+            let result = match call["method"].as_str().unwrap() {
+                "ord_output" => {
+                    ord_count.fetch_add(1, Ordering::SeqCst);
+                    if matches!(guard_answer, GuardAnswer::Unavailable) {
+                        return Some((503, "guard unavailable".into()));
+                    }
+                    let protected = matches!(guard_answer, GuardAnswer::Protected);
                     serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": 0,
-                        "result": {
-                            "inscriptions": if matches!(guard_answer, GuardAnswer::Protected) {
-                                vec!["protected-asset"]
-                            } else {
-                                vec![]
-                            },
-                            "runes": []
-                        }
+                        "inscriptions": if protected { vec!["protected-asset"] } else { vec![] },
+                        "runes": []
                     })
-                    .to_string(),
-                ),
-            })
+                }
+                "alkanes_protorunesbyoutpoint" => {
+                    let queried = &call["params"][0];
+                    let carries = alkanes_answer.lock().unwrap().iter().any(|op| {
+                        queried["txid"] == op.txid.to_string() && queried["vout"] == op.vout
+                    });
+                    serde_json::json!({
+                        "balances": if carries { vec![serde_json::json!({"value": "1"})] } else { vec![] }
+                    })
+                }
+                other => panic!("unexpected guard call {other}"),
+            };
+            Some((
+                200,
+                serde_json::json!({"jsonrpc": "2.0", "id": 0, "result": result}).to_string(),
+            ))
         });
         let fees = HttpServer::start(move |request| {
             assert!(request.starts_with("GET /fee-estimates "), "{request}");
@@ -63,22 +81,15 @@ impl Fixture {
                 (503, "fees unavailable".into())
             })
         });
+        // Mock chain data with fee estimates handed to the local Esplora;
+        // asset protection through the local Subfrost-shaped guard.
+        fs::write(chain.join("fees-via"), &fees.url).unwrap();
         fs::write(
             dir.path().join("config.toml"),
             format!(
-                "network = \"signet\"\n\
-                 [providers.chain]\n\
-                 driver = \"mock\"\nnetwork = \"signet\"\n\
-                 url = \"file://{}\"\ncapabilities = [\"chain.sync\", \"chain.broadcast\"]\n\
-                 [providers.guard]\n\
-                 driver = \"subfrost\"\nnetwork = \"signet\"\n\
-                 url = {:?}\ncapabilities = [\"guard.ord\"]\n\
-                 [providers.fees]\n\
-                 driver = \"esplora\"\nnetwork = \"signet\"\n\
-                 url = {:?}\ncapabilities = [\"chain.fees\"]\n",
-                chain.display(),
+                "network = \"signet\"\n\n[signet]\nchain = \"esplora\"\nprotect_assets = true\nsubfrost_url = {:?}\n\n[signet.esplora]\nurl = \"file://{}\"\n",
                 guard.url,
-                fees.url,
+                chain.display(),
             ),
         )
         .unwrap();
@@ -87,13 +98,15 @@ impl Fixture {
             chain,
             outpoints,
             guard,
+            ord_calls,
+            alkanes,
             fees,
         }
     }
 
     fn counts(&self) -> (usize, usize) {
         (
-            self.guard.requests.load(Ordering::SeqCst),
+            self.ord_calls.load(Ordering::SeqCst),
             self.fees.requests.load(Ordering::SeqCst),
         )
     }
@@ -104,30 +117,11 @@ impl Fixture {
         command
     }
 
-    /// A second configured guard lets the union contain distinct and
-    /// overlapping outpoints without changing the shared provider fixture.
-    fn add_native_guard(&self, protected: Option<&[OutPoint]>) {
-        let native = self.dir.path().join("native-guard");
-        fs::create_dir(&native).unwrap();
-        if let Some(protected) = protected {
-            fs::write(
-                native.join("guard.json"),
-                serde_json::json!({
-                    "protected": protected.iter().map(ToString::to_string).collect::<Vec<_>>()
-                })
-                .to_string(),
-            )
-            .unwrap();
-        }
-        let config_path = self.dir.path().join("config.toml");
-        let mut config = fs::read_to_string(&config_path).unwrap();
-        config.push_str(&format!(
-            "\n[providers.native_guard]\n\
-             driver = \"mock\"\nnetwork = \"signet\"\n\
-             url = \"file://{}\"\ncapabilities = [\"guard.native\"]\n",
-            native.display(),
-        ));
-        fs::write(config_path, config).unwrap();
+    /// The Alkanes index is the second guard: its answers union with
+    /// ord's, so the exclusion set can hold distinct and overlapping
+    /// outpoints.
+    fn alkanes_report(&self, protected: &[OutPoint]) {
+        *self.alkanes.lock().unwrap() = protected.to_vec();
     }
 
     fn pending_request(&self) -> &'static str {
@@ -174,9 +168,6 @@ impl Fixture {
 #[test]
 fn empty_synced_wallet_skips_guards_and_fees_and_explains_funding() {
     let fx = Fixture::new(&[], GuardAnswer::Unavailable, false);
-    // A missing native answer errors even for an empty outpoint list if
-    // called, unlike the HTTP guard's per-outpoint loop.
-    fx.add_native_guard(None);
     fx.dry_run()
         .assert()
         .failure()
@@ -185,6 +176,11 @@ fn empty_synced_wallet_skips_guards_and_fees_and_explains_funding() {
         .stderr(predicate::str::contains("asset check").not())
         .stderr(predicate::str::contains("estimate fee").not());
     assert_eq!(fx.counts(), (0, 0));
+    assert_eq!(
+        fx.guard.requests.load(Ordering::SeqCst),
+        0,
+        "no guard call at all"
+    );
 }
 
 #[test]
@@ -204,7 +200,7 @@ fn fully_guarded_wallet_preserves_protected_funds_and_skips_fees() {
 #[test]
 fn dust_and_guard_union_can_exclude_every_candidate_before_fees() {
     let fx = Fixture::new(&[546, 10_000], GuardAnswer::Clear, false);
-    fx.add_native_guard(Some(&fx.outpoints[1..]));
+    fx.alkanes_report(&fx.outpoints[1..]);
     fx.dry_run()
         .assert()
         .failure()
@@ -232,7 +228,7 @@ fn remaining_candidates_receive_all_checks_and_union_exclusions() {
     let fx = Fixture::new(&[546, 10_000, 100_000], GuardAnswer::Clear, true);
     // One dust output is repeated by the guard; the other guarded output
     // has an ordinary value. The only remaining candidate funds the plan.
-    fx.add_native_guard(Some(&fx.outpoints[..2]));
+    fx.alkanes_report(&fx.outpoints[..2]);
     let output = json_stdout(fx.dry_run().assert().success());
     assert_eq!(output["excluded_utxos"], 2);
     assert_eq!(output["amount_sat"], 5_000);
