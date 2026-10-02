@@ -31,7 +31,7 @@ export const metadata: Metadata = {
         url: "/og.png",
         width: 1200,
         height: 630,
-        alt: "sats — Bitcoin for humans and agents",
+        alt: "sats — self-custodial Bitcoin wallet for humans and agents",
       },
     ],
   },

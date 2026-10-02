@@ -1,0 +1,98 @@
+<!doctype html>
+<!-- Source for website/public/og.png. Render with scripts/build-og.sh. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;700&display=block"
+      rel="stylesheet"
+    />
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      html,
+      body {
+        width: 1200px;
+        height: 630px;
+        overflow: hidden;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        padding: 72px 88px;
+        background: #0a0a0a;
+        color: #ededed;
+        font-family: "Geist Mono", monospace;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .wordmark {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        font-size: 34px;
+        font-weight: 700;
+      }
+
+      .mark {
+        display: grid;
+        place-items: center;
+        width: 46px;
+        height: 46px;
+        border-radius: 11px;
+        background: #ededed;
+        color: #0a0a0a;
+        font-size: 30px;
+        line-height: 1;
+      }
+
+      h1 {
+        margin-top: auto;
+        color: #a1a1a1;
+        font-size: 50px;
+        font-weight: 400;
+        line-height: 1.35;
+      }
+
+      .install {
+        margin-top: 40px;
+        font-size: 30px;
+        font-weight: 700;
+      }
+
+      .install span {
+        margin-right: 18px;
+        color: #f7931a;
+      }
+
+      .meta {
+        margin-top: 28px;
+        color: #8a8a8a;
+        font-size: 24px;
+      }
+
+      .meta b {
+        color: #ededed;
+        font-weight: 400;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wordmark"><span class="mark">=</span>sats</div>
+
+    <h1>Self-custodial Bitcoin wallet<br />for humans and agents.</h1>
+
+    <p class="install"><span>$</span>curl -fsSL https://sats.sh/setup.sh | sh</p>
+
+    <p class="meta">
+      signet by default · status: <b>experimental</b> · Apache-2.0
+    </p>
+  </body>
+</html>

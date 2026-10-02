@@ -97,6 +97,14 @@ cargo install wasm-bindgen-cli --version <pinned in Cargo.toml>
 sh scripts/build-playground.sh
 ```
 
+The social preview image, `website/public/og.png`, is rendered from
+`website/og/og.html` with headless Chrome and also committed. After changing
+the template, regenerate it:
+
+```sh
+sh scripts/build-og.sh
+```
+
 ## Writing docs
 
 `docs/cli.md`, `mcp.md`, `providers.md`, `security.md`, `architecture.md`,
