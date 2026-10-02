@@ -104,11 +104,58 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// List chain and asset providers; log in to one with its API key
+    Providers {
+        #[command(subcommand)]
+        command: Option<ProvidersCommand>,
+    },
     /// Alkanes contract tools (experimental, signet-first)
     Alkanes {
         #[command(subcommand)]
         command: AlkanesCommand,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ProvidersCommand {
+    /// Show which provider serves each capability on the active network
+    /// (the default)
+    List,
+    /// Set up a provider for the active network: asks for its API key
+    /// (hidden, or one line on stdin) and checks the endpoint before saving
+    Login(LoginArgs),
+    /// Remove a configured provider and its stored credential
+    Logout {
+        /// Provider name, as `sats providers` lists it
+        name: String,
+    },
+}
+
+#[derive(clap::Args)]
+pub struct LoginArgs {
+    /// Provider to set up
+    #[arg(value_enum, value_name = "PROVIDER")]
+    pub kind: LoginProvider,
+    /// Endpoint URL (default: Subfrost's endpoint for mainnet and signet;
+    /// required for esplora)
+    #[arg(long, value_name = "URL")]
+    pub url: Option<String>,
+    /// Name for the config entry (default: the provider, or the existing
+    /// entry for this provider on the network)
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// Subfrost only: also protect inscription and Alkanes UTXOs
+    /// (guard.ord, guard.alkanes) and serve `sats alkanes` (alkanes.view)
+    #[arg(long)]
+    pub assets: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum LoginProvider {
+    /// Subfrost JSON-RPC: chain data, plus asset guards with --assets
+    Subfrost,
+    /// An Esplora server, optionally behind a bearer token
+    Esplora,
 }
 
 #[derive(Subcommand)]

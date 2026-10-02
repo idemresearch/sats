@@ -22,6 +22,69 @@ broadcast:
 sats never enables an asset guard by default. Configuring one is an explicit
 trust decision.
 
+## Managing providers
+
+`sats providers` lists what serves the active network, and
+`sats providers login` sets a provider up without editing the config file.
+
+```sh
+sats providers                          # list (same as `sats providers list`)
+sats providers login subfrost           # asks for your Subfrost API key
+sats providers login subfrost --assets  # also enable asset guards and Alkanes views
+sats providers logout subfrost          # remove the entry and its key
+```
+
+```text
+signet providers
+
+Name      Driver    Endpoint                    Auth     Serves
+subfrost  subfrost  https://signet.subfrost.io  api key  chain, guard.ord, guard.alkanes, alkanes.view
+```
+
+`Serves` is what each provider is used for right now, after
+[resolution](#resolution-order). `chain` stands for `chain.sync`,
+`chain.fees`, and `chain.broadcast` together. A configured entry that another
+provider shadows shows `—`. The built-in default appears only while it
+serves something. If the configuration can't be resolved, the list shows the
+entries as written and exits with the resolution error.
+
+### Logging in
+
+`sats providers login <subfrost|esplora>` configures the provider for the
+active network (`--network` picks another):
+
+1. It checks that the result still resolves. A login that would make two
+   chain providers ambiguous is refused before you're asked for anything.
+2. It asks for the credential with hidden input. Without a terminal, it reads
+   one line from stdin, so `printf '%s\n' "$KEY" | sats providers login subfrost`
+   works in scripts. The credential is never a command-line argument.
+3. It contacts the endpoint and checks its genesis block, so a wrong key, URL,
+   or network is caught now rather than at the next send.
+4. Only then does it save the entry to `config.toml`.
+
+| Option | Meaning |
+|---|---|
+| `--url URL` | Endpoint. Subfrost defaults to its mainnet and signet endpoints; other networks, and every Esplora login, need one. |
+| `--assets` | Subfrost only: also use it for `guard.ord`, `guard.alkanes`, and `alkanes.view`. |
+| `--name NAME` | Config entry name. Defaults to the provider's name, or `<provider>-<network>` when that name is used by another network. |
+
+On a terminal, a first Subfrost login without `--assets` asks whether to
+enable asset protection, defaulting to no. Asset guards are never enabled
+without that answer or the flag.
+
+Logging in again to the same provider on the same network updates its
+existing entry: enter a new key to rotate it, or press enter to keep the
+stored one, for example when adding `--assets` later. An existing entry keeps
+its capabilities unless `--assets` is given.
+
+For Esplora the credential is an optional bearer token; press enter for
+none. `--json` prints the saved entry's name, network, origin,
+`authenticated`, `updated`, and `serves`, never the credential.
+
+`sats providers logout <NAME>` deletes the `[providers.<NAME>]` entry and
+its credential. Logging in or out rewrites `config.toml`, so comments in a
+hand-edited file are not kept.
+
 ## Drivers and capabilities
 
 | Capability | Used for | `esplora` | `subfrost` |
@@ -52,8 +115,9 @@ receive and change keychains.
 ## Configuration
 
 Providers live under `[providers.<name>]` in the [config file](cli.md#configuration).
-The name is a local label. Every entry declares the one network its endpoint
-serves.
+`sats providers login` writes these entries for you; you can also edit them
+by hand. The name is a local label. Every entry declares the one network its
+endpoint serves.
 
 ```toml
 network = "mainnet"
@@ -107,8 +171,10 @@ url = "https://signet.subfrost.io/v4/jsonrpc"
 api_key = "replace-with-key"      # sent in Subfrost's API-key header
 ```
 
-Keep the config file's permissions restrictive. Diagnostics and debug output
-show only a provider's origin. User-info, paths, queries, fragments, and
+sats writes `config.toml` owner-only (`0600`, in an owner-only directory).
+If you create or edit it yourself, keep its permissions restrictive.
+Diagnostics, debug output, and `sats providers` show only a provider's
+origin. User-info, paths, queries, fragments, and
 response bodies are omitted, including from failures saved on agent requests.
 Credentials are never copied into the MCP setup commands.
 

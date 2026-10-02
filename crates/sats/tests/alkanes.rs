@@ -94,7 +94,7 @@ fn unconfigured_view_is_a_typed_resolution_error() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("no alkanes.view provider"))
-        .stderr(predicate::str::contains("[providers]"));
+        .stderr(predicate::str::contains("see `sats providers`"));
 }
 
 #[test]

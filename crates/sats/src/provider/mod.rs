@@ -188,9 +188,59 @@ pub fn parse_cli_provider(s: &str) -> Result<CliProvider, String> {
     })
 }
 
+/// Where a provider entry came from, most to least specific.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// A `--provider` value on the command line.
+    Override,
+    /// A `[providers.<name>]` config entry.
+    Config,
+    /// The legacy `[esplora]` network-to-URL map.
+    Legacy,
+    /// The built-in Esplora endpoint for the network.
+    Default,
+}
+
+impl Source {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Source::Override => "override",
+            Source::Config => "config",
+            Source::Legacy => "legacy",
+            Source::Default => "default",
+        }
+    }
+
+    /// Explicit entries win every capability they offer; the fallback
+    /// tiers only fill chain capabilities nothing explicit offers.
+    fn is_explicit(self) -> bool {
+        matches!(self, Source::Override | Source::Config)
+    }
+}
+
+/// Which credential, if any, a provider sends. Never the credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthKind {
+    None,
+    ApiKey,
+    Bearer,
+}
+
+impl AuthKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthKind::None => "none",
+            AuthKind::ApiKey => "api_key",
+            AuthKind::Bearer => "bearer",
+        }
+    }
+}
+
 /// A validated provider entry: driver, network binding, capabilities.
 struct ProviderSpec {
     name: String,
+    source: Source,
+    auth: AuthKind,
     driver: Driver,
     caps: BTreeSet<Capability>,
 }
@@ -202,6 +252,24 @@ enum Driver {
     Esplora(EsploraProvider),
     Subfrost(SubfrostClient),
     Mock(MockProvider),
+}
+
+impl Driver {
+    fn kind(&self) -> DriverKind {
+        match self {
+            Driver::Esplora(_) => DriverKind::Esplora,
+            Driver::Subfrost(_) => DriverKind::Subfrost,
+            Driver::Mock(_) => DriverKind::Mock,
+        }
+    }
+
+    fn display_url(&self) -> &str {
+        match self {
+            Driver::Esplora(e) => e.display_url(),
+            Driver::Subfrost(c) => c.display_url(),
+            Driver::Mock(m) => m.display_url(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -244,6 +312,43 @@ pub struct Services {
     guards: Vec<UtxoGuard>,
 }
 
+/// Every candidate provider for one network, and which one fills each
+/// single-provider slot (an index into `specs`). Guards are every
+/// explicit spec's guard capabilities.
+struct Selection {
+    fee_target_blocks: u16,
+    specs: Vec<ProviderSpec>,
+    sync: Option<usize>,
+    fees: Option<usize>,
+    broadcast: Option<usize>,
+    alkanes: Option<usize>,
+}
+
+impl Selection {
+    /// The capabilities a spec actually serves in this resolution.
+    fn serves(&self, index: usize) -> BTreeSet<Capability> {
+        let spec = &self.specs[index];
+        let mut caps: BTreeSet<Capability> = [
+            (self.sync, Capability::ChainSync),
+            (self.fees, Capability::ChainFees),
+            (self.broadcast, Capability::ChainBroadcast),
+            (self.alkanes, Capability::AlkanesView),
+        ]
+        .into_iter()
+        .filter(|(slot, _)| *slot == Some(index))
+        .map(|(_, cap)| cap)
+        .collect();
+        if spec.source.is_explicit() {
+            caps.extend(
+                spec.caps
+                    .iter()
+                    .filter(|c| c.is_guard() && guard_for(&spec.driver, **c).is_some()),
+            );
+        }
+        caps
+    }
+}
+
 /// Resolve the provider set for `network` from CLI overrides and config.
 /// Pure: no network IO. Call when a workflow reaches chain-dependent work.
 pub fn resolve(
@@ -251,6 +356,121 @@ pub fn resolve(
     cli: &[CliProvider],
     network: Network,
 ) -> Result<Services, ProviderError> {
+    let selection = select(config, cli, network)?;
+    let slot = |index: Option<usize>| index.map(|i| &selection.specs[i].driver);
+
+    let guards = selection
+        .specs
+        .iter()
+        .filter(|s| s.source.is_explicit())
+        .flat_map(|s| {
+            s.caps
+                .iter()
+                .filter(|c| c.is_guard())
+                .filter_map(|c| guard_for(&s.driver, *c))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+    Ok(Services {
+        network,
+        fee_target_blocks: selection.fee_target_blocks,
+        sync: slot(selection.sync).map(|d| match d {
+            Driver::Esplora(e) => ChainSource::Esplora(e.clone()),
+            Driver::Subfrost(c) => ChainSource::Subfrost(c.clone()),
+            Driver::Mock(m) => ChainSource::Mock(m.clone()),
+        }),
+        fees: slot(selection.fees).map(|d| match d {
+            Driver::Esplora(e) => FeeSource::Esplora(e.clone()),
+            Driver::Subfrost(c) => FeeSource::Subfrost(c.clone()),
+            Driver::Mock(m) => FeeSource::Mock(m.clone()),
+        }),
+        broadcast: slot(selection.broadcast).map(|d| match d {
+            Driver::Esplora(e) => BroadcastSource::Esplora(e.clone()),
+            Driver::Subfrost(c) => BroadcastSource::Subfrost(c.clone()),
+            Driver::Mock(m) => BroadcastSource::Mock(m.clone()),
+        }),
+        alkanes: slot(selection.alkanes).and_then(|d| match d {
+            Driver::Subfrost(c) => Some(AlkanesSource::Subfrost(c.clone())),
+            Driver::Mock(m) => Some(AlkanesSource::Mock(m.clone())),
+            Driver::Esplora(_) => None,
+        }),
+        guards,
+    })
+}
+
+/// One provider as `sats providers` shows it: display-safe fields only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInfo {
+    pub name: String,
+    pub driver: &'static str,
+    /// Redacted origin, never the configured URL.
+    pub url: String,
+    pub source: Source,
+    pub auth: AuthKind,
+    /// What this provider is used for in the current resolution. Empty
+    /// for an entry another provider shadows.
+    pub serves: Vec<Capability>,
+}
+
+/// Describe what [`resolve`] would use for `network`: every explicit
+/// provider, and a fallback tier only when it fills a capability. Pure,
+/// like `resolve`, and fails exactly when `resolve` fails.
+pub fn describe(
+    config: &Config,
+    cli: &[CliProvider],
+    network: Network,
+) -> Result<Vec<ProviderInfo>, ProviderError> {
+    let selection = select(config, cli, network)?;
+    Ok(selection
+        .specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| (spec, selection.serves(index)))
+        .filter(|(spec, serves)| spec.source.is_explicit() || !serves.is_empty())
+        .map(|(spec, serves)| ProviderInfo {
+            name: spec.name.clone(),
+            driver: driver_name(spec.driver.kind()),
+            url: spec.driver.display_url().to_string(),
+            source: spec.source,
+            auth: spec.auth,
+            serves: serves.into_iter().collect(),
+        })
+        .collect())
+}
+
+/// Confirm that one provider entry answers and serves `network`, before a
+/// human relies on it. This is network I/O, unlike resolution.
+pub fn check_entry(
+    name: &str,
+    entry: &crate::config::ProviderConfig,
+    network: Network,
+) -> Result<(), ProviderError> {
+    let kind = DriverKind::from_str(&entry.driver).ok_or_else(|| ProviderError::BadConfig {
+        name: name.to_string(),
+        reason: format!("unknown driver {:?}", entry.driver),
+    })?;
+    let spec = build_spec(
+        name,
+        Source::Config,
+        kind,
+        &entry.url,
+        entry.capabilities.as_deref(),
+        entry.api_key.as_deref(),
+        entry.auth.as_ref(),
+    )?;
+    match &spec.driver {
+        Driver::Esplora(e) => e.check_network(network),
+        Driver::Subfrost(c) => c.check_network(network),
+        Driver::Mock(m) => m.sync(),
+    }
+}
+
+fn select(
+    config: &Config,
+    cli: &[CliProvider],
+    network: Network,
+) -> Result<Selection, ProviderError> {
     let net_name = network_name(network);
     let fee_target_blocks = config.fee_targets.get(net_name).copied().unwrap_or(2);
     if !(1..=1008).contains(&fee_target_blocks) {
@@ -261,11 +481,11 @@ pub fn resolve(
     }
 
     // CLI overrides replace the whole provider set for the active network.
-    let specs: Vec<ProviderSpec> = if !cli.is_empty() {
+    let mut specs: Vec<ProviderSpec> = if !cli.is_empty() {
         cli.iter()
             .map(|p| {
                 let name = format!("cli:{}", driver_name(p.kind));
-                build_spec(&name, p.kind, &p.url, None, None, None)
+                build_spec(&name, Source::Override, p.kind, &p.url, None, None, None)
             })
             .collect::<Result<_, _>>()?
     } else {
@@ -287,6 +507,7 @@ pub fn resolve(
                 })?;
                 build_spec(
                     name,
+                    Source::Config,
                     kind,
                     &p.url,
                     p.capabilities.as_deref(),
@@ -300,87 +521,61 @@ pub fn resolve(
     // Fallback for chain capabilities only: the legacy [esplora] map, then
     // built-in defaults. Guards never fall back, and CLI overrides replace
     // everything — no fallback behind an explicit --provider.
-    let fallback = if cli.is_empty() {
-        legacy_or_default_esplora(config, net_name)?
-    } else {
-        None
-    };
+    if cli.is_empty()
+        && let Some(fallback) = legacy_or_default_esplora(config, net_name)?
+    {
+        specs.push(fallback);
+    }
 
     // Per capability: explicit providers win; the fallback esplora covers
     // any chain capability no explicit provider offers.
-    let pick =
-        |cap: Capability, prefer: Option<&str>| -> Result<Option<&ProviderSpec>, ProviderError> {
-            let candidates: Vec<&ProviderSpec> =
-                specs.iter().filter(|s| s.caps.contains(&cap)).collect();
-            if candidates.is_empty() {
-                return Ok(fallback.as_ref().filter(|s| s.caps.contains(&cap)));
-            }
-            if let Some(name) = prefer
-                && let Some(spec) = candidates.iter().find(|s| s.name == name)
-            {
-                return Ok(Some(spec));
-            }
-            match candidates.len() {
-                1 => Ok(Some(candidates[0])),
-                _ => Err(ProviderError::Ambiguous {
-                    cap: cap.as_str(),
-                    network: net_name,
-                    names: candidates
-                        .iter()
-                        .map(|s| s.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                }),
-            }
-        };
+    let pick = |cap: Capability, prefer: Option<usize>| -> Result<Option<usize>, ProviderError> {
+        let offers = |s: &ProviderSpec| s.caps.contains(&cap);
+        let candidates: Vec<usize> = (0..specs.len())
+            .filter(|&i| specs[i].source.is_explicit() && offers(&specs[i]))
+            .collect();
+        if candidates.is_empty() {
+            return Ok(
+                (0..specs.len()).find(|&i| !specs[i].source.is_explicit() && offers(&specs[i]))
+            );
+        }
+        if let Some(preferred) = prefer
+            && candidates.contains(&preferred)
+        {
+            return Ok(Some(preferred));
+        }
+        match candidates.len() {
+            1 => Ok(Some(candidates[0])),
+            _ => Err(ProviderError::Ambiguous {
+                cap: cap.as_str(),
+                network: net_name,
+                names: candidates
+                    .iter()
+                    .map(|&i| specs[i].name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            }),
+        }
+    };
 
-    let sync_spec = pick(Capability::ChainSync, None)?;
-    let sync_name = sync_spec.map(|s| s.name.clone());
-    let fees_spec = pick(Capability::ChainFees, sync_name.as_deref())?;
-    let broadcast_spec = pick(Capability::ChainBroadcast, sync_name.as_deref())?;
+    let sync = pick(Capability::ChainSync, None)?;
+    let fees = pick(Capability::ChainFees, sync)?;
+    let broadcast = pick(Capability::ChainBroadcast, sync)?;
     // Never from the fallback tiers: like guards, an alkanes view is an
     // explicit trust decision (the esplora fallback cannot offer it).
-    let alkanes_spec = pick(Capability::AlkanesView, sync_name.as_deref())?;
+    let alkanes = pick(Capability::AlkanesView, sync)?;
 
-    let guards = specs
-        .iter()
-        .flat_map(|s| {
-            s.caps
-                .iter()
-                .filter(|c| c.is_guard())
-                .filter_map(|c| guard_for(&s.driver, *c))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-
-    Ok(Services {
-        network,
+    Ok(Selection {
         fee_target_blocks,
-        sync: sync_spec.map(|s| match &s.driver {
-            Driver::Esplora(e) => ChainSource::Esplora(e.clone()),
-            Driver::Subfrost(c) => ChainSource::Subfrost(c.clone()),
-            Driver::Mock(m) => ChainSource::Mock(m.clone()),
-        }),
-        fees: fees_spec.map(|s| match &s.driver {
-            Driver::Esplora(e) => FeeSource::Esplora(e.clone()),
-            Driver::Subfrost(c) => FeeSource::Subfrost(c.clone()),
-            Driver::Mock(m) => FeeSource::Mock(m.clone()),
-        }),
-        broadcast: broadcast_spec.map(|s| match &s.driver {
-            Driver::Esplora(e) => BroadcastSource::Esplora(e.clone()),
-            Driver::Subfrost(c) => BroadcastSource::Subfrost(c.clone()),
-            Driver::Mock(m) => BroadcastSource::Mock(m.clone()),
-        }),
-        alkanes: alkanes_spec.and_then(|s| match &s.driver {
-            Driver::Subfrost(c) => Some(AlkanesSource::Subfrost(c.clone())),
-            Driver::Mock(m) => Some(AlkanesSource::Mock(m.clone())),
-            Driver::Esplora(_) => None,
-        }),
-        guards,
+        specs,
+        sync,
+        fees,
+        broadcast,
+        alkanes,
     })
 }
 
-fn driver_name(kind: DriverKind) -> &'static str {
+pub fn driver_name(kind: DriverKind) -> &'static str {
     match kind {
         DriverKind::Esplora => "esplora",
         DriverKind::Subfrost => "subfrost",
@@ -390,6 +585,7 @@ fn driver_name(kind: DriverKind) -> &'static str {
 
 fn build_spec(
     name: &str,
+    source: Source,
     kind: DriverKind,
     url: &str,
     cap_filter: Option<&[String]>,
@@ -455,8 +651,17 @@ fn build_spec(
             Driver::Mock(MockProvider::new(url).map_err(bad)?)
         }
     };
+    let auth = if api_key.is_some() {
+        AuthKind::ApiKey
+    } else if auth.and_then(|a| a.bearer.as_ref()).is_some() {
+        AuthKind::Bearer
+    } else {
+        AuthKind::None
+    };
     Ok(ProviderSpec {
         name: name.to_string(),
+        source,
+        auth,
         driver,
         caps,
     })
@@ -478,15 +683,16 @@ fn legacy_or_default_esplora(
     config: &Config,
     net_name: &'static str,
 ) -> Result<Option<ProviderSpec>, ProviderError> {
-    let (name, url) = match config.esplora.get(net_name) {
-        Some(url) => ("esplora(legacy)", url.clone()),
+    let (name, source, url) = match config.esplora.get(net_name) {
+        Some(url) => ("esplora(legacy)", Source::Legacy, url.clone()),
         None => match Config::builtin_esplora_url(net_name) {
-            Some(url) => ("esplora(default)", url),
+            Some(url) => ("esplora(default)", Source::Default, url),
             None => return Ok(None),
         },
     };
     Ok(Some(build_spec(
         name,
+        source,
         DriverKind::Esplora,
         &url,
         None,
@@ -1020,5 +1226,117 @@ mod tests {
         assert!(services.has_guards());
         assert!(services.alkanes.is_some());
         assert!(matches!(services.sync, Some(ChainSource::Esplora(_))));
+    }
+
+    fn serves(info: &ProviderInfo) -> Vec<&'static str> {
+        info.serves.iter().map(|c| c.as_str()).collect()
+    }
+
+    #[test]
+    fn describe_shows_the_default_only_while_it_serves() {
+        let rows = describe(&config_with(BTreeMap::new()), &[], Network::Signet).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "esplora(default)");
+        assert_eq!(rows[0].source, Source::Default);
+        assert_eq!(rows[0].auth, AuthKind::None);
+        assert_eq!(
+            serves(&rows[0]),
+            ["chain.sync", "chain.fees", "chain.broadcast"]
+        );
+
+        // A logged-in Subfrost takes every chain capability: the default
+        // drops out of the list because it no longer serves anything.
+        let mut subfrost = provider("subfrost", "signet", "https://user:pw@a.example/KEY", None);
+        subfrost.api_key = Some("APIKEYSECRET".into());
+        let config = config_with(BTreeMap::from([("subfrost".into(), subfrost)]));
+        let rows = describe(&config, &[], Network::Signet).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "subfrost");
+        assert_eq!(rows[0].source, Source::Config);
+        assert_eq!(rows[0].auth, AuthKind::ApiKey);
+        assert_eq!(rows[0].url, "https://a.example");
+        assert!(!format!("{rows:?}").contains("APIKEYSECRET"));
+        assert!(!format!("{rows:?}").contains("KEY"));
+    }
+
+    #[test]
+    fn describe_reports_guards_split_roles_and_shadowed_entries() {
+        let mut bearer = provider("esplora", "signet", "http://b.example", Some(vec!["chain"]));
+        bearer.auth = Some(AuthConfig {
+            bearer: Some("t".into()),
+        });
+        let config = config_with(BTreeMap::from([
+            ("chain".into(), bearer),
+            (
+                "assets".into(),
+                provider(
+                    "subfrost",
+                    "signet",
+                    "http://a.example",
+                    Some(vec!["chain.fees", "guard", "alkanes.view"]),
+                ),
+            ),
+        ]));
+        let rows = describe(&config, &[], Network::Signet).unwrap();
+        let by_name = |name: &str| rows.iter().find(|r| r.name == name).unwrap();
+        assert_eq!(by_name("chain").auth, AuthKind::Bearer);
+        assert_eq!(
+            serves(by_name("chain")),
+            ["chain.sync", "chain.fees", "chain.broadcast"]
+        );
+        // Fees prefer the sync provider, so the guard entry serves only
+        // its guards and the view.
+        assert_eq!(
+            serves(by_name("assets")),
+            ["guard.ord", "guard.alkanes", "alkanes.view"]
+        );
+        assert_eq!(rows.len(), 2, "no default row once chain is covered");
+
+        let shadowed = config_with(BTreeMap::from([
+            (
+                "main".into(),
+                provider("esplora", "signet", "http://b.example", None),
+            ),
+            (
+                "spare".into(),
+                provider(
+                    "esplora",
+                    "signet",
+                    "http://c.example",
+                    Some(vec!["chain.fees"]),
+                ),
+            ),
+        ]));
+        let rows = describe(&shadowed, &[], Network::Signet).unwrap();
+        let spare = rows.iter().find(|r| r.name == "spare").unwrap();
+        assert!(spare.serves.is_empty(), "explicit entries stay listed");
+    }
+
+    #[test]
+    fn describe_follows_overrides_and_fails_like_resolve() {
+        let cli = vec![parse_cli_provider("esplora=http://o.example").unwrap()];
+        let config = config_with(BTreeMap::from([(
+            "subfrost".into(),
+            provider("subfrost", "signet", "http://a.example", None),
+        )]));
+        let rows = describe(&config, &cli, Network::Signet).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, Source::Override);
+        assert_eq!(rows[0].name, "cli:esplora");
+
+        let ambiguous = config_with(BTreeMap::from([
+            (
+                "a".into(),
+                provider("esplora", "signet", "http://a.example", None),
+            ),
+            (
+                "b".into(),
+                provider("subfrost", "signet", "http://b.example", None),
+            ),
+        ]));
+        assert!(matches!(
+            describe(&ambiguous, &[], Network::Signet),
+            Err(ProviderError::Ambiguous { .. })
+        ));
     }
 }

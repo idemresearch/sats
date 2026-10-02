@@ -67,6 +67,16 @@ mod dialect {
     pub const TX_OUTSPEND: &str = "esplora_tx::outspend";
 }
 
+/// Subfrost's public JSON-RPC endpoint for a network, where it runs one.
+/// Other networks need an explicit URL.
+pub fn default_url(network: Network) -> Option<&'static str> {
+    match network {
+        Network::Bitcoin => Some("https://mainnet.subfrost.io/v4/jsonrpc"),
+        Network::Signet => Some("https://signet.subfrost.io/v4/jsonrpc"),
+        _ => None,
+    }
+}
+
 #[derive(Clone)]
 pub struct SubfrostClient {
     url: String,

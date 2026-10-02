@@ -91,7 +91,7 @@ directory.
 
 | State | Path | Contents |
 |---|---|---|
-| Configuration | `config.toml` | Default network, fee targets, providers |
+| Configuration | `config.toml` (owner-only) | Default network, fee targets, providers and their credentials |
 | Seed | `seed.sealed` | Password-sealed mnemonic, shared by every network |
 | Wallet | `<network>/wallet.sqlite` | Public descriptors and BDK chain state |
 | Transactions | `<network>/transactions/<txid>.json` | Raw signed hex, broadcast status, payment metadata, `origin` |

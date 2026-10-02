@@ -102,6 +102,9 @@ with `--network`, and mainnet is always an explicit choice. Each network has
 its own wallet, derived from the same seed.
 
 sats uses mempool.space for chain data unless you configure another provider.
+`sats providers` shows what serves each network, and
+`sats providers login subfrost` switches to Subfrost after asking for your
+API key.
 It fails closed: it won't spend on stale chain data or while a configured
 asset guard is down, and by default it never spends 546- or 330-sat outputs,
 which may carry inscriptions. Optional asset guards, such as Subfrost for ord

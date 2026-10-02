@@ -134,10 +134,12 @@ impl Config {
         Ok(config)
     }
 
+    /// Owner-only: `sats providers login` stores API keys and bearer
+    /// tokens here.
     pub fn save(&self, store: &Store) -> Result<()> {
         self.validate()?;
         let text = toml::to_string_pretty(self)?;
-        write_atomic(&store.config_path(), text.as_bytes(), false)
+        write_atomic(&store.config_path(), text.as_bytes(), true)
     }
 
     fn validate(&self) -> Result<()> {

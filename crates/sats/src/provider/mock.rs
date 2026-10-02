@@ -37,6 +37,10 @@ impl MockProvider {
         })
     }
 
+    pub fn display_url(&self) -> &str {
+        &self.display
+    }
+
     pub fn sync(&self) -> Result<(), ProviderError> {
         let marker = self.dir.join("sync-error");
         if marker.exists() {

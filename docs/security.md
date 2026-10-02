@@ -311,6 +311,12 @@ not the process. Diagnostics show only a provider's origin, never user-info,
 paths, queries, or response bodies. Credentials still go to the configured
 endpoint. Redaction does not make a provider honest.
 
+Provider credentials live in `config.toml`, which sats writes owner-only.
+`sats providers login` reads a key from a hidden prompt or stdin, never from
+the command line, and checks the endpoint before saving it. It is a human CLI
+command: no MCP tool configures providers, and the MCP server only uses the
+providers already configured.
+
 ## PSBTs
 
 A normal send, human or agent, keeps its PSBT in memory. `--export-psbt` is the

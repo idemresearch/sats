@@ -27,6 +27,9 @@ exact options in your installed version.
 | `sats agent dismiss <ID>` | Decline a request |
 | `sats agent log [--limit N] [--request ID]` | Show the agent event log |
 | `sats agent serve <name>` | Run the MCP server for an agent ([MCP](mcp.md)) |
+| `sats providers [list]` | Show which provider serves each capability |
+| `sats providers login <subfrost\|esplora>` | Set up a provider, asking for its API key |
+| `sats providers logout <NAME>` | Remove a provider and its stored key |
 | `sats alkanes inspect <BLOCK:TX>` | Show a contract's bytecode hash (experimental) |
 | `sats alkanes simulate <BLOCK:TX> <INPUTS...>` | Simulate a contract call (experimental) |
 
@@ -297,7 +300,8 @@ don't include Alkanes execution.
 
 `--json` is supported by `balance`, `receive`, `send` (all modes), `status`,
 `history`, `psbt inspect`, `psbt sign`, `tx broadcast`, every `agent`
-subcommand except `serve`, and both `alkanes` subcommands.
+subcommand except `serve`, every `providers` subcommand, and both `alkanes`
+subcommands.
 
 Field names are a compatibility surface. Branch on the documented `status`
 and `reason` fields, not on messages. `agent grant --json` includes `token`,
@@ -320,8 +324,9 @@ network = "signet"        # default network
 signet = 1008
 ```
 
-Providers are configured under `[providers.<name>]`. See
-[Providers and guards](providers.md).
+Providers are configured under `[providers.<name>]`, by hand or with
+`sats providers login`. See [Providers and guards](providers.md#managing-providers).
+sats writes `config.toml` owner-only, because it can hold provider API keys.
 
 ## Exit behavior
 

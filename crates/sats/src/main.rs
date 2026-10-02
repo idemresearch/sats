@@ -107,6 +107,17 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 mcp::run(&store, network, &name, overrides.clone())
             }
         },
+        Command::Providers { command } => match command {
+            None | Some(cli::ProvidersCommand::List) => {
+                commands::providers::list(&config, &overrides, network, json)
+            }
+            Some(cli::ProvidersCommand::Login(args)) => {
+                commands::providers::login(&store, config, network, &args, json)
+            }
+            Some(cli::ProvidersCommand::Logout { name }) => {
+                commands::providers::logout(&store, config, &name, json)
+            }
+        },
         Command::Alkanes { command } => match command {
             cli::AlkanesCommand::Inspect { id } => {
                 commands::alkanes::inspect(&services(&config)?, &id, json)
