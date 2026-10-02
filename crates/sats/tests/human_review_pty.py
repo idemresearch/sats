@@ -196,10 +196,11 @@ assert cli_json("receive")["address"].startswith("tb1p")
 mcp = MCP(grant())
 try:
     # Empty, refresh, bounded wait, and cancellation remain provider-free even
-    # when provider capabilities are ambiguous. Explicit ID required for pipes.
+    # when the provider setup can't be resolved (chain data set to Esplora
+    # with no URL). Explicit ID required for pipes.
     config = ROOT / "config.toml"
     original_config = config.read_text()
-    config.write_text(original_config + '\n[providers.second]\ndriver="esplora"\nnetwork="signet"\nurl="http://127.0.0.1:1"\n')
+    config.write_text('network = "signet"\n[signet]\nchain = "esplora"\n')
     nonterminal = cli("agent", "approve", "--yes", ok=False)
     assert b"explicit request id" in nonterminal.stderr
     empty = Terminal()

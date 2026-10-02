@@ -1,6 +1,7 @@
 //! File-backed mock driver: a deterministic, network-free provider for the
-//! integration tests. Deliberately undocumented; `driver = "mock"` with
-//! `url = "file:///abs/dir"` where the directory controls behavior:
+//! integration tests. Deliberately undocumented: any `file:///abs/dir`
+//! endpoint (an Esplora `url`, a `subfrost_url`) selects it, and the
+//! directory controls behavior:
 //!
 //! - `sync-error`      present → sync fails with the file's contents
 //! - `fees.json`       `{"2": 3.0}` conf-target → sat/vB map (default: flat 2)
@@ -11,6 +12,9 @@
 //!   key is a typed view error
 //! - `alkanes-simulate.json`  returned verbatim for any simulate call;
 //!   missing file is a typed view error
+//! - `fees-via`, `broadcast-via`  an Esplora URL that serves that one role
+//!   instead, so tests reach the real HTTP transport behind a
+//!   deterministic sync
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -35,6 +39,18 @@ impl MockProvider {
             dir: PathBuf::from(path),
             display: format!("mock:{path}"),
         })
+    }
+
+    pub fn display_url(&self) -> &str {
+        &self.display
+    }
+
+    /// The Esplora URL in a `fees-via` or `broadcast-via` file, if any.
+    pub fn delegate(&self, role: &str) -> Option<String> {
+        std::fs::read_to_string(self.dir.join(role))
+            .ok()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
     }
 
     pub fn sync(&self) -> Result<(), ProviderError> {

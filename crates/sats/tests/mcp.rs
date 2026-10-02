@@ -895,7 +895,7 @@ fn provider_resolution_is_deferred_until_an_mcp_chain_read() {
     let dir = TempDir::new().unwrap();
     run_sats(&dir, &["init"]);
     let token = grant_token(&dir, "claude", &["--budget", "50000", "--max-tx", "10000"]);
-    let servers = common::write_ambiguous_providers(&dir);
+    let servers = common::write_unresolvable_providers(&dir);
 
     // Deferring providers must not defer authentication.
     let refused = Command::new(sats_bin())
@@ -948,9 +948,7 @@ fn provider_resolution_is_deferred_until_an_mcp_chain_read() {
         "{balance}"
     );
     assert!(
-        balance
-            .to_string()
-            .contains("multiple chain.sync providers"),
+        balance.to_string().contains(common::UNRESOLVABLE),
         "{balance}"
     );
     assert!(
@@ -977,7 +975,7 @@ fn provider_resolution_deferral_preserves_mcp_config_errors() {
     for config in [
         "network = [",
         "network = 7",
-        "network = \"signet\"\n[fee_targets]\nsignet = 0",
+        "network = \"signet\"\n[signet]\nfee_target = 0",
     ] {
         std::fs::write(dir.path().join("config.toml"), config).unwrap();
         let output = Command::new(sats_bin())
@@ -990,10 +988,7 @@ fn provider_resolution_deferral_preserves_mcp_config_errors() {
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("invalid config"), "{stderr}");
-        assert!(
-            !stderr.contains("multiple chain.sync providers"),
-            "{stderr}"
-        );
+        assert!(!stderr.contains(common::UNRESOLVABLE), "{stderr}");
     }
 }
 
@@ -1002,26 +997,28 @@ fn provider_resolution_deferral_preserves_mcp_config_errors() {
 // broadcast timeout after signing is broadcast_pending with the budget
 // reserved. Credentials never reach the human's error text.
 
-fn with_http_provider(dir: &TempDir, driver: &str, url: &str, capability: &str) {
+/// Route one chain role through a real HTTP transport. `sync` makes the
+/// endpoint the whole chain source; `fees` and `broadcast` keep the mock
+/// sync and hand only that role to an Esplora endpoint (the mock's test
+/// seam).
+fn with_http_provider(dir: &TempDir, driver: &str, url: &str, role: &str) {
+    if role != "sync" {
+        assert_eq!(driver, "esplora");
+        std::fs::write(dir.path().join("mockdata").join(format!("{role}-via")), url).unwrap();
+        return;
+    }
     let path = dir.path().join("config.toml");
     let mut config: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    let all = [
-        "chain.sync",
-        "chain.fees",
-        "chain.broadcast",
-        "guard.native",
-    ];
-    let remaining: Vec<_> = all
-        .iter()
-        .filter(|&&c| c != capability)
-        .map(|s| toml::Value::String((*s).into()))
-        .collect();
-    config["providers"]["mock"]
-        .as_table_mut()
-        .unwrap()
-        .insert("capabilities".into(), toml::Value::Array(remaining));
-    config["providers"].as_table_mut().unwrap().insert("http".into(),
-        toml::Value::try_from(serde_json::json!({"network":"signet","driver":driver,"url":url,"capabilities":[capability]})).unwrap());
+    let signet = config["signet"].as_table_mut().unwrap();
+    signet.insert("chain".into(), driver.into());
+    if driver == "esplora" {
+        signet.insert(
+            "esplora".into(),
+            toml::Value::try_from(serde_json::json!({ "url": url })).unwrap(),
+        );
+    } else {
+        signet.insert("subfrost_url".into(), url.into());
+    }
     std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
 }
 
@@ -1037,7 +1034,7 @@ fn assert_sync_timeout(driver: &str) {
 
     let http = common::HttpServer::start(|_| None);
     let url = format!("{}/PRIVATE_PATH_KEY", http.url);
-    with_http_provider(&dir, driver, &url, "chain.sync");
+    with_http_provider(&dir, driver, &url, "sync");
     let started = std::time::Instant::now();
     let output = sats_output(&dir, &["agent", "approve", &id, "--yes"]);
     assert!(!output.status.success());
@@ -1076,7 +1073,7 @@ fn esplora_retryable_get_is_limited_to_two_retries() {
         assert!(request.starts_with("GET /fee-estimates "));
         Some((503, "unavailable".into()))
     });
-    with_http_provider(&dir, "esplora", &http.url, "chain.fees");
+    with_http_provider(&dir, "esplora", &http.url, "fees");
     let output = sats_output(&dir, &["agent", "approve", &id, "--yes"]);
     assert!(!output.status.success());
     assert_eq!(http.requests.load(std::sync::atomic::Ordering::SeqCst), 3);
@@ -1098,7 +1095,7 @@ fn broadcast_timeout_keeps_signed_transaction_and_reserved_budget() {
         assert!(request.starts_with("POST /tx "));
         None
     });
-    with_http_provider(&dir, "esplora", &http.url, "chain.broadcast");
+    with_http_provider(&dir, "esplora", &http.url, "broadcast");
     let approved = approve(&dir, &id);
     assert_eq!(approved["status"], "broadcast_pending", "got: {approved}");
     let txid = approved["txid"].as_str().unwrap();
@@ -1137,19 +1134,21 @@ fn preparation_receipts_redact_provider_secrets_and_observation_stays_local() {
             &dir,
             driver,
             &format!("{}/PATHSECRET?unknown=QUERYSECRET", http.url),
-            "chain.sync",
+            "sync",
         );
         let config_path = dir.path().join("config.toml");
         let mut config: toml::Value =
             toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-        let provider = config["providers"]["http"].as_table_mut().unwrap();
         if driver == "esplora" {
-            provider.insert(
-                "auth".into(),
-                toml::Value::try_from(serde_json::json!({"bearer":"BEARERSECRET"})).unwrap(),
-            );
+            config["signet"]["esplora"]
+                .as_table_mut()
+                .unwrap()
+                .insert("bearer".into(), "BEARERSECRET".into());
         } else {
-            provider.insert("api_key".into(), "BEARERSECRET".into());
+            config.as_table_mut().unwrap().insert(
+                "subfrost".into(),
+                toml::Value::try_from(serde_json::json!({"api_key":"BEARERSECRET"})).unwrap(),
+            );
         }
         std::fs::write(config_path, toml::to_string(&config).unwrap()).unwrap();
         let output = sats_output(&dir, &["agent", "approve", &id, "--yes"]);

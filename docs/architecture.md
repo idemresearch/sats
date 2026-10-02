@@ -91,7 +91,7 @@ directory.
 
 | State | Path | Contents |
 |---|---|---|
-| Configuration | `config.toml` | Default network, fee targets, providers |
+| Configuration | `config.toml` (owner-only) | Default network, fee targets, providers and their credentials |
 | Seed | `seed.sealed` | Password-sealed mnemonic, shared by every network |
 | Wallet | `<network>/wallet.sqlite` | Public descriptors and BDK chain state |
 | Transactions | `<network>/transactions/<txid>.json` | Raw signed hex, broadcast status, payment metadata, `origin` |
@@ -172,11 +172,11 @@ reconciled, is specified in [Security](security.md#approving-a-request).
 
 ## Providers
 
-A provider is bound to one network and advertises audited capabilities:
-`chain.sync`, `chain.fees`, `chain.broadcast`, `guard.ord`, `guard.alkanes`,
-`guard.native` (tests), and `alkanes.view`. Resolution is pure configuration
-work with no network I/O. Operations check the network when they run. See
-[Providers](providers.md).
+Each network has exactly one chain source (mempool.space, Subfrost, or an
+Esplora server) for sync, fees, and broadcast, and an asset-protection switch
+served by Subfrost's ord and Alkanes indexes. Drivers are audited enums.
+Resolution is pure configuration work with no network I/O. Operations check
+the network when they run. See [Providers](providers.md).
 
 ## Change map
 
@@ -188,7 +188,7 @@ work with no network I/O. Operations check the network when they run. See
 | Request creation, execution, reconciliation | `request` | Executor tests with the signer probe; `tests/mcp.rs` |
 | CLI command or flag | `cli`, `commands`, `main` | CLI integration test; `docs/cli.md` |
 | MCP tool or schema | `mcp::server` | MCP integration test; `docs/mcp.md` |
-| Provider driver or capability | `provider`, `config` | Mocked driver; network mismatch, ambiguity, failure tests |
+| Provider driver or choice | `provider`, `config` | Mocked driver; network mismatch, unservable choice, failure tests |
 | Persisted state | `store`, `walletd`, core model | Read and atomic-write tests |
 | Keys or signing | `seed`, `seal`, `signer`, `keys` | Security unit tests and end-to-end signing |
 

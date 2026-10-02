@@ -27,6 +27,11 @@ exact options in your installed version.
 | `sats agent dismiss <ID>` | Decline a request |
 | `sats agent log [--limit N] [--request ID]` | Show the agent event log |
 | `sats agent serve <name>` | Run the MCP server for an agent ([MCP](mcp.md)) |
+| `sats providers [list]` | Show where chain data, asset protection, and Alkanes views come from |
+| `sats providers add <subfrost\|esplora>` | Add a provider, asking for its key, and use it for chain data |
+| `sats providers use <mempool\|subfrost\|esplora>` | Switch where chain data comes from |
+| `sats providers protect <on\|off>` | Turn asset protection on or off |
+| `sats providers remove <subfrost\|esplora>` | Remove a provider and its stored key |
 | `sats alkanes inspect <BLOCK:TX>` | Show a contract's bytecode hash (experimental) |
 | `sats alkanes simulate <BLOCK:TX> <INPUTS...>` | Simulate a contract call (experimental) |
 
@@ -35,7 +40,7 @@ exact options in your installed version.
 | Option | Meaning |
 |---|---|
 | `--network <NET>` | `mainnet`, `signet`, `testnet4`, or `regtest`. Overrides the config. |
-| `--provider <KIND=URL>` | Replace configured providers for this run. Repeatable. See [Providers](providers.md#one-off-overrides). |
+| `--provider <KIND=URL>` | Replace the chain source for this run; asset protection stays. See [Providers](providers.md#one-off-overrides). |
 | `--json` | Machine-readable output, where supported |
 
 | Variable | Meaning |
@@ -278,8 +283,8 @@ spending budget again.
 ## Alkanes
 
 `sats alkanes` is an experimental, signet-first client for Alkanes contracts.
-It needs an explicitly configured provider with the `alkanes.view`
-capability, currently Subfrost, and there is no fallback.
+It needs Subfrost set up for the network (`sats providers add subfrost`), and
+there is no fallback.
 
 ```sh
 sats alkanes inspect 2:1          # bytecode size and sha256 code hash
@@ -297,7 +302,8 @@ don't include Alkanes execution.
 
 `--json` is supported by `balance`, `receive`, `send` (all modes), `status`,
 `history`, `psbt inspect`, `psbt sign`, `tx broadcast`, every `agent`
-subcommand except `serve`, and both `alkanes` subcommands.
+subcommand except `serve`, every `providers` subcommand, and both `alkanes`
+subcommands.
 
 Field names are a compatibility surface. Branch on the documented `status`
 and `reason` fields, not on messages. `agent grant --json` includes `token`,
@@ -316,12 +322,14 @@ no JSON mode, so the mnemonic never lands on a machine-readable stream.
 ```toml
 network = "signet"        # default network
 
-[fee_targets]             # confirmation target in blocks, per network (1–1008, default 2)
-signet = 1008
+[signet]
+fee_target = 1008         # confirmation target in blocks (1–1008, default 2)
 ```
 
-Providers are configured under `[providers.<name>]`. See
-[Providers and guards](providers.md).
+Each network's chain source and asset protection live under `[<network>]`
+too, written by `sats providers` or by hand. See
+[Providers and asset protection](providers.md#configuration). sats writes
+`config.toml` owner-only, because it can hold provider API keys.
 
 ## Exit behavior
 
@@ -329,11 +337,11 @@ Failures print to stderr and exit non-zero. `balance`, `status`, and
 `history` are the deliberate exceptions: when sync fails they show cached
 data with a warning and mark the JSON result as not synced. Planning, signing,
 provider validation, and broadcast failures are always hard failures. So is
-an invalid or ambiguous provider configuration for any command that needs
-the network.
+a provider choice the network can't serve, for any command that needs the
+network.
 
 Local commands and `--offline` reads never resolve providers, so they keep
-working when provider configuration is ambiguous. Malformed configuration
+working while a provider choice can't be served. Malformed configuration
 always fails at startup. Approval checks the request and its grant before
 resolving providers, so a settled or revoked request is refused even without
 a working provider.

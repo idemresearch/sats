@@ -24,7 +24,7 @@ const PUBLIC_DOCS_INDEX = [
   "",
   "## Configure and trust",
   "",
-  "- [Providers and guards](providers.md): chain access and optional asset protection.",
+  "- [Providers and asset protection](providers.md): where chain data comes from, and protecting inscriptions and Alkanes.",
   "- [Security and trust model](security.md): keys, signing, grants, and failure behavior.",
   "",
   "## Under the hood",

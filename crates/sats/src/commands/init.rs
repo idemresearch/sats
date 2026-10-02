@@ -17,7 +17,7 @@ pub fn run(
     network: Network,
     words: Option<u8>,
     restore: bool,
-    overrides: &[CliProvider],
+    overrides: Option<&CliProvider>,
 ) -> Result<()> {
     let net_name = network_name(network);
 
@@ -113,7 +113,7 @@ fn restore_wallet(
     store: &Store,
     mut config: Config,
     network: Network,
-    overrides: &[CliProvider],
+    overrides: Option<&CliProvider>,
 ) -> Result<()> {
     let net_name = network_name(network);
     ui::dim(&format!(
@@ -210,7 +210,7 @@ fn first_sync(
     store: &Store,
     config: &Config,
     network: Network,
-    overrides: &[CliProvider],
+    overrides: Option<&CliProvider>,
 ) -> Result<()> {
     let net_name = network_name(network);
     let manual =

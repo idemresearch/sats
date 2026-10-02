@@ -45,15 +45,17 @@ fn cli_preparation_errors_omit_endpoint_and_echoed_credentials() {
                 )
             })
         });
-        let auth = if driver == "esplora" {
-            "auth = { bearer = 'BEARERSECRET' }"
+        let url = format!("{}/arbitrary/PATHSECRET?unfamiliar=QUERYSECRET", server.url);
+        let config = if driver == "esplora" {
+            format!(
+                "network = 'signet'\n[signet]\nchain = 'esplora'\n[signet.esplora]\nurl = '{url}'\nbearer = 'BEARERSECRET'\n"
+            )
         } else {
-            "api_key = 'BEARERSECRET'"
+            format!(
+                "network = 'signet'\n[subfrost]\napi_key = 'BEARERSECRET'\n[signet]\nchain = 'subfrost'\nsubfrost_url = '{url}'\n"
+            )
         };
-        std::fs::write(dir.path().join("config.toml"), format!(
-            "network = 'signet'\n[providers.fixture]\ndriver = '{driver}'\nnetwork = 'signet'\nurl = '{}/arbitrary/PATHSECRET?unfamiliar=QUERYSECRET'\n{auth}\n",
-            server.url
-        )).unwrap();
+        std::fs::write(dir.path().join("config.toml"), config).unwrap();
         for json in [false, true] {
             let mut command = sats(&dir);
             if json {
@@ -79,7 +81,7 @@ fn cli_preparation_errors_omit_endpoint_and_echoed_credentials() {
 fn malformed_credential_configuration_does_not_echo_the_source() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join("config.toml"),
-        "network = 'signet'\n[providers.fixture]\ndriver = 'esplora'\nnetwork = 'signet'\nurl = 'https://USERSECRET:PASSSECRET@host/PATHSECRET?unknown=QUERYSECRET\n"
+        "network = 'signet'\n[signet.esplora]\nurl = 'https://USERSECRET:PASSSECRET@host/PATHSECRET?unknown=QUERYSECRET\n"
     ).unwrap();
     let result = sats(&dir).arg("balance").assert().failure();
     let rendered = String::from_utf8_lossy(&result.get_output().stderr);

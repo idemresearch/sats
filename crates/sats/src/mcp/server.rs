@@ -234,9 +234,9 @@ pub struct SatsMcp {
     dir: Option<PathBuf>,
     network: Network,
     agent: String,
-    /// CLI --provider overrides the server was launched with; chain-reading
-    /// tools resolve them when called. Local tools never resolve providers.
-    providers: Vec<provider::CliProvider>,
+    /// The CLI --provider override the server was launched with; chain-reading
+    /// tools resolve it when called. Local tools never resolve providers.
+    providers: Option<provider::CliProvider>,
     /// The grant's bearer token. It names a policy; it opens nothing and
     /// cannot recover the seed.
     token: Zeroizing<String>,
@@ -379,7 +379,7 @@ impl SatsMcp {
         dir: Option<PathBuf>,
         network: Network,
         agent: String,
-        providers: Vec<provider::CliProvider>,
+        providers: Option<provider::CliProvider>,
         token: Zeroizing<String>,
     ) -> Self {
         SatsMcp {
@@ -396,7 +396,7 @@ impl SatsMcp {
     async fn blocking<T, F>(&self, f: F) -> Result<T, ErrorData>
     where
         T: Send + 'static,
-        F: FnOnce(Option<PathBuf>, Network, String, Vec<provider::CliProvider>) -> Result<T>
+        F: FnOnce(Option<PathBuf>, Network, String, Option<provider::CliProvider>) -> Result<T>
             + Send
             + 'static,
     {
@@ -417,7 +417,7 @@ impl SatsMcp {
     async fn authorized<T, F>(&self, f: F) -> Result<T, ToolError>
     where
         T: Send + 'static,
-        F: FnOnce(&Store, Network, Vec<provider::CliProvider>) -> Result<T> + Send + 'static,
+        F: FnOnce(&Store, Network, Option<provider::CliProvider>) -> Result<T> + Send + 'static,
     {
         let token = self.token.clone();
         self.blocking(move |dir, network, agent, providers| {
@@ -443,7 +443,7 @@ impl SatsMcp {
     async fn get_balance(&self) -> Result<Json<BalanceResult>, ToolError> {
         self.authorized(|store, network, providers| {
             let config = Config::load(store)?;
-            let services = provider::resolve(&config, &providers, network)?;
+            let services = provider::resolve(&config, providers.as_ref(), network)?;
             let mut ctx = walletd::open(store, network)?;
             let synced = services.sync_wallet(&mut ctx).is_ok();
             let balance = ctx.wallet.balance();

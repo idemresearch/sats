@@ -14,12 +14,12 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NET")]
     pub network: Option<String>,
 
-    /// Provider override for the active network, repeatable:
-    /// --provider esplora=URL or --provider subfrost=URL.
-    /// Replaces every configured provider for this invocation.
+    /// Chain data override for this run: --provider esplora=URL or
+    /// --provider subfrost=URL. Replaces only the chain source; asset
+    /// protection stays as configured
     #[arg(long, global = true, value_name = "KIND=URL",
           value_parser = crate::provider::parse_cli_provider)]
-    pub provider: Vec<crate::provider::CliProvider>,
+    pub provider: Option<crate::provider::CliProvider>,
 
     /// Machine-readable JSON output
     #[arg(long, global = true)]
@@ -104,11 +104,82 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Show and choose where chain data and asset protection come from
+    Providers {
+        #[command(subcommand)]
+        command: Option<ProvidersCommand>,
+    },
     /// Alkanes contract tools (experimental, signet-first)
     Alkanes {
         #[command(subcommand)]
         command: AlkanesCommand,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ProvidersCommand {
+    /// Show where the active network's chain data, asset protection, and
+    /// Alkanes views come from (the default)
+    List,
+    /// Add a provider and use it for the active network's chain data:
+    /// asks for its key (hidden, or one line on stdin) and checks the
+    /// endpoint before saving
+    Add(AddArgs),
+    /// Choose where the active network's chain data comes from
+    Use {
+        #[arg(value_enum, value_name = "SOURCE")]
+        source: ChainArg,
+    },
+    /// Turn asset protection on or off for the active network: before
+    /// every send, Subfrost is asked which outputs carry inscriptions,
+    /// runes, or Alkanes
+    Protect {
+        #[arg(value_enum, value_name = "on|off")]
+        state: Toggle,
+    },
+    /// Remove a provider and its stored credential
+    Remove {
+        #[arg(value_enum, value_name = "PROVIDER")]
+        kind: ProviderArg,
+    },
+}
+
+#[derive(clap::Args)]
+pub struct AddArgs {
+    /// Provider to add
+    #[arg(value_enum, value_name = "PROVIDER")]
+    pub kind: ProviderArg,
+    /// Endpoint URL (default: Subfrost's endpoint for mainnet and signet;
+    /// required for esplora)
+    #[arg(long, value_name = "URL")]
+    pub url: Option<String>,
+    /// Subfrost only: also turn on asset protection
+    #[arg(long)]
+    pub protect: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ProviderArg {
+    /// Subfrost: chain data, asset protection, and Alkanes views (API key)
+    Subfrost,
+    /// Your own Esplora server (URL, optional bearer token)
+    Esplora,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ChainArg {
+    /// The public mempool.space API (the default)
+    Mempool,
+    /// Subfrost, with the saved key
+    Subfrost,
+    /// The Esplora server added for this network
+    Esplora,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Toggle {
+    On,
+    Off,
 }
 
 #[derive(Subcommand)]
@@ -314,4 +385,46 @@ pub enum AgentCommand {
         /// Agent name the server acts as (must hold an active grant)
         name: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn command_definitions_are_consistent() {
+        super::Cli::command().debug_assert();
+    }
+
+    /// A subcommand field named like a global flag (`provider`) only fails
+    /// when clap downcasts the parsed value, so parse each one.
+    #[test]
+    fn provider_subcommands_parse_beside_the_global_override() {
+        for args in [
+            &["sats", "providers"][..],
+            &["sats", "providers", "list"],
+            &[
+                "sats",
+                "providers",
+                "add",
+                "subfrost",
+                "--url",
+                "http://x",
+                "--protect",
+            ],
+            &["sats", "providers", "use", "mempool"],
+            &["sats", "providers", "protect", "on"],
+            &["sats", "providers", "remove", "esplora"],
+            &[
+                "sats",
+                "--provider",
+                "esplora=http://x",
+                "providers",
+                "remove",
+                "subfrost",
+            ],
+        ] {
+            assert!(super::Cli::try_parse_from(args).is_ok(), "{args:?}");
+        }
+    }
 }
