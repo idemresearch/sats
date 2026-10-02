@@ -3,7 +3,7 @@
 Notable changes to sats, newest first. Versions follow
 `workspace.package.version` in `Cargo.toml`.
 
-## 0.0.1 (unreleased)
+## 0.0.1 (2026-10-01)
 
 The first release. Experimental; signet by default.
 
