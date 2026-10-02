@@ -27,6 +27,12 @@ trust decision.
 `sats providers` lists what serves the active network, and
 `sats providers login` sets a provider up without editing the config file.
 
+| Provider | Connect with | Command |
+|---|---|---|
+| mempool.space (Esplora) | Nothing: the default | — |
+| Subfrost | API key | `sats providers login subfrost` |
+| Your own Esplora server | URL, optional bearer token | `sats providers login esplora --url URL` |
+
 ```sh
 sats providers                          # list (same as `sats providers list`)
 sats providers login subfrost           # asks for your Subfrost API key
