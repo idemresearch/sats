@@ -1006,7 +1006,12 @@ export default function Playground() {
     let media: MediaQueryList | null = null;
     const disposables: Array<{ dispose(): void }> = [];
 
-    void Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")])
+    // Wait for the web font so xterm measures the real glyph width.
+    void Promise.all([
+      import("@xterm/xterm"),
+      import("@xterm/addon-fit"),
+      document.fonts.ready,
+    ])
       .then(([{ Terminal }, { FitAddon }]) => {
         if (cancelled) return;
 
@@ -1125,11 +1130,13 @@ export default function Playground() {
     <div>
       <div className="term">
         <div className="term-bar">
-          <div className="term-title">
-            <span className="term-title-mark" aria-hidden="true">$</span>
-            <span>sats</span>
-          </div>
-          <span className="term-status">signet · live wasm</span>
+          <span className="term-dots" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </span>
+          <span className="term-title">sats</span>
+          <span className="term-status">signet · wasm</span>
         </div>
 
         <div className="term-screen">

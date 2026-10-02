@@ -27,7 +27,7 @@ come after the workflow runs.
 ## Publish
 
 1. Update `workspace.package.version` in `Cargo.toml` and refresh
-   `Cargo.lock` if needed.
+   `Cargo.lock` if needed. Date the version's entry in `CHANGELOG.md`.
 2. Merge the change to `main` once CI passes.
 3. Tag and push:
 
