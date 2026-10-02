@@ -72,7 +72,7 @@ export default function RootLayout({
               <Link href="/docs/cli">cli</Link>
               <Link href="/docs/mcp">agents</Link>
               <Link href="/docs">docs</Link>
-              <a href="https://github.com/jonatns/sats">source ↗</a>
+              <a href="https://github.com/idemresearch/sats">source ↗</a>
             </nav>
           </header>
 
@@ -81,12 +81,17 @@ export default function RootLayout({
           <footer>
             <div>
               <span className="footer-mark" aria-hidden="true">=</span>
-              sats · MIT
+              <span>
+                sats · Apache-2.0 · by{" "}
+                <a className="footer-credit" href="https://github.com/idemresearch">
+                  Idem Research
+                </a>
+              </span>
             </div>
             <div className="footer-links">
               <Link href="/docs/security">security</Link>
               <Link href="/docs/architecture">architecture</Link>
-              <a href="https://github.com/jonatns/sats">github</a>
+              <a href="https://github.com/idemresearch/sats">github</a>
             </div>
           </footer>
         </div>

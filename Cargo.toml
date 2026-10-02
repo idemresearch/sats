@@ -15,8 +15,8 @@ minreq = { path = "vendor/minreq" }
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-license = "MIT"
-repository = "https://github.com/jonatns/sats"
+license = "Apache-2.0"
+repository = "https://github.com/idemresearch/sats"
 # 1.89 for std file locks (fs::File::lock), used by the grant lock.
 rust-version = "1.89"
 

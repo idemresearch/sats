@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY="jonatns/sats"
+REPOSITORY="idemresearch/sats"
 
 say() {
     printf '%s\n' "$*"
