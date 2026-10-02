@@ -9,6 +9,7 @@ exactly that payment, once, with a record of which agent and request it came
 from. Your keys never leave your machine.
 
 Today sats ships as a command-line wallet and an MCP server for agents.
+sats is built by [Idem Research](https://github.com/idemresearch).
 
 [Try it in the browser](https://sats.sh) · [Docs](docs/README.md) ·
 [CLI](docs/cli.md) · [Agents](docs/mcp.md) · [Security](docs/security.md)
@@ -120,3 +121,8 @@ enabled implicitly. See [Providers and guards](docs/providers.md).
 Start with [CONTRIBUTING.md](CONTRIBUTING.md). [AGENTS.md](AGENTS.md) holds the
 implementation rules for contributors and coding agents, and
 [Architecture](docs/architecture.md) maps the code.
+
+## License
+
+sats is licensed under the [Apache License, Version 2.0](LICENSE).
+Copyright 2026 Idem Research.

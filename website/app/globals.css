@@ -165,12 +165,14 @@ pre {
 }
 
 .site-header nav a,
-.footer-links a {
+.footer-links a,
+.footer-credit {
   transition: color 160ms ease;
 }
 
 .site-header nav a:hover,
-.footer-links a:hover {
+.footer-links a:hover,
+.footer-credit:hover {
   color: var(--foreground);
 }
 

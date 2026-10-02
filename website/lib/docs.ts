@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const DOCS_DIR = path.join(process.cwd(), "..", "docs");
-const GITHUB_BLOB = "https://github.com/jonatns/sats/blob/main";
+const GITHUB_BLOB = "https://github.com/idemresearch/sats/blob/main";
 const PUBLIC_DOC_SLUGS = [
   "cli",
   "mcp",
@@ -32,7 +32,7 @@ const PUBLIC_DOCS_INDEX = [
   "- [Architecture](architecture.md): the portable core and shared human/agent transaction path.",
   "- [Product & security direction](direction.md): the invariant every surface serves — agents propose, humans authorize.",
   "",
-  "Source code and maintainer guides live in the [GitHub repository](https://github.com/jonatns/sats).",
+  "Source code and maintainer guides live in the [GitHub repository](https://github.com/idemresearch/sats).",
 ].join("\n");
 
 function isPublicDocSlug(slug: string): boolean {
