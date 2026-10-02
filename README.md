@@ -91,8 +91,8 @@ and `sats agent revoke claude` to cut the agent off.
 
 sats refuses a request outright, with no approval path, if it is over
 `--max-tx`, over the fee cap, over the remaining budget, or to a recipient
-outside a `--to` allowlist. Revoking a grant stops new requests and approvals
-immediately. See [MCP and agent grants](docs/mcp.md) for the full tool
+outside a `--to` allowlist. Revoking a grant cuts the agent off at its next call
+and stops approvals of its pending requests. See [MCP and agent grants](docs/mcp.md) for the full tool
 contract.
 
 ## Networks and providers

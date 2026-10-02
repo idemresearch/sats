@@ -7,14 +7,20 @@
 //! grant refuses is a successful tool result with `status: "denied"` —
 //! deterministic, machine-readable, and terminal. A request inside the
 //! grant is `status: "pending_approval"`: filed for a human, not failed.
+//!
+//! Startup authenticates once; every tool call authenticates again
+//! against the grant on file, so revoking, re-issuing, or expiry cuts a
+//! running session off at its next call, reads included.
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::tool::IntoCallToolResult;
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use rmcp::model::{ErrorData, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResponse, CallToolResult, ErrorData, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, tool, tool_handler, tool_router};
+use sats_core::authz::Grant;
 use sats_core::bitcoin::Network;
 use sats_core::request::{AgentRequest, RequestState};
 use schemars::JsonSchema;
@@ -24,7 +30,7 @@ use zeroize::Zeroizing;
 use crate::config::{Config, network_name};
 use crate::provider;
 use crate::request::{self, CreateParams};
-use crate::store::{Store, unix_now};
+use crate::store::{Store, now_checked};
 use crate::walletd;
 
 /// Environment variable carrying the agent's bearer token, as printed
@@ -285,6 +291,89 @@ pub struct GrantResult {
     pub message: Option<String>,
 }
 
+/// Why a call was refused before it touched the wallet: this session's
+/// grant is no longer live. Serialized as the same `status: "error"`
+/// shape `request_send` and `check_request` use.
+struct Refusal {
+    code: &'static str,
+    message: String,
+}
+
+impl Refusal {
+    fn no_grant(agent: &str, why: &str) -> Self {
+        Refusal {
+            code: "no_grant",
+            message: format!(
+                "{why} — this session is cut off; ask the human to run: \
+                 sats agent grant {agent} --budget <sats>"
+            ),
+        }
+    }
+}
+
+/// Authenticate one call against the grant on file: it must exist, name
+/// this session's token, and be unexpired. The token is checked before
+/// expiry so a stale token learns nothing about the current grant. Fails
+/// closed on an unreadable grant or clock.
+fn authorize(store: &Store, network: Network, agent: &str, token: &str) -> Result<Grant, Refusal> {
+    let grant = match store.load_grant(network_name(network), agent) {
+        Ok(Some(grant)) => grant,
+        Ok(None) => {
+            return Err(Refusal::no_grant(
+                agent,
+                "no active grant (revoked or removed)",
+            ));
+        }
+        Err(e) => {
+            return Err(Refusal {
+                code: "store_error",
+                message: format!("{e:#}"),
+            });
+        }
+    };
+    if !grant.authorizes(token) {
+        return Err(Refusal {
+            code: "unauthorized",
+            message: format!(
+                "the presented token does not authorize agent {agent:?} — the grant was \
+                 re-issued with a different token"
+            ),
+        });
+    }
+    let now = now_checked().map_err(|e| Refusal {
+        code: "clock_unavailable",
+        message: format!("{e:#}"),
+    })?;
+    if grant.is_expired(now) {
+        return Err(Refusal::no_grant(agent, "the grant has expired"));
+    }
+    Ok(grant)
+}
+
+/// A read tool's failure: a typed refusal, returned as an `isError`
+/// result whose structured content carries `error_code`, or an
+/// operational fault.
+enum ToolError {
+    Refused(Refusal),
+    Internal(ErrorData),
+}
+
+impl IntoCallToolResult for ToolError {
+    fn into_call_tool_result(self) -> Result<CallToolResponse, ErrorData> {
+        match self {
+            ToolError::Refused(refusal) => {
+                Ok(CallToolResult::structured_error(serde_json::json!({
+                    "status": "error",
+                    "error_code": refusal.code,
+                    "message": refusal.message,
+                }))
+                .into())
+            }
+            ToolError::Internal(error) => Err(error),
+        }
+    }
+}
+
 impl SatsMcp {
     pub fn new(
         dir: Option<PathBuf>,
@@ -322,6 +411,26 @@ impl SatsMcp {
             .map_err(|e| ErrorData::internal_error(format!("task failed: {e}"), None))?
             .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))
     }
+
+    /// [`Self::blocking`] for a call that must hold a live grant: the
+    /// grant is re-read and the token re-checked before `f` runs.
+    async fn authorized<T, F>(&self, f: F) -> Result<T, ToolError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Store, Network, Vec<provider::CliProvider>) -> Result<T> + Send + 'static,
+    {
+        let token = self.token.clone();
+        self.blocking(move |dir, network, agent, providers| {
+            let store = Store::open(dir.as_deref())?;
+            Ok(match authorize(&store, network, &agent, &token) {
+                Ok(_) => Ok(f(&store, network, providers)?),
+                Err(refusal) => Err(refusal),
+            })
+        })
+        .await
+        .map_err(ToolError::Internal)?
+        .map_err(ToolError::Refused)
+    }
 }
 
 #[tool_router]
@@ -331,12 +440,11 @@ impl SatsMcp {
         chain could not be reached and the value is from cache.",
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = true)
     )]
-    async fn get_balance(&self) -> Result<Json<BalanceResult>, ErrorData> {
-        self.blocking(|dir, network, _agent, providers| {
-            let store = Store::open(dir.as_deref())?;
-            let config = Config::load(&store)?;
+    async fn get_balance(&self) -> Result<Json<BalanceResult>, ToolError> {
+        self.authorized(|store, network, providers| {
+            let config = Config::load(store)?;
             let services = provider::resolve(&config, &providers, network)?;
-            let mut ctx = walletd::open(&store, network)?;
+            let mut ctx = walletd::open(store, network)?;
             let synced = services.sync_wallet(&mut ctx).is_ok();
             let balance = ctx.wallet.balance();
             Ok(BalanceResult {
@@ -360,10 +468,9 @@ impl SatsMcp {
             open_world_hint = false
         )
     )]
-    async fn get_receive_address(&self) -> Result<Json<AddressResult>, ErrorData> {
-        self.blocking(|dir, network, _agent, _providers| {
-            let store = Store::open(dir.as_deref())?;
-            let mut ctx = walletd::open(&store, network)?;
+    async fn get_receive_address(&self) -> Result<Json<AddressResult>, ToolError> {
+        self.authorized(|store, network, _providers| {
+            let mut ctx = walletd::open(store, network)?;
             let info = ctx
                 .wallet
                 .reveal_next_address(bdk_wallet::KeychainKind::External);
@@ -384,15 +491,22 @@ impl SatsMcp {
         annotations(read_only_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn get_grant(&self) -> Result<Json<GrantResult>, ErrorData> {
-        self.blocking(|dir, network, agent, _providers| {
+        let token = self.token.clone();
+        self.blocking(move |dir, network, agent, _providers| {
             let store = Store::open(dir.as_deref())?;
             let net_name = network_name(network);
-            let now = unix_now();
-            let grant = store
-                .load_grant(net_name, &agent)?
-                .filter(|g| !g.is_expired(now));
+            // A grant this session's token no longer names is reported
+            // inactive, never described: a stale token learns nothing
+            // about a re-issued grant.
+            let grant = match authorize(&store, network, &agent, &token) {
+                Ok(grant) => Ok(grant),
+                Err(refusal) if matches!(refusal.code, "no_grant" | "unauthorized") => {
+                    Err(refusal.message)
+                }
+                Err(refusal) => anyhow::bail!("{}: {}", refusal.code, refusal.message),
+            };
             Ok(match grant {
-                Some(g) => GrantResult {
+                Ok(g) => GrantResult {
                     active: true,
                     agent,
                     network: net_name.to_string(),
@@ -407,7 +521,7 @@ impl SatsMcp {
                     expires_at: Some(g.expires_at),
                     message: None,
                 },
-                None => GrantResult {
+                Err(message) => GrantResult {
                     active: false,
                     agent: agent.clone(),
                     network: net_name.to_string(),
@@ -420,9 +534,7 @@ impl SatsMcp {
                     max_fee_sat: None,
                     tx_count: None,
                     expires_at: None,
-                    message: Some(format!(
-                        "no active grant — ask the human to run: sats agent grant {agent} --budget <sats>"
-                    )),
+                    message: Some(message),
                 },
             })
         })
@@ -494,9 +606,13 @@ impl SatsMcp {
         &self,
         Parameters(params): Parameters<CheckRequestParams>,
     ) -> Result<Json<RequestView>, ErrorData> {
+        let token = self.token.clone();
         self.blocking(move |dir, network, agent, _providers| {
             let store = Store::open(dir.as_deref())?;
             let net_name = network_name(network);
+            if let Err(refusal) = authorize(&store, network, &agent, &token) {
+                return Ok(RequestView::error(refusal.code, refusal.message));
+            }
             Ok(check_request_record(
                 &store,
                 net_name,

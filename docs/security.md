@@ -278,9 +278,10 @@ names. It holds no key material and never prepares, signs, or broadcasts.
 Agents never receive the password, mnemonic, a signer, a PSBT-signing or
 unlock tool, or the `--allow-dust` and `--no-guards` bypasses.
 
-The token authenticates filing, never execution. Revocation stops new filings
-and approvals under that grant immediately, including in a running session.
-A running session keeps its read tools until you stop it. `check_request`
+The token authenticates every tool call, never execution. Each call re-reads
+the grant, so revocation, re-issue, or expiry cuts a running session off at
+its next call, reads included, and approvals under a revoked grant stop
+immediately. `check_request`
 never syncs, mutates records, reconciles, refunds, signs, or broadcasts. An
 absent execution lock never proves a request is unsigned. The full contract
 is in [MCP](mcp.md).
@@ -334,12 +335,12 @@ dialect has not been verified against a live endpoint.
 | Stolen wallet database | No private descriptors in SQLite | Addresses and balances exposed |
 | Stolen sealed seed | Argon2id plus authenticated encryption | Password strength; offline guessing |
 | Read grant file | Budget and token hash only | Reveals amounts and expiry |
-| Stolen agent token | Every request waits for your password; caps and expiry enforced at filing and execution | Can file within the grant; a running session keeps reads after revocation until stopped |
+| Stolen agent token | Every request waits for your password; caps and expiry enforced at filing and execution | Can file and read within the grant until it is revoked or expires |
 | Lied-about amount or fee | Recomputed from the PSBT against the wallet's descriptors | An understated input wastes the agent's own budget on an unrelayable transaction |
 | Compromised MCP process | Holds a token, never a key; forged approvals need the password | Same as a stolen token |
 | Debugger on an approving process | Key material lives only for one approval | Seed recoverable in that window where ptrace is allowed |
 | Pre-daemon wrapped-seed grant | Reported and refused | The file is a seed disclosure until the wallet is rotated |
-| Revoked agent | Grant reloaded at every filing and under the lock at execution | Transactions signed before revocation stay valid |
+| Revoked agent | Grant and token rechecked on every MCP tool call and under the lock at execution | Transactions signed before revocation stay valid |
 | Provider outage | Planning and configured guards fail closed | Loss of availability |
 | Malicious asset guard | Restrictive only | Can hide funds; can miss assets |
 | Broadcast failure | Transaction saved first; request `broadcast_pending` | Retry with `sats tx broadcast` |

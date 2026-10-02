@@ -150,6 +150,17 @@ impl McpSession {
         self.call_tool_raw(id, name, arguments)["result"]["structuredContent"].clone()
     }
 
+    /// A read tool refused because the session's grant is no longer
+    /// live: an `isError` result whose structured content names the code.
+    fn refused_read(&mut self, id: u64, name: &str, code: &str) -> serde_json::Value {
+        let response = self.call_tool_raw(id, name, serde_json::json!({}));
+        assert_eq!(response["result"]["isError"], true, "{name}: {response}");
+        let refused = response["result"]["structuredContent"].clone();
+        assert_eq!(refused["status"], "error", "{name}: {refused}");
+        assert_eq!(refused["error_code"], code, "{name}: {refused}");
+        refused
+    }
+
     fn request_send(&mut self, id: u64, amount_sat: u64, key: &str) -> serde_json::Value {
         self.call_tool(
             id,
@@ -617,17 +628,22 @@ fn revocation_takes_effect_mid_session() {
     assert_eq!(refused["status"], "error", "got: {refused}");
     assert_eq!(refused["error_code"], "no_grant");
     assert_eq!(records(), records_before);
-    // Reading the grant reports it gone; observing the old request works.
+    // Every tool is cut off, reads included: the grant reports inactive,
+    // and nothing else answers.
     let grant = mcp.call_tool(4, "get_grant", serde_json::json!({}));
     assert_eq!(grant["active"], false);
-    assert_eq!(mcp.check_request(5, &before)["status"], "pending_approval");
+    assert!(grant.get("budget_sat").is_none(), "{grant}");
+    mcp.refused_read(5, "get_balance", "no_grant");
+    mcp.refused_read(6, "get_receive_address", "no_grant");
+    let observed = mcp.check_request(7, &before);
+    assert_eq!(observed["status"], "error", "{observed}");
+    assert_eq!(observed["error_code"], "no_grant");
+    assert!(observed.get("request_id").is_none(), "{observed}");
     // The pending request cannot execute without its grant: it is bound
     // to the revoked instance and becomes denied.
     let output = sats_output(&dir, &["agent", "approve", &before, "--yes"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("revoked"));
-    assert_eq!(mcp.check_request(6, &before)["status"], "denied");
-    assert_eq!(mcp.check_request(7, &before)["reason"], "revoked");
     assert_eq!(event_kinds(&dir), ["request_received", "denied"]);
 
     // A re-issued grant for the same agent never executes the old request.
@@ -809,6 +825,54 @@ fn a_replaced_grant_refuses_the_old_session_without_writing() {
         requests_before, requests_after,
         "an unauthorized caller must not create request records"
     );
+    // Nor can it read: the re-issued grant is reported inactive without
+    // its limits, and the wallet tools refuse.
+    let grant = mcp.call_tool(4, "get_grant", serde_json::json!({}));
+    assert_eq!(grant["active"], false, "{grant}");
+    assert!(grant.get("budget_sat").is_none(), "{grant}");
+    assert!(grant["message"].as_str().unwrap().contains("re-issued"));
+    mcp.refused_read(5, "get_balance", "unauthorized");
+    mcp.refused_read(6, "get_receive_address", "unauthorized");
+    assert_eq!(
+        mcp.check_request(7, "r-00000000000000000000000000000000")["error_code"],
+        "unauthorized"
+    );
+}
+
+/// Expiry cuts a running session off at its next call, like revocation:
+/// the grant is re-read on every call, not trusted from startup.
+#[test]
+fn expiry_cuts_off_a_running_session() {
+    let dir = TempDir::new().unwrap();
+    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let mut mcp = McpSession::start(&dir, "claude", &fx.token);
+    handshake(&mut mcp);
+    let filed = mcp.request_send(2, 1_000, "before");
+    assert_eq!(filed["status"], "pending_approval");
+    let address = mcp.call_tool(3, "get_receive_address", serde_json::json!({}));
+    let index = address["index"].as_u64().unwrap();
+
+    let grant_path = dir.path().join("signet/grants/claude.json");
+    let mut grant = read_json(&grant_path);
+    grant["expires_at"] = serde_json::json!(1);
+    std::fs::write(&grant_path, grant.to_string()).unwrap();
+
+    let grant = mcp.call_tool(4, "get_grant", serde_json::json!({}));
+    assert_eq!(grant["active"], false, "{grant}");
+    assert!(grant["message"].as_str().unwrap().contains("expired"));
+    mcp.refused_read(5, "get_balance", "no_grant");
+    mcp.refused_read(6, "get_receive_address", "no_grant");
+    assert_eq!(
+        mcp.check_request(7, &id_of(&filed))["error_code"],
+        "no_grant"
+    );
+    // A refused read does not advance the wallet: the next live session
+    // reveals the address after the one already handed out.
+    let fresh = grant_token(&dir, "claude", &["--budget", "50000"]);
+    let mut fresh_mcp = McpSession::start(&dir, "claude", &fresh);
+    handshake(&mut fresh_mcp);
+    let next = fresh_mcp.call_tool(2, "get_receive_address", serde_json::json!({}));
+    assert_eq!(next["index"].as_u64().unwrap(), index + 1, "{next}");
 }
 
 #[test]

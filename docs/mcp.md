@@ -83,8 +83,9 @@ wallet's derivation index.
 ### `get_grant`
 
 Returns budget, spent, remaining, caps, mode, recipient allowlist, and expiry.
-`active: false` means the grant was revoked or expired, and the message names
-the command a human runs to issue a new one.
+`active: false` means the grant was revoked, expired, or re-issued with a
+different token. It then carries no limits, and the message names the command
+a human runs to issue a new one.
 
 ### `request_send`
 
@@ -165,6 +166,9 @@ What each state means for signing and budget is in
 ## Errors
 
 An error is a failed call, not a request state. It never files a request.
+`request_send` and `check_request` return it as `status: "error"` with an
+`error_code`. `get_balance` and `get_receive_address` return the same
+`status`, `error_code`, and `message` as an `isError` tool result.
 
 | `error_code` | Meaning |
 |---|---|
@@ -172,8 +176,8 @@ An error is a failed call, not a request state. It never files a request.
 | `invalid_idempotency_key` | The key is missing or isn't 1–64 characters of `A-Za-z0-9_-` |
 | `invalid_address` | The address doesn't parse or is for another network |
 | `idempotency_key_conflict` | The key was used for a different send; `request_id` names it |
-| `no_grant` | No grant on file, so nothing is written |
-| `unauthorized` | The token doesn't match this agent's grant |
+| `no_grant` | No active grant: it was revoked or has expired. Nothing is read or written |
+| `unauthorized` | The token doesn't match this agent's grant, which was re-issued. Nothing is read or written |
 | `clock_unavailable` | The system clock can't be read, so expiry can't be checked |
 | `store_error` | The request store couldn't be read or written |
 
@@ -213,7 +217,9 @@ sats agent list
 sats agent revoke claude
 ```
 
-- Revocation takes effect on the next filing, without restarting the client.
+- Every tool call re-reads the grant and checks the token. Revocation,
+  re-issue, and expiry cut a running session off at its next call, reads
+  included, without restarting the client.
 - A request executes only under the grant instance that created it. A
   pending request whose grant was revoked or re-issued becomes `denied` with
   reason `revoked` when the human tries to approve it.
@@ -221,9 +227,9 @@ sats agent revoke claude
   can't file, and the old token can't start a server.
 - Expired grants can't start a server and are removed when listing or
   startup finds them.
-- A running session keeps `get_balance`, `get_receive_address`, `get_grant`,
-  and `check_request` after revocation or expiry. Stop the session to end
-  them.
+- After that, `get_grant` reports `active: false` and every other tool fails
+  with `no_grant` or `unauthorized`. The agent can no longer observe its
+  requests; you still see them in `sats agent requests` and `sats agent log`.
 - A transaction signed before revocation stays valid.
 
 ## Transport

@@ -3,6 +3,17 @@
 Notable changes to sats, newest first. Versions follow
 `workspace.package.version` in `Cargo.toml`.
 
+## 0.0.2 (unreleased)
+
+### Agents
+
+- Revoking, re-issuing, or expiring a grant now cuts off a running MCP
+  session at its next call, reads included. Previously only `request_send`
+  re-checked the grant, so `get_balance`, `get_receive_address`, and
+  `check_request` kept answering until the session was restarted. Refused
+  calls carry `error_code` `no_grant` or `unauthorized`, and `get_grant`
+  reports `active: false` without the grant's limits.
+
 ## 0.0.1 (2026-10-01)
 
 The first release. Experimental; signet by default.
