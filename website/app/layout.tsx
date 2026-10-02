@@ -1,8 +1,15 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
+import { Geist_Mono } from "next/font/google";
 import { siteUrl } from "@/lib/site";
 import "@xterm/xterm/css/xterm.css";
 import "./globals.css";
+
+const mono = Geist_Mono({
+  subsets: ["latin"],
+  variable: "--font-mono",
+  display: "swap",
+});
 
 export const metadata: Metadata = {
   metadataBase: siteUrl(),
@@ -46,8 +53,8 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   colorScheme: "dark light",
   themeColor: [
-    { media: "(prefers-color-scheme: dark)", color: "#0b0b0a" },
-    { media: "(prefers-color-scheme: light)", color: "#f6f6f2" },
+    { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" },
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
   ],
 };
 
@@ -57,44 +64,35 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="en" className={mono.variable}>
       <body>
-        <div className="shell">
-          <header className="site-header">
-            <Link className="wordmark" href="/" aria-label="sats home">
-              <span className="wordmark-mark" aria-hidden="true">
-                =
-              </span>
-              <span>sats</span>
-            </Link>
-            <nav aria-label="Main navigation">
-              <Link href="/#playground">playground</Link>
-              <Link href="/docs/cli">cli</Link>
-              <Link href="/docs/mcp">agents</Link>
-              <Link href="/docs">docs</Link>
-              <a href="https://github.com/idemresearch/sats">source ↗</a>
-            </nav>
-          </header>
+        <header className="site-header">
+          <Link className="wordmark" href="/" aria-label="sats home">
+            <span className="wordmark-mark" aria-hidden="true">
+              =
+            </span>
+            <span>sats</span>
+          </Link>
+          <nav aria-label="Main navigation">
+            <Link href="/docs">docs</Link>
+            <Link href="/docs/cli">cli</Link>
+            <Link href="/docs/mcp">agents</Link>
+            <Link href="/#try">try</Link>
+            <a href="https://github.com/idemresearch/sats">source</a>
+          </nav>
+        </header>
 
-          <main>{children}</main>
+        <main>{children}</main>
 
-          <footer>
-            <div>
-              <span className="footer-mark" aria-hidden="true">=</span>
-              <span>
-                sats · Apache-2.0 · by{" "}
-                <a className="footer-credit" href="https://github.com/idemresearch">
-                  Idem Research
-                </a>
-              </span>
-            </div>
-            <div className="footer-links">
-              <Link href="/docs/security">security</Link>
-              <Link href="/docs/architecture">architecture</Link>
-              <a href="https://github.com/idemresearch/sats">github</a>
-            </div>
-          </footer>
-        </div>
+        <footer className="site-footer">
+          <a href="https://github.com/idemresearch/sats/blob/main/CHANGELOG.md">
+            changelog
+          </a>
+          <a href="https://github.com/idemresearch/sats">source</a>
+          <Link href="/docs">docs</Link>
+          <span aria-hidden="true">·</span>
+          <a href="https://github.com/idemresearch">Idem Research</a>
+        </footer>
       </body>
     </html>
   );
