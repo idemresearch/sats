@@ -309,7 +309,7 @@ no JSON mode, so the mnemonic never lands on a machine-readable stream.
 | Platform | Config file | Data |
 |---|---|---|
 | Linux | `~/.config/sats/config.toml` | `~/.local/share/sats/` |
-| macOS | `~/Library/Application Support/sh.sats.sats/config.toml` | same directory |
+| macOS | `~/Library/Application Support/sats/config.toml` | same directory |
 
 `SATS_DIR` replaces both with one directory.
 

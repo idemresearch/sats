@@ -1,7 +1,8 @@
 //! On-disk layout, atomic writes, and secret file permissions.
 //!
-//! Default layout is XDG (`~/.config/sats` + `~/.local/share/sats`); the
-//! `SATS_DIR` env var or `--dir` flag relocates everything under one
+//! Default layout is the platform's: XDG on Linux (`~/.config/sats` +
+//! `~/.local/share/sats`), `~/Library/Application Support/sats` on macOS.
+//! The `SATS_DIR` env var or `--dir` flag relocates everything under one
 //! directory. Data is namespaced per network so wallets never mix.
 
 use std::fs;
@@ -69,7 +70,7 @@ impl Store {
         let (config_dir, data_dir) = match dir_override {
             Some(dir) => (dir.to_path_buf(), dir.to_path_buf()),
             None => {
-                let dirs = directories::ProjectDirs::from("sh", "sats", "sats")
+                let dirs = directories::ProjectDirs::from("", "", "sats")
                     .context("cannot determine home directory")?;
                 (
                     dirs.config_dir().to_path_buf(),
