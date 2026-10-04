@@ -207,7 +207,7 @@ prepares the transaction on fresh chain state, verifies it matches the
 request, re-checks the grant with the real fee, and signs only after the
 human enters the wallet password.
 
-If preparation fails because of a sync, guard, fee, or provider problem, the
+If preparation fails because of a sync, fee, or provider problem, the
 request becomes `failed` and the human can try again. The agent keeps
 observing with `check_request`. It shouldn't poll the balance or file again.
 

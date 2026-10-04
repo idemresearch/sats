@@ -48,13 +48,10 @@ pub fn foreign_address(network: Network) -> String {
 pub fn write_mock_provider(dir: &TempDir) -> std::path::PathBuf {
     let mockdata = dir.path().join("mockdata");
     std::fs::create_dir_all(&mockdata).unwrap();
-    // The mock driver is also a guard, and guards fail closed on a missing
-    // answer — give it an empty one by default.
-    std::fs::write(mockdata.join("guard.json"), r#"{"protected": []}"#).unwrap();
-    // The mock stands in for both the chain source and Subfrost, with
-    // asset protection on, so guard behavior is exercised by default.
+    // The mock stands in for both the chain source and Subfrost (Alkanes
+    // views).
     let config = format!(
-        "network = \"signet\"\n\n[signet]\nchain = \"esplora\"\nprotect_assets = true\nsubfrost_url = \"file://{0}\"\n\n[signet.esplora]\nurl = \"file://{0}\"\n",
+        "network = \"signet\"\n\n[signet]\nchain = \"esplora\"\nsubfrost_url = \"file://{0}\"\n\n[signet.esplora]\nurl = \"file://{0}\"\n",
         mockdata.display()
     );
     std::fs::write(dir.path().join("config.toml"), config).unwrap();
@@ -204,12 +201,12 @@ impl Drop for HttpServer {
 pub const UNRESOLVABLE: &str = "no Esplora URL is configured";
 
 /// A configuration that loads but cannot be served: chain data is set to
-/// Esplora with no URL. Asset protection points at a live listener, kept
-/// so tests can also assert no provider was called.
+/// Esplora with no URL. Subfrost (Alkanes views) points at a live
+/// listener, kept so tests can also assert no provider was called.
 pub fn write_unresolvable_providers(dir: &TempDir) -> HttpServer {
     let server = HttpServer::start(|_| Some((400, "unexpected provider call".into())));
     let config = format!(
-        "network = \"signet\"\n\n[signet]\nchain = \"esplora\"\nprotect_assets = true\nsubfrost_url = {:?}\n",
+        "network = \"signet\"\n\n[signet]\nchain = \"esplora\"\nsubfrost_url = {:?}\n",
         server.url
     );
     std::fs::write(dir.path().join("config.toml"), config).unwrap();

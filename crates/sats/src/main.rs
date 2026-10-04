@@ -117,9 +117,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Some(cli::ProvidersCommand::Use { source }) => {
                 commands::providers::use_chain(&store, config, network, source, json)
             }
-            Some(cli::ProvidersCommand::Protect { state }) => {
-                commands::providers::protect(&store, config, network, state, json)
-            }
             Some(cli::ProvidersCommand::Remove { kind }) => {
                 commands::providers::remove(&store, config, network, kind, json)
             }

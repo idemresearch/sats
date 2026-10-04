@@ -14,14 +14,14 @@ flowchart TD
     Native --> Core["sats-core"]
     Exec --> Core
     Exec --> State
-    Exec --> Providers["Chain providers + guards"]
+    Exec --> Providers["Chain providers"]
     Native --> Providers
 ```
 
 A human send unseals the seed for one command. An agent never signs: the MCP
 server files a request, and `sats agent approve` executes it in the human's
-process, for exactly that request. Both paths share preparation, protection,
-fee estimation, and the sign-then-persist-then-broadcast tail.
+process, for exactly that request. Both paths share preparation, the dust
+exclusion, fee estimation, and the sign-then-persist-then-broadcast tail.
 
 `sats-core` owns deterministic wallet and authorization behavior. `sats` owns
 everything with side effects: argument parsing, terminal output, files,
@@ -58,7 +58,7 @@ runtime. Callers pass in time and own the BDK wallet.
 | `config` | TOML configuration and network names |
 | `store` | Paths, atomic files, permissions, transactions, grants, requests, the event log |
 | `walletd` | The SQLite-backed watch-only BDK wallet |
-| `provider` | Capabilities, driver resolution, chain access, UTXO guards |
+| `provider` | Per-network chain source, driver resolution, chain access, Alkanes views |
 | `keys`, `password` | Unsealing the seed; verifying the password without keeping anything |
 | `request` | Request create, dismiss, reconcile, and the executor (`stage`, `commit`) |
 | `spend` | The shared tail: sign, persist, then broadcast |
@@ -113,7 +113,7 @@ sequenceDiagram
     participant E as Core
     participant S as Store
     H->>C: sats send address amount
-    C->>P: sync, guards, fee estimate
+    C->>P: sync, fee estimate
     C->>E: prepare PSBT
     C-->>H: amount, fee, confirmation
     C->>E: sign and finalize locally
@@ -155,7 +155,7 @@ sequenceDiagram
     participant S as Store
     H->>C: sats agent approve (or an explicit id)
     C->>S: claim the request, re-check the grant (fee unknown)
-    C->>P: sync, guards, fee estimate
+    C->>P: sync, fee estimate
     C->>E: prepare PSBT; derive what it pays; ladder with the real fee
     C-->>H: wallet, network, recipient, amount, fee, total; confirmation and password
     C->>S: under the grant lock: check the grant instance, reserve budget, then record signing
@@ -173,8 +173,8 @@ reconciled, is specified in [Security](security.md#approving-a-request).
 ## Providers
 
 Each network has exactly one chain source (mempool.space, Subfrost, or an
-Esplora server) for sync, fees, and broadcast, and an asset-protection switch
-served by Subfrost's ord and Alkanes indexes. Drivers are audited enums.
+Esplora server) for sync, fees, and broadcast. Alkanes views come from
+Subfrost when it is set up. Drivers are audited enums.
 Resolution is pure configuration work with no network I/O. Operations check
 the network when they run. See [Providers](providers.md).
 

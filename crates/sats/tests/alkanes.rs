@@ -199,26 +199,6 @@ fn execute_fails_closed_without_simulation() {
 
 #[test]
 #[cfg(feature = "experimental-alkanes-execute")]
-fn execute_fails_closed_without_a_guard_answer() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    let mockdata = write_mock_provider(&dir);
-    std::fs::write(mockdata.join("alkanes-simulate.json"), r#"{"status": 0}"#).unwrap();
-    common::fund_wallet(&dir, &[100_000]);
-    std::fs::remove_file(mockdata.join("guard.json")).unwrap();
-
-    sats(&dir)
-        .args(["alkanes", "execute", "2:1", "77", "-y"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "refusing to plan without the asset check",
-        ));
-    assert!(!dir.path().join("signet/transactions").exists());
-}
-
-#[test]
-#[cfg(feature = "experimental-alkanes-execute")]
 fn execute_excludes_dust_suspects() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);

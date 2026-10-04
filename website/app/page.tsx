@@ -50,9 +50,9 @@ const features = [
     title: "Fails closed",
     body: (
       <>
-        No spending on stale chain data or while a configured{" "}
-        <Link href="/docs/providers">asset guard</Link> is down. 546- and
-        330-sat outputs are left alone by default.
+        No spending on stale{" "}
+        <Link href="/docs/providers">chain data</Link>. 546- and 330-sat
+        outputs are left alone by default.
       </>
     ),
   },

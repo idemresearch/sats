@@ -67,7 +67,7 @@ couldn't be run, say so rather than calling the change complete.
 | Core unit | `crates/sats-core/src/` | Preparation, authorization, sealing, seeds, signing, amounts |
 | Native unit | `crates/sats/src/` | Config, providers, storage, the executor with a signer probe |
 | Playground unit | `crates/sats-web/src/` | Simulated wallet loop, grant lifecycle, denials |
-| CLI integration | `crates/sats/tests/` | Wallet flows, failures, providers, guards, grants, request review, Alkanes |
+| CLI integration | `crates/sats/tests/` | Wallet flows, failures, providers, grants, request review, Alkanes |
 | MCP integration | `crates/sats/tests/mcp.rs` | Tool schemas, filing, idempotency, the approval loop, startup refusal, revocation |
 | Installer | `scripts/test-setup.sh` | Targets, checksums, version pinning, PATH edits, atomic replacement |
 | WASM | CI `wasm-check` | `sats-core` and `sats-web` build for `wasm32-unknown-unknown` |

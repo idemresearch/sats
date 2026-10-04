@@ -6,8 +6,6 @@
 //! - `sync-error`      present → sync fails with the file's contents
 //! - `fees.json`       `{"2": 3.0}` conf-target → sat/vB map (default: flat 2)
 //! - `broadcasts.log`  broadcast txids are appended here
-//! - `guard.json`      `{"protected": ["txid:vout", ...]}`; **missing file is
-//!   a guard error** so fail-closed behavior is exercisable
 //! - `alkanes-bytecode.json`  `{"BLOCK:TX": "<hex>"}`; a missing file or
 //!   key is a typed view error
 //! - `alkanes-simulate.json`  returned verbatim for any simulate call;
@@ -18,9 +16,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::str::FromStr;
 
-use sats_core::bitcoin::{OutPoint, Transaction, Txid};
+use sats_core::bitcoin::{Transaction, Txid};
 
 use super::error::ProviderError;
 
@@ -138,31 +135,5 @@ impl MockProvider {
         let text = std::fs::read_to_string(self.dir.join("alkanes-simulate.json"))
             .map_err(|e| self.view_err(e.to_string()))?;
         serde_json::from_str(&text).map_err(|e| self.view_err(e.to_string()))
-    }
-
-    pub fn protected(&self, outpoints: &[OutPoint]) -> Result<Vec<OutPoint>, ProviderError> {
-        let guard_err = |message: String| ProviderError::Guard {
-            name: "mock".into(),
-            url: self.display.clone(),
-            message,
-        };
-        let text = std::fs::read_to_string(self.dir.join("guard.json"))
-            .map_err(|e| guard_err(e.to_string()))?;
-        #[derive(serde::Deserialize)]
-        struct GuardFile {
-            protected: Vec<String>,
-        }
-        let file: GuardFile = serde_json::from_str(&text).map_err(|e| guard_err(e.to_string()))?;
-        let listed = file
-            .protected
-            .iter()
-            .map(|s| OutPoint::from_str(s))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| guard_err(e.to_string()))?;
-        Ok(outpoints
-            .iter()
-            .filter(|op| listed.contains(op))
-            .copied()
-            .collect())
     }
 }

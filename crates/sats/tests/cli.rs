@@ -246,52 +246,6 @@ fn send_refuses_stale_state_when_sync_fails() {
 }
 
 #[test]
-fn guard_failure_stops_planning() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    let mockdata = write_mock_provider(&dir);
-    common::fund_wallet(&dir, &[100_000]);
-    // A configured guard that cannot answer must stop planning with candidates.
-    std::fs::remove_file(mockdata.join("guard.json")).unwrap();
-    sats(&dir)
-        .args([
-            "send",
-            "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
-            "25000",
-            "--fee-rate",
-            "2",
-            "--dry-run",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "refusing to plan without the asset check",
-        ));
-}
-
-#[test]
-fn no_guards_flag_skips_the_asset_check() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    let mockdata = write_mock_provider(&dir);
-    std::fs::remove_file(mockdata.join("guard.json")).unwrap();
-    common::fund_wallet(&dir, &[100_000]);
-    // With candidates and the explicit escape, preparation skips the guard.
-    sats(&dir)
-        .args([
-            "send",
-            "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
-            "25000",
-            "--fee-rate",
-            "2",
-            "--dry-run",
-            "--no-guards",
-        ])
-        .assert()
-        .success();
-}
-
-#[test]
 fn dry_run_conflicts_with_yes_and_export() {
     let dir = TempDir::new().unwrap();
     sats(&dir)
@@ -643,6 +597,8 @@ fn old_command_names_are_gone() {
         vec!["daemon", "status"],
         vec!["agent", "deny", "r-1"],
         vec!["agent", "approve", "r-1", "--for", "1h"],
+        vec!["send", common::ADDRESS, "1000", "--no-guards"],
+        vec!["providers", "protect", "on"],
     ] {
         sats(&dir).args(&args).assert().code(2);
     }

@@ -1,4 +1,4 @@
-//! `sats providers`: list, add, use, protect, and remove against local
+//! `sats providers`: list, add, use, and remove against local
 //! Subfrost- and Esplora-shaped endpoints. Hermetic: each endpoint is a
 //! loopback listener that answers the signet genesis hash, Subfrost only
 //! for the right key.
@@ -72,10 +72,9 @@ fn config_text(dir: &TempDir) -> String {
     std::fs::read_to_string(dir.path().join("config.toml")).unwrap_or_default()
 }
 
-fn add_subfrost(dir: &TempDir, url: &str, extra: &[&str]) {
+fn add_subfrost(dir: &TempDir, url: &str) {
     sats(dir)
         .args(["providers", "add", "subfrost", "--url", url])
-        .args(extra)
         .write_stdin(format!("{KEY}\n"))
         .assert()
         .success();
@@ -94,9 +93,7 @@ fn list_shows_the_defaults_and_how_to_add_subfrost() {
         .success()
         .stdout(predicate::str::contains("signet providers"))
         .stdout(predicate::str::contains("mempool (default)"))
-        .stdout(predicate::str::contains(
-            "only the 546/330-sat postage check",
-        ))
+        .stdout(predicate::str::contains("Asset protection").not())
         .stdout(predicate::str::contains("sats providers add subfrost"));
 
     let out = json_stdout(
@@ -109,7 +106,7 @@ fn list_shows_the_defaults_and_how_to_add_subfrost() {
     assert_eq!(out["chain"]["provider"], "mempool");
     assert_eq!(out["chain"]["source"], "default");
     assert_eq!(out["chain"]["auth"], "none");
-    assert!(out["asset_protection"].is_null());
+    assert!(out.get("asset_protection").is_none());
     assert!(out["alkanes_views"].is_null());
 
     // No mempool.space on regtest, and no default Subfrost endpoint.
@@ -149,8 +146,7 @@ fn add_subfrost_checks_the_key_and_stores_it_privately() {
         .write_stdin(format!("{KEY}\n"))
         .assert()
         .success()
-        .stdout(predicate::str::contains("added subfrost  signet"))
-        .stdout(predicate::str::contains("sats providers protect on"));
+        .stdout(predicate::str::contains("added subfrost  signet"));
     let output = assert.get_output();
     for stream in [&output.stdout, &output.stderr] {
         assert!(!String::from_utf8_lossy(stream).contains(KEY));
@@ -164,10 +160,6 @@ fn add_subfrost_checks_the_key_and_stores_it_privately() {
     let config = config_text(&dir);
     assert!(config.contains(&format!("api_key = \"{KEY}\"")));
     assert!(config.contains("chain = \"subfrost\""));
-    assert!(
-        !config.contains("protect_assets"),
-        "protection stays opt-in"
-    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -180,61 +172,12 @@ fn add_subfrost_checks_the_key_and_stores_it_privately() {
     assert_eq!(out["chain"]["provider"], "subfrost");
     assert_eq!(out["chain"]["auth"], "api_key");
     assert_eq!(out["alkanes_views"]["provider"], "subfrost");
-    assert!(out["asset_protection"].is_null());
     let rendered = out.to_string();
     assert!(!rendered.contains(KEY));
     assert!(
         !rendered.contains("/v4/jsonrpc"),
         "only the origin is shown"
     );
-}
-
-#[test]
-fn asset_protection_is_explicit_and_checked() {
-    let dir = TempDir::new().unwrap();
-    sats(&dir)
-        .args(["providers", "protect", "on"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("needs Subfrost"));
-    assert!(!dir.path().join("config.toml").exists());
-
-    let (url, _) = fake_subfrost();
-    add_subfrost(&dir, &url, &[]);
-    sats(&dir)
-        .args(["providers", "protect", "on"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("asset protection on  signet"))
-        .stdout(predicate::str::contains("--no-guards"));
-    assert_eq!(overview(&dir)["asset_protection"]["provider"], "subfrost");
-
-    sats(&dir)
-        .args(["providers", "protect", "off"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("asset protection off"));
-    assert!(overview(&dir)["asset_protection"].is_null());
-
-    // Re-adding keeps the saved key on empty input; --protect opts in.
-    let out = json_stdout(
-        sats(&dir)
-            .args([
-                "--json",
-                "providers",
-                "add",
-                "subfrost",
-                "--url",
-                &url,
-                "--protect",
-            ])
-            .write_stdin("\n")
-            .assert()
-            .success(),
-    );
-    assert_eq!(out["asset_protection"]["provider"], "subfrost");
-    assert_eq!(out["chain"]["auth"], "api_key");
-    assert_eq!(config_text(&dir).matches("api_key").count(), 1);
 }
 
 #[test]
@@ -254,7 +197,7 @@ fn use_switches_the_one_chain_source() {
 
     let (subfrost, _) = fake_subfrost();
     let esplora = fake_esplora();
-    add_subfrost(&dir, &subfrost, &[]);
+    add_subfrost(&dir, &subfrost);
     sats(&dir)
         .args(["providers", "add", "esplora", "--url", &esplora.url])
         .write_stdin("\n")
@@ -335,42 +278,25 @@ fn add_refuses_what_it_cannot_use() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("pass --url"));
-    sats(&dir)
-        .args([
-            "providers",
-            "add",
-            "esplora",
-            "--url",
-            "http://127.0.0.1:1",
-            "--protect",
-        ])
-        .write_stdin("\n")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("--protect is a Subfrost option"));
     assert!(!dir.path().join("config.toml").exists());
 }
 
 #[test]
-fn removing_subfrost_never_silently_drops_protection() {
+fn removing_subfrost_deletes_the_key_and_reverts_chain_data() {
     let dir = TempDir::new().unwrap();
     let (url, _) = fake_subfrost();
-    add_subfrost(&dir, &url, &["--protect"]);
+    add_subfrost(&dir, &url);
+    // Re-adding on empty input keeps the saved key.
+    let out = json_stdout(
+        sats(&dir)
+            .args(["--json", "providers", "add", "subfrost", "--url", &url])
+            .write_stdin("\n")
+            .assert()
+            .success(),
+    );
+    assert_eq!(out["chain"]["auth"], "api_key");
+    assert_eq!(config_text(&dir).matches("api_key").count(), 1);
 
-    sats(&dir)
-        .args(["providers", "remove", "subfrost"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "asset protection uses Subfrost on signet",
-        ))
-        .stderr(predicate::str::contains("protect off"));
-    assert!(config_text(&dir).contains(KEY));
-
-    sats(&dir)
-        .args(["providers", "protect", "off"])
-        .assert()
-        .success();
     sats(&dir)
         .args(["providers", "remove", "subfrost"])
         .assert()
@@ -422,7 +348,7 @@ fn list_diagnoses_a_setup_that_cannot_be_served() {
     let dir = TempDir::new().unwrap();
     std::fs::write(
         dir.path().join("config.toml"),
-        "network = \"signet\"\n\n[subfrost]\napi_key = \"APIKEYSECRET\"\n\n[signet]\nchain = \"esplora\"\nprotect_assets = true\nsubfrost_url = \"http://b.example/PATHSECRET\"\n",
+        "network = \"signet\"\n\n[subfrost]\napi_key = \"APIKEYSECRET\"\n\n[signet]\nchain = \"esplora\"\nsubfrost_url = \"http://b.example/PATHSECRET\"\n",
     )
     .unwrap();
     sats(&dir)

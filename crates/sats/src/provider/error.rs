@@ -32,15 +32,6 @@ pub enum ProviderError {
     #[error("broadcast failed ({url}): {message}")]
     Broadcast { url: String, message: String },
 
-    #[error(
-        "guard {name} unreachable ({url}): {message} — refusing to plan without the asset check; retry, or pass --no-guards to plan anyway"
-    )]
-    Guard {
-        name: String,
-        url: String,
-        message: String,
-    },
-
     #[error("alkanes view failed ({url}): {message}")]
     View { url: String, message: String },
 }

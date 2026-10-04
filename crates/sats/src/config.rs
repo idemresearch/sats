@@ -7,10 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::provider::error::redact_url;
 use crate::store::{Store, write_atomic};
 
-/// The human's settings. Provider choices are two decisions per network —
-/// where chain data comes from, and whether asset protection is on — so
-/// they live under `[<network>]`. The Subfrost key is shared by every
-/// network. See `crate::provider` for how these become services.
+/// The human's settings. Each network's provider choice — where its chain
+/// data comes from — lives under `[<network>]`. The Subfrost key is shared
+/// by every network. See `crate::provider` for how these become services.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -65,10 +64,6 @@ pub struct NetworkConfig {
     /// Absent: [`ChainChoice::default_for`] the network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chain: Option<ChainChoice>,
-    /// Ask Subfrost which outputs carry inscriptions, runes, or Alkanes
-    /// before every send. Never on unless a human turns it on.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub protect_assets: bool,
     /// Human-selected confirmation target in blocks (1–1008, default 2).
     /// Providers report fee estimates; this local policy chooses which
     /// estimate may be used.
@@ -86,10 +81,6 @@ impl NetworkConfig {
     pub fn is_empty(&self) -> bool {
         *self == NetworkConfig::default()
     }
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 /// An endpoint URL that may embed credentials: `Debug` shows only its
@@ -207,7 +198,7 @@ impl Config {
     }
 
     /// Shape checks only; provider choices that cannot be served (no
-    /// Esplora URL, protection without Subfrost) are resolution errors, so
+    /// Esplora URL, Subfrost not set up) are resolution errors, so
     /// local commands keep working while they are fixed.
     fn validate(&self) -> Result<()> {
         if self
@@ -256,7 +247,6 @@ impl Config {
     pub fn net(&self, network: Network) -> &NetworkConfig {
         const NONE: &NetworkConfig = &NetworkConfig {
             chain: None,
-            protect_assets: false,
             fee_target: None,
             esplora: None,
             subfrost_url: None,
@@ -343,7 +333,6 @@ api_key = "secret"
 
 [signet]
 chain = "subfrost"
-protect_assets = true
 fee_target = 1008
 
 [mainnet.esplora]
@@ -353,7 +342,6 @@ bearer = "token"
         let (_dir, store) = store_with(text);
         let config = Config::load(&store).unwrap();
         assert_eq!(config.signet.chain, Some(ChainChoice::Subfrost));
-        assert!(config.signet.protect_assets);
         assert_eq!(config.signet.fee_target, Some(1008));
         assert_eq!(config.subfrost.as_ref().unwrap().api_key, "secret");
         assert!(config.mainnet.chain.is_none());
@@ -374,7 +362,7 @@ bearer = "token"
             "network = \"signet\"\n[signet]\nfee_target = 1009\n",
             "network = \"signet\"\n[signet]\nchain = \"electrum\"\n",
             "network = \"signet\"\n[signte]\nchain = \"mempool\"\n",
-            "network = \"signet\"\n[signet]\nprotect = true\n",
+            "network = \"signet\"\n[signet]\nprotect_assets = true\n",
             "network = \"signet\"\n[subfrost]\napi_key = \" \"\n",
         ] {
             let (_dir, store) = store_with(invalid);

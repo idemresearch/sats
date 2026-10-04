@@ -15,8 +15,7 @@ pub struct Cli {
     pub network: Option<String>,
 
     /// Chain data override for this run: --provider esplora=URL or
-    /// --provider subfrost=URL. Replaces only the chain source; asset
-    /// protection stays as configured
+    /// --provider subfrost=URL
     #[arg(long, global = true, value_name = "KIND=URL",
           value_parser = crate::provider::parse_cli_provider)]
     pub provider: Option<crate::provider::CliProvider>,
@@ -104,7 +103,7 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
-    /// Show and choose where chain data and asset protection come from
+    /// Show and choose where chain data comes from
     Providers {
         #[command(subcommand)]
         command: Option<ProvidersCommand>,
@@ -118,8 +117,8 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum ProvidersCommand {
-    /// Show where the active network's chain data, asset protection, and
-    /// Alkanes views come from (the default)
+    /// Show where the active network's chain data and Alkanes views come
+    /// from (the default)
     List,
     /// Add a provider and use it for the active network's chain data:
     /// asks for its key (hidden, or one line on stdin) and checks the
@@ -129,13 +128,6 @@ pub enum ProvidersCommand {
     Use {
         #[arg(value_enum, value_name = "SOURCE")]
         source: ChainArg,
-    },
-    /// Turn asset protection on or off for the active network: before
-    /// every send, Subfrost is asked which outputs carry inscriptions,
-    /// runes, or Alkanes
-    Protect {
-        #[arg(value_enum, value_name = "on|off")]
-        state: Toggle,
     },
     /// Remove a provider and its stored credential
     Remove {
@@ -153,14 +145,11 @@ pub struct AddArgs {
     /// required for esplora)
     #[arg(long, value_name = "URL")]
     pub url: Option<String>,
-    /// Subfrost only: also turn on asset protection
-    #[arg(long)]
-    pub protect: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ProviderArg {
-    /// Subfrost: chain data, asset protection, and Alkanes views (API key)
+    /// Subfrost: chain data and Alkanes views (API key)
     Subfrost,
     /// Your own Esplora server (URL, optional bearer token)
     Esplora,
@@ -174,12 +163,6 @@ pub enum ChainArg {
     Subfrost,
     /// The Esplora server added for this network
     Esplora,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum Toggle {
-    On,
-    Off,
 }
 
 #[derive(Subcommand)]
@@ -264,9 +247,6 @@ pub struct SendArgs {
     /// Spend UTXOs at inscription postage values (546/330 sats)
     #[arg(long)]
     pub allow_dust: bool,
-    /// Skip the configured metaprotocol guards, loudly
-    #[arg(long)]
-    pub no_guards: bool,
     /// Skip the confirmation prompt
     #[arg(short, long, conflicts_with_all = ["dry_run", "export_psbt"])]
     pub yes: bool,
@@ -403,17 +383,8 @@ mod tests {
         for args in [
             &["sats", "providers"][..],
             &["sats", "providers", "list"],
-            &[
-                "sats",
-                "providers",
-                "add",
-                "subfrost",
-                "--url",
-                "http://x",
-                "--protect",
-            ],
+            &["sats", "providers", "add", "subfrost", "--url", "http://x"],
             &["sats", "providers", "use", "mempool"],
-            &["sats", "providers", "protect", "on"],
             &["sats", "providers", "remove", "esplora"],
             &[
                 "sats",

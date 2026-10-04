@@ -116,7 +116,7 @@ pub enum Outcome {
 /// instance that created the request. Providers are resolved only after
 /// these local checks pass. Preparation runs on the human's
 /// side of the boundary with no safety bypasses. Operational failures
-/// (sync, guards, fee estimation) record a safe pre-signature failure so
+/// (sync, fee estimation) record a safe pre-signature failure so
 /// the human can inspect the attempt and authorize again; a mismatch between the prepared transaction and
 /// the recorded intent refuses without signing.
 pub fn stage(
@@ -169,8 +169,8 @@ pub fn stage(
         return Ok(Stage::Denied(Box::new(denied), reason));
     }
 
-    // Preparation: the shared pipeline, agent form — no dust or guard
-    // bypass, and a failed sync is a hard stop.
+    // Preparation: the shared pipeline, agent form — no dust bypass, and
+    // a failed sync is a hard stop.
     let preparation = (|| -> Result<_> {
         let mut ctx = walletd::open(store, network)?;
         let prepare_request =
@@ -701,11 +701,10 @@ mod tests {
             let store = Store::open(Some(dir.path())).unwrap();
             let mockdata = dir.path().join("mockdata");
             std::fs::create_dir_all(&mockdata).unwrap();
-            std::fs::write(mockdata.join("guard.json"), r#"{"protected": []}"#).unwrap();
             std::fs::write(
                 dir.path().join("config.toml"),
                 format!(
-                    "network = \"signet\"\n\n[signet]\nchain = \"esplora\"\nprotect_assets = true\nsubfrost_url = \"file://{0}\"\n\n[signet.esplora]\nurl = \"file://{0}\"\n",
+                    "network = \"signet\"\n\n[signet]\nchain = \"esplora\"\nsubfrost_url = \"file://{0}\"\n\n[signet.esplora]\nurl = \"file://{0}\"\n",
                     mockdata.display()
                 ),
             )
@@ -2217,15 +2216,13 @@ mod tests {
         drop(fx.dir);
     }
     #[test]
-    fn guard_fee_and_resolution_failures_are_observable_without_drawing_budget() {
-        for failure in ["guard", "fee", "resolution"] {
+    fn fee_and_resolution_failures_are_observable_without_drawing_budget() {
+        for failure in ["fee", "resolution"] {
             let fx = Fixture::new(&[100_000]);
             let token = fx.grant(50_000, 5_000);
             let id = fx.create(&token, "pay", 10_000).id;
-            match failure {
-                "guard" => std::fs::remove_file(fx.mockdata.join("guard.json")).unwrap(),
-                "fee" => std::fs::write(fx.mockdata.join("fees.json"), "invalid").unwrap(),
-                _ => {}
+            if failure == "fee" {
+                std::fs::write(fx.mockdata.join("fees.json"), "invalid").unwrap();
             }
             assert!(
                 stage(

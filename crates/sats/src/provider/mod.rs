@@ -1,25 +1,17 @@
-//! Chain providers and asset guards.
+//! Chain providers.
 //!
-//! Each network makes two choices, both in `[<network>]` config:
-//!
-//! - **Chain data** (`chain`): exactly one source serves sync, fee
-//!   estimates, and broadcast — the public mempool.space Esplora (the
-//!   default), Subfrost, or a configured Esplora server.
-//! - **Asset protection** (`protect_assets`): Subfrost's ord and Alkanes
-//!   indexes, asked before every send which outputs carry assets. Never on
-//!   unless a human turns it on: sats ships no default indexer.
-//!
+//! Each network has exactly one chain source, chosen by `[<network>]
+//! chain`: the public mempool.space Esplora (the default), Subfrost, or a
+//! configured Esplora server. It serves sync, fee estimates, and broadcast.
 //! Alkanes views come from Subfrost whenever it is set up for the network.
 //! Drivers are audited enums, not a plugin surface, and `sats-core` never
-//! sees any of this: it receives only facts (outpoints to avoid).
+//! sees any of this.
 //!
 //! Resolution is pure config work (no network I/O). A `--provider`
-//! override replaces only the chain source for one invocation; asset
-//! protection stays as configured.
+//! override replaces the chain source for one invocation.
 
 pub mod error;
 pub mod esplora;
-pub mod guards;
 pub mod mock;
 pub mod subfrost;
 
@@ -31,7 +23,6 @@ use crate::config::{ChainChoice, Config, network_name};
 use crate::walletd::WalletCtx;
 
 pub use error::ProviderError;
-pub use guards::{GuardReport, UtxoGuard};
 
 use esplora::EsploraProvider;
 use mock::MockProvider;
@@ -137,8 +128,6 @@ pub struct Endpoint {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Overview {
     pub chain: Endpoint,
-    /// `None` while asset protection is off.
-    pub protection: Option<Endpoint>,
     /// `None` while Subfrost is not set up for the network.
     pub alkanes: Option<Endpoint>,
 }
@@ -151,7 +140,7 @@ pub enum ChainSource {
     Mock(MockProvider),
 }
 
-/// The indexer behind asset protection and Alkanes views.
+/// The indexer behind Alkanes views.
 #[derive(Debug, Clone)]
 pub enum IndexSource {
     Subfrost(SubfrostClient),
@@ -167,7 +156,6 @@ pub struct Services {
     fees: ChainSource,
     broadcast: ChainSource,
     index: Option<IndexSource>,
-    guards: Vec<UtxoGuard>,
 }
 
 /// The resolved choices before they become services.
@@ -175,7 +163,6 @@ struct Plan {
     fee_target_blocks: u16,
     chain: (ChainSource, Endpoint),
     index: Option<(IndexSource, Endpoint)>,
-    protect: bool,
 }
 
 /// Resolve the services for `network` from config and an optional CLI
@@ -187,14 +174,6 @@ pub fn resolve(
     network: Network,
 ) -> Result<Services, ProviderError> {
     let plan = plan(config, cli, network)?;
-    let guards = match (&plan.index, plan.protect) {
-        (Some((IndexSource::Subfrost(c), _)), true) => vec![
-            UtxoGuard::SubfrostOrd(c.clone()),
-            UtxoGuard::SubfrostAlkanes(c.clone()),
-        ],
-        (Some((IndexSource::Mock(m), _)), true) => vec![UtxoGuard::Mock(m.clone())],
-        _ => Vec::new(),
-    };
     let sync = plan.chain.0;
     // Test seam, mock only: hand one role to a real Esplora endpoint so
     // integration tests reach the HTTP transport behind a deterministic
@@ -214,7 +193,6 @@ pub fn resolve(
         fees,
         broadcast,
         index: plan.index.map(|(source, _)| source),
-        guards,
     })
 }
 
@@ -226,11 +204,9 @@ pub fn overview(
     network: Network,
 ) -> Result<Overview, ProviderError> {
     let plan = plan(config, cli, network)?;
-    let alkanes = plan.index.map(|(_, endpoint)| endpoint);
     Ok(Overview {
         chain: plan.chain.1,
-        protection: if plan.protect { alkanes.clone() } else { None },
-        alkanes,
+        alkanes: plan.index.map(|(_, endpoint)| endpoint),
     })
 }
 
@@ -261,18 +237,10 @@ fn plan(
         .map_err(setup)?,
         None => configured_chain(config, network, index.as_ref()).map_err(setup)?,
     };
-    if net.protect_assets && index.is_none() {
-        return Err(setup(
-            "asset protection is on, but Subfrost isn't set up for this network — \
-             run `sats providers add subfrost`, or `sats providers protect off`"
-                .into(),
-        ));
-    }
     Ok(Plan {
         fee_target_blocks,
         chain,
         index,
-        protect: net.protect_assets,
     })
 }
 
@@ -435,14 +403,6 @@ impl Services {
         }
     }
 
-    /// Confirm the asset indexer answers and serves this network.
-    pub fn check_index(&self) -> Result<(), ProviderError> {
-        match self.index()? {
-            IndexSource::Subfrost(c) => c.check_network(self.network),
-            IndexSource::Mock(_) => Ok(()),
-        }
-    }
-
     /// Sync the wallet: a full scan on first touch, incremental after.
     /// Validates the provider serves the wallet's network first.
     pub fn sync_wallet(&self, ctx: &mut WalletCtx) -> Result<(), ProviderError> {
@@ -526,10 +486,6 @@ impl Services {
         Ok(txid)
     }
 
-    pub fn has_guards(&self) -> bool {
-        !self.guards.is_empty()
-    }
-
     /// Contract bytecode for an alkane id. Validates the endpoint's
     /// network before trusting its answer.
     pub fn alkanes_bytecode(&self, block: u128, tx: u128) -> Result<Vec<u8>, ProviderError> {
@@ -557,15 +513,6 @@ impl Services {
             }
             IndexSource::Mock(m) => m.alkanes_simulate(),
         }
-    }
-
-    /// Ask every configured guard which of these outpoints are protected.
-    /// Fail-closed: any guard erroring errors the whole query.
-    pub fn protected_outpoints(
-        &self,
-        outpoints: &[sats_core::bitcoin::OutPoint],
-    ) -> Result<GuardReport, ProviderError> {
-        guards::protected_outpoints(&self.guards, outpoints)
     }
 }
 
@@ -662,10 +609,8 @@ mod tests {
         assert_eq!(signet.chain.provider, "mempool");
         assert_eq!(signet.chain.url, "https://mempool.space");
         assert_eq!(signet.chain.source, Source::Default);
-        assert_eq!(signet.protection, None, "no guard is ever on by default");
         assert_eq!(signet.alkanes, None);
         let services = resolve(&config, None, Network::Signet).unwrap();
-        assert!(!services.has_guards());
         assert_eq!(services.fee_target_blocks, 2);
         // The display shows the origin; the transport gets the full path.
         match &services.sync {
@@ -754,32 +699,16 @@ mod tests {
     }
 
     #[test]
-    fn asset_protection_is_explicit_and_fails_closed_without_subfrost() {
-        let mut config = with_key("k");
-        let services = resolve(&config, None, Network::Signet).unwrap();
-        assert!(!services.has_guards(), "a saved key enables no guard");
-
-        config.signet.protect_assets = true;
-        let services = resolve(&config, None, Network::Signet).unwrap();
-        let kinds: Vec<_> = services.guards.iter().map(UtxoGuard::kind).collect();
-        assert_eq!(kinds, ["ord", "alkanes"]);
-        // Protection is independent of where chain data comes from.
-        assert!(matches!(services.sync, ChainSource::Esplora(_)));
+    fn a_saved_key_changes_no_chain_source() {
+        let config = with_key("k");
         let view = overview(&config, None, Network::Signet).unwrap();
         assert_eq!(view.chain.provider, "mempool");
-        assert_eq!(view.protection.unwrap().provider, "subfrost");
-
-        // Protection on with no Subfrost refuses rather than running
-        // unprotected.
-        config.subfrost = None;
-        let reason = setup_reason(resolve(&config, None, Network::Signet).unwrap_err());
-        assert!(reason.contains("asset protection is on"), "{reason}");
+        assert_eq!(view.alkanes.unwrap().provider, "subfrost");
     }
 
     #[test]
     fn an_override_replaces_only_the_chain_source() {
         let mut config = with_key("SAVEDKEY");
-        config.signet.protect_assets = true;
         config.signet.esplora = Some(EsploraConfig {
             url: RedactedUrl("https://bitcoin.example/api".into()),
             bearer: Some("t".into()),
@@ -798,8 +727,11 @@ mod tests {
             AuthKind::None,
             "the saved key never follows an override"
         );
-        let services = resolve(&config, Some(&cli), Network::Signet).unwrap();
-        assert!(services.has_guards(), "protection survives an override");
+        assert_eq!(
+            view.alkanes.unwrap().auth,
+            AuthKind::ApiKey,
+            "views stay on the configured Subfrost"
+        );
     }
 
     #[test]
@@ -813,11 +745,9 @@ mod tests {
             bearer: None,
         });
         config.signet.subfrost_url = Some(RedactedUrl(url));
-        config.signet.protect_assets = true;
         let services = resolve(&config, None, Network::Signet).unwrap();
         assert!(matches!(services.sync, ChainSource::Mock(_)));
         assert!(matches!(services.index, Some(IndexSource::Mock(_))));
-        assert_eq!(services.guards.len(), 1);
 
         std::fs::write(dir.path().join("broadcast-via"), "http://127.0.0.1:9").unwrap();
         let services = resolve(&config, None, Network::Signet).unwrap();

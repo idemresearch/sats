@@ -20,7 +20,7 @@ Primary references:
 - [Security](docs/security.md): key, grant, signing, and provider invariants.
 - [CLI](docs/cli.md): current user-facing commands and configuration.
 - [MCP](docs/mcp.md): agent tool contracts and denial semantics.
-- [Providers](docs/providers.md): chain sources and asset protection.
+- [Providers](docs/providers.md): chain sources and Subfrost setup.
 - [Development](docs/development.md): local workflow and verification.
 
 ## Product contract
@@ -46,7 +46,7 @@ Prepared spends are PSBTs. Normal sends keep them in memory; an explicit
 export writes the unsigned PSBT to a user-named file artifact. Once signed,
 durable state contains private raw transaction hex rather than a signed
 PSBT. The persisted BDK wallet is watch-only. Human sends and approved
-agent requests share validation, sync, protection, fee estimation, and
+agent requests share validation, sync, the dust exclusion, fee estimation, and
 preparation. There is no autonomous agent spend mode and no resident
 unlocked signer. See `docs/direction.md`.
 
@@ -89,7 +89,7 @@ advice for exactly that file.
 | `crates/sats/src/main.rs` | Composition and command dispatch only |
 | `crates/sats/src/cli.rs` | Clap command and flag definitions |
 | `crates/sats/src/commands/` | Human CLI workflows and rendering |
-| `crates/sats/src/provider/` | Native chain providers, per-network resolution, and guards |
+| `crates/sats/src/provider/` | Native chain providers and per-network resolution |
 | `crates/sats/src/store.rs` | Paths, atomic files, permissions, finalized transactions, grants, requests, and the event log |
 | `crates/sats/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
 | `crates/sats/src/request/` | The native request workflow: create, dismiss, reconcile, and the human-authorized executor |
@@ -219,21 +219,20 @@ and rendering belong to callers.
 - The agent never retries to make a payment happen: after filing it only
   observes. Do not add an agent-facing tool that approves, unlocks,
   signs, executes, or broadcasts.
-- Agents must not receive `--allow-dust`, `--no-guards`, password, seed, or
+- Agents must not receive `--allow-dust`, password, seed, or
   raw signing authority outside the grant contract.
 
 ### Providers and UTXO safety
 
 - Planning must not continue on stale chain state after sync failure.
-- Guards may only remove spendable candidates; they never authorize spends.
-- Union every configured guard result with the local dust heuristic.
-- A configured guard fails closed unless a human explicitly uses the
-  per-invocation CLI bypass.
-- Do not ship or silently enable a default third-party asset guard, and never
-  turn asset protection off as a side effect of another change.
+- The local dust heuristic (546/330 sats) excludes candidates before coin
+  selection; only a human's per-invocation `--allow-dust` bypasses it.
+- sats ships no third-party asset guard. Never add one that can add
+  candidates or authorize a spend, that is enabled by default, or that
+  doesn't fail closed.
 - Each network has exactly one chain source for sync, fees, and broadcast.
-  A `--provider` override replaces only that source; configured protection
-  still applies, and a saved credential never follows an override URL.
+  A `--provider` override replaces only that source, and a saved credential
+  never follows an override URL.
 - Validate that a provider serves the selected Bitcoin network.
 - Treat authentication material as secret in errors and debug output. Keep
   Subfrost path credentials behind its redacted display URL, never print

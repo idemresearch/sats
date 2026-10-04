@@ -5,7 +5,7 @@ import { readDocsIndex } from "@/lib/docs";
 export const metadata: Metadata = {
   title: "docs",
   description:
-    "Documentation for the sats Bitcoin wallet: CLI reference, MCP agent grants, providers and asset protection, and the security and trust model.",
+    "Documentation for the sats Bitcoin wallet: CLI reference, MCP agent grants, providers, and the security and trust model.",
 };
 
 export default function DocsIndex() {

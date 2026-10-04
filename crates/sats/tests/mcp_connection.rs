@@ -325,9 +325,10 @@ fn check_connection(
     };
     // Config-selected network must be pinned just as an explicit override of
     // a conflicting configured network is.
-    // Credentialed, and unresolvable: protection is on with no Subfrost.
+    // Credentialed, and unresolvable: chain data is set to Subfrost, which
+    // isn't set up.
     let providers = format!(
-        "[{network}]\nchain = \"esplora\"\nprotect_assets = true\n\n[{network}.esplora]\nurl = \"http://127.0.0.1:1/private-provider-secret\"\nbearer = \"private-bearer-secret\"\n"
+        "[{network}]\nchain = \"subfrost\"\n\n[{network}.esplora]\nurl = \"http://127.0.0.1:1/private-provider-secret\"\nbearer = \"private-bearer-secret\"\n"
     );
     let configured_network = if directory.is_some() {
         "mainnet"

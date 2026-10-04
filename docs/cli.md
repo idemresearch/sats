@@ -27,10 +27,9 @@ exact options in your installed version.
 | `sats agent dismiss <ID>` | Decline a request |
 | `sats agent log [--limit N] [--request ID]` | Show the agent event log |
 | `sats agent serve <name>` | Run the MCP server for an agent ([MCP](mcp.md)) |
-| `sats providers [list]` | Show where chain data, asset protection, and Alkanes views come from |
+| `sats providers [list]` | Show where chain data and Alkanes views come from |
 | `sats providers add <subfrost\|esplora>` | Add a provider, asking for its key, and use it for chain data |
 | `sats providers use <mempool\|subfrost\|esplora>` | Switch where chain data comes from |
-| `sats providers protect <on\|off>` | Turn asset protection on or off |
 | `sats providers remove <subfrost\|esplora>` | Remove a provider and its stored key |
 | `sats alkanes inspect <BLOCK:TX>` | Show a contract's bytecode hash (experimental) |
 | `sats alkanes simulate <BLOCK:TX> <INPUTS...>` | Simulate a contract call (experimental) |
@@ -40,7 +39,7 @@ exact options in your installed version.
 | Option | Meaning |
 |---|---|
 | `--network <NET>` | `mainnet`, `signet`, `testnet4`, or `regtest`. Overrides the config. |
-| `--provider <KIND=URL>` | Replace the chain source for this run; asset protection stays. See [Providers](providers.md#one-off-overrides). |
+| `--provider <KIND=URL>` | Replace the chain source for this run. See [Providers](providers.md#one-off-overrides). |
 | `--json` | Machine-readable output, where supported |
 
 | Variable | Meaning |
@@ -87,7 +86,7 @@ chain on first sync.
 ## Sending
 
 ```sh
-sats send <address> <amount> [--fee-rate <SAT_VB>] [--allow-dust] [--no-guards]
+sats send <address> <amount> [--fee-rate <SAT_VB>] [--allow-dust]
           [--yes | --dry-run | --export-psbt <FILE>]
 ```
 
@@ -96,16 +95,13 @@ Every send, human or agent, takes the same path:
 1. Validate the address for the selected network.
 2. Sync the wallet. An empty wallet stops here with funding guidance.
 3. Exclude 546- and 330-sat outputs, which may carry inscriptions, unless
-   you pass `--allow-dust`.
-4. Exclude outputs that configured asset guards protect, unless you pass
-   `--no-guards`. If every output is protected, stop and say so.
-5. Estimate the fee for the configured target (2 blocks by default), unless
+   you pass `--allow-dust`. If every output is excluded, stop and say so.
+4. Estimate the fee for the configured target (2 blocks by default), unless
    you pass `--fee-rate`.
-6. Build the unsigned PSBT in memory.
+5. Build the unsigned PSBT in memory.
 
-A sync failure or an unavailable guard stops the send. `--allow-dust` and
-`--no-guards` apply only to that one command and are never available to
-agents.
+A sync failure stops the send. `--allow-dust` applies only to that one command
+and is never available to agents.
 
 | Mode | Behavior |
 |---|---|
@@ -327,9 +323,8 @@ network = "signet"        # default network
 fee_target = 1008         # confirmation target in blocks (1–1008, default 2)
 ```
 
-Each network's chain source and asset protection live under `[<network>]`
-too, written by `sats providers` or by hand. See
-[Providers and asset protection](providers.md#configuration). sats writes
+Each network's chain source lives under `[<network>]` too, written by
+`sats providers` or by hand. See [Providers](providers.md#configuration). sats writes
 `config.toml` owner-only, because it can hold provider API keys.
 
 ## Exit behavior

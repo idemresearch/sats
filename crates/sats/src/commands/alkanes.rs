@@ -147,20 +147,15 @@ pub fn execute(
         .map_err(|e| anyhow!("{e} — refusing to plan on stale state"))?;
 
     // Exclusions exactly as the shared send preparation — the dust
-    // heuristic unions with every configured guard, and this command has
-    // no escape flags at all.
+    // heuristic, with no escape flag at all.
     let utxos: Vec<(OutPoint, Amount)> = ctx
         .wallet
         .list_unspent()
         .map(|u| (u.outpoint, u.txout.value))
         .collect();
-    let mut unspendable: BTreeSet<OutPoint> = engine::dust_suspects(utxos.iter().copied())
+    let unspendable: BTreeSet<OutPoint> = engine::dust_suspects(utxos.iter().copied())
         .into_iter()
         .collect();
-    if services.has_guards() {
-        let outpoints: Vec<OutPoint> = utxos.iter().map(|(op, _)| *op).collect();
-        unspendable.extend(services.protected_outpoints(&outpoints)?.protected);
-    }
     let unspendable: Vec<OutPoint> = unspendable.into_iter().collect();
 
     let rate = match fee_rate {

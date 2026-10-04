@@ -1,11 +1,9 @@
-//! `sats providers`: where a network's chain data comes from, and whether
-//! its assets are protected.
+//! `sats providers`: where a network's chain data comes from.
 //!
 //! Every change is a human trust decision written to the config file. A
 //! change that points at an endpoint is resolved and checked against the
 //! network before it is saved, so a typo or wrong key never becomes the
-//! provider the next send uses. Asset protection is turned on only by an
-//! explicit flag, answer, or `protect on`, and never off as a side effect.
+//! provider the next send uses.
 
 use std::io::IsTerminal;
 
@@ -13,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use sats_core::bitcoin::Network;
 use zeroize::Zeroizing;
 
-use crate::cli::{AddArgs, ChainArg, ProviderArg, Toggle};
+use crate::cli::{AddArgs, ChainArg, ProviderArg};
 use crate::config::{
     ChainChoice, Config, EsploraConfig, RedactedUrl, SubfrostConfig, network_name,
 };
@@ -57,24 +55,8 @@ pub fn add(
                 net.subfrost_url = Some(RedactedUrl(url.clone()));
             }
             net.chain = Some(ChainChoice::Subfrost);
-            if args.protect
-                || (!net.protect_assets
-                    && !json
-                    && std::io::stdin().is_terminal()
-                    && ui::confirm(
-                        "also turn on asset protection (Subfrost checks every output before a send)?",
-                        false,
-                    )?)
-            {
-                net.protect_assets = true;
-            }
         }
         ProviderArg::Esplora => {
-            if args.protect {
-                bail!(
-                    "--protect is a Subfrost option: Esplora can't tell which outputs carry assets"
-                );
-            }
             let url = args
                 .url
                 .clone()
@@ -132,55 +114,6 @@ pub fn use_chain(
     show(&config, None, network, json)
 }
 
-pub fn protect(
-    store: &Store,
-    mut config: Config,
-    network: Network,
-    state: Toggle,
-    json: bool,
-) -> Result<()> {
-    let net_name = network_name(network);
-    match state {
-        Toggle::On => {
-            // Name the missing indexer; any other problem with the setup is
-            // reported as itself.
-            let before = provider::overview(&config, None, network)
-                .context("asset protection was not turned on")?;
-            if before.alkanes.is_none() {
-                bail!(
-                    "asset protection needs Subfrost on {net_name} — run `sats providers add subfrost` first"
-                );
-            }
-            config.net_mut(network).protect_assets = true;
-            let services = provider::resolve(&config, None, network)?;
-            let status = ui::StatusLine::start(&format!("checking Subfrost on {net_name}…"));
-            let checked = services.check_index();
-            status.finish();
-            checked.context("asset protection was not turned on")?;
-            config.save(store)?;
-            if !json {
-                ui::ok(&format!("asset protection on  {net_name}"));
-                ui::dim(
-                    "before every send, Subfrost is asked which outputs carry inscriptions, runes, or Alkanes;\n\
-                     if it can't answer, the send stops (a human can skip the check once with --no-guards)",
-                );
-                println!();
-            }
-        }
-        Toggle::Off => {
-            config.net_mut(network).protect_assets = false;
-            config.save(store)?;
-            if !json {
-                ui::warn(&format!(
-                    "asset protection off  {net_name} — only the 546/330-sat postage check protects inscriptions"
-                ));
-                println!();
-            }
-        }
-    }
-    show(&config, None, network, json)
-}
-
 pub fn remove(
     store: &Store,
     mut config: Config,
@@ -198,19 +131,6 @@ pub fn remove(
                     .any(|(_, net)| net.subfrost_url.is_some());
             if !set_up {
                 bail!("Subfrost isn't set up");
-            }
-            let protected: Vec<&str> = config
-                .networks()
-                .iter()
-                .filter(|(_, net)| net.protect_assets)
-                .map(|(name, _)| *name)
-                .collect();
-            if let Some(first) = protected.first() {
-                bail!(
-                    "asset protection uses Subfrost on {} — turn it off first: \
-                     sats --network {first} providers protect off",
-                    protected.join(", ")
-                );
             }
             config.subfrost = None;
             for net in [
@@ -257,8 +177,7 @@ pub fn remove(
 }
 
 /// Resolve the changed configuration, check the chain source against the
-/// network (and the indexer, when protection is on and it differs), then
-/// save. Nothing is written unless every check passes.
+/// network, then save. Nothing is written unless the check passes.
 fn check_and_save(
     store: &Store,
     config: &Config,
@@ -268,10 +187,7 @@ fn check_and_save(
     let net_name = network_name(network);
     let services = provider::resolve(config, None, network).context("nothing was saved")?;
     let status = ui::StatusLine::start(&format!("checking {net_name} chain data…"));
-    let mut checked = services.check_chain();
-    if checked.is_ok() && config.net(network).protect_assets {
-        checked = services.check_index();
-    }
+    let checked = services.check_chain();
     status.finish();
     let hint = if credential {
         "nothing was saved — check the URL and key, then try again"
@@ -350,18 +266,6 @@ fn show(
             format!("{}{note}", chain.provider),
             endpoint_detail(chain),
         ],
-        match &view.protection {
-            Some(endpoint) => [
-                "Asset protection".into(),
-                "on".into(),
-                format!("{} checks every output before a send", endpoint.provider),
-            ],
-            None => [
-                "Asset protection".into(),
-                "off".into(),
-                "only the 546/330-sat postage check".into(),
-            ],
-        },
         match &view.alkanes {
             Some(endpoint) => [
                 "Alkanes views".into(),
@@ -380,10 +284,8 @@ fn show(
             " --url URL"
         };
         ui::dim(&format!(
-            "add Subfrost for asset protection and Alkanes views: sats providers add subfrost{url}"
+            "add Subfrost for chain data and Alkanes views: sats providers add subfrost{url}"
         ));
-    } else if view.protection.is_none() {
-        ui::dim("turn on asset protection: sats providers protect on");
     }
     Ok(())
 }
@@ -409,7 +311,6 @@ fn overview_json(net_name: &str, view: &Overview) -> serde_json::Value {
     serde_json::json!({
         "network": net_name,
         "chain": endpoint_json(&view.chain),
-        "asset_protection": view.protection.as_ref().map(endpoint_json),
         "alkanes_views": view.alkanes.as_ref().map(endpoint_json),
     })
 }
@@ -425,11 +326,6 @@ fn configured(config: &Config, network: Network) {
     let redact = crate::provider::error::redact_url;
     let rows = [
         ["Chain data".to_string(), chain, String::new()],
-        [
-            "Asset protection".into(),
-            if net.protect_assets { "on" } else { "off" }.into(),
-            String::new(),
-        ],
         [
             "Subfrost".into(),
             if config.subfrost.is_some() {
