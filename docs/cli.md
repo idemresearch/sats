@@ -294,9 +294,10 @@ sats alkanes simulate 2:1 77      # advisory call simulation
 `inspect` prints the code hash so you can compare it with a build you trust.
 `simulate` shows the recognized fields (status, gas, asset transfers) next to
 the raw result. It is display only, never authorization. Both commands are
-read-only and check the endpoint's network first. The provider's JSON-RPC
-dialect hasn't been verified against a live endpoint. Default v0.0.1 builds
-don't include Alkanes execution.
+read-only and check the endpoint's network first. `inspect` reads bytecode
+through the indexer's `getbytecode` view, checked against Subfrost's signet
+endpoint; `simulate`'s request format hasn't been verified against a live
+endpoint yet. Default v0.0.1 builds don't include Alkanes execution.
 
 ## JSON output
 

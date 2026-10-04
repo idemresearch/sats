@@ -45,10 +45,11 @@ mod dialect {
     pub const BROADCAST: &str = "btc_sendrawtransaction";
     pub const ORD_OUTPUT: &str = "ord_output";
     pub const ALKANES_BY_OUTPOINT: &str = "alkanes_protorunesbyoutpoint";
-    /// Contract bytecode by alkane id. Params: one `{block, tx}` object
-    /// with decimal-string values (u128s exceed JSON number range).
-    /// Result: hex string.
-    pub const ALKANES_GET_BYTECODE: &str = "alkanes_getbytecode";
+    /// The indexer's view functions. Params: `[view name, "0x" + hex of the
+    /// protobuf request, "latest"]`. Result: hex string. The gateway's
+    /// `alkanes_getbytecode` shortcut drops the alkane id (the indexer
+    /// panics unwrapping it), so bytecode is fetched through this view.
+    pub const METASHREW_VIEW: &str = "metashrew_view";
     /// Simulate a contract call. Params: one
     /// `{target: {block, tx}, inputs: [...]}` object, decimal strings.
     /// Result: opaque JSON, displayed rather than trusted.
@@ -225,10 +226,15 @@ impl SubfrostClient {
     /// Contract bytecode for an alkane id, decoded from the endpoint's
     /// hex result.
     pub fn alkanes_bytecode(&self, block: u128, tx: u128) -> Result<Vec<u8>, ProviderError> {
+        let request = sats_alkanes::view::bytecode_request(block, tx);
         let value: serde_json::Value = self
             .call(
-                dialect::ALKANES_GET_BYTECODE,
-                serde_json::json!([{ "block": block.to_string(), "tx": tx.to_string() }]),
+                dialect::METASHREW_VIEW,
+                serde_json::json!([
+                    "getbytecode",
+                    format!("0x{}", hex::encode(request)),
+                    "latest"
+                ]),
             )
             .map_err(|m| self.view_err(m))?;
         parse_bytecode_result(&value).map_err(|m| self.view_err(m))
@@ -1311,6 +1317,23 @@ mod tests {
                     .contains("x-subfrost-api-key: headersecret")
             );
         }
+    }
+
+    /// The gateway's `alkanes_getbytecode` shortcut drops the id; the view
+    /// takes the protobuf request that a live signet indexer answered.
+    #[test]
+    fn bytecode_is_fetched_through_the_indexer_view() {
+        let (url, requests) = local_server(vec![rpc_response(serde_json::json!("0x0061736d"))]);
+        let client = SubfrostClient::new(url, None);
+        assert_eq!(client.alkanes_bytecode(2, 0).unwrap(), b"\0asm");
+        let request = requests.recv().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["method"], "metashrew_view");
+        assert_eq!(
+            body["params"],
+            serde_json::json!(["getbytecode", "0x0a060a0208021200", "latest"])
+        );
     }
 
     #[test]

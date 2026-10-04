@@ -22,3 +22,4 @@ pub mod id;
 pub mod inspect;
 pub mod protostone;
 pub mod varint;
+pub mod view;
