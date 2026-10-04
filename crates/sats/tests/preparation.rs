@@ -32,7 +32,7 @@ impl Fixture {
                 (503, "fees unavailable".into())
             })
         });
-        // Mock chain data with fee estimates handed to the local Esplora.
+        // Mock Bitcoin data with fee estimates handed to the local Esplora.
         fs::write(chain.join("fees-via"), &fees.url).unwrap();
         fs::write(
             dir.path().join("config.toml"),

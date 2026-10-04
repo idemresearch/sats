@@ -91,10 +91,11 @@ fn list_shows_the_defaults_and_how_to_add_subfrost() {
         .arg("providers")
         .assert()
         .success()
-        .stdout(predicate::str::contains("signet providers"))
-        .stdout(predicate::str::contains("mempool (default)"))
-        .stdout(predicate::str::contains("Asset protection").not())
-        .stdout(predicate::str::contains("sats providers add subfrost"));
+        .stdout(predicate::str::contains("Bitcoin  mempool.space (default)"))
+        .stdout(predicate::str::contains(
+            "Alkanes  not set up — sats providers add subfrost",
+        ))
+        .stdout(predicate::str::contains("Asset protection").not());
 
     let out = json_stdout(
         sats(&dir)
@@ -146,7 +147,9 @@ fn add_subfrost_checks_the_key_and_stores_it_privately() {
         .write_stdin(format!("{KEY}\n"))
         .assert()
         .success()
-        .stdout(predicate::str::contains("added subfrost  signet"));
+        .stdout(predicate::str::contains("added subfrost  signet"))
+        .stdout(predicate::str::contains("key saved"))
+        .stdout(predicate::str::contains("Alkanes  Subfrost\n"));
     let output = assert.get_output();
     for stream in [&output.stdout, &output.stderr] {
         assert!(!String::from_utf8_lossy(stream).contains(KEY));
@@ -181,7 +184,7 @@ fn add_subfrost_checks_the_key_and_stores_it_privately() {
 }
 
 #[test]
-fn use_switches_the_one_chain_source() {
+fn use_switches_the_one_bitcoin_source() {
     let dir = TempDir::new().unwrap();
     sats(&dir)
         .args(["providers", "use", "esplora"])
@@ -208,14 +211,16 @@ fn use_switches_the_one_chain_source() {
     assert_eq!(out["chain"]["provider"], "esplora");
     assert_eq!(
         out["alkanes_views"]["provider"], "subfrost",
-        "Subfrost still serves views while another source serves chain data"
+        "Subfrost still serves Alkanes while another source serves Bitcoin data"
     );
 
     sats(&dir)
         .args(["providers", "use", "subfrost"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("signet chain data: subfrost"));
+        .stdout(predicate::str::contains(
+            "signet now gets Bitcoin data from Subfrost",
+        ));
     assert_eq!(overview(&dir)["chain"]["provider"], "subfrost");
     sats(&dir)
         .args(["providers", "use", "esplora"])
@@ -234,7 +239,7 @@ fn an_esplora_token_never_follows_a_new_url() {
         .write_stdin("TOKENSECRET\n")
         .assert()
         .success()
-        .stdout(predicate::str::contains("bearer token"))
+        .stdout(predicate::str::contains("token saved"))
         .stdout(predicate::str::contains("TOKENSECRET").not());
     assert_eq!(overview(&dir)["chain"]["auth"], "bearer");
 
@@ -282,7 +287,7 @@ fn add_refuses_what_it_cannot_use() {
 }
 
 #[test]
-fn removing_subfrost_deletes_the_key_and_reverts_chain_data() {
+fn removing_subfrost_deletes_the_key_and_reverts_bitcoin_data() {
     let dir = TempDir::new().unwrap();
     let (url, _) = fake_subfrost();
     add_subfrost(&dir, &url);
@@ -303,7 +308,7 @@ fn removing_subfrost_deletes_the_key_and_reverts_chain_data() {
         .success()
         .stdout(predicate::str::contains("removed subfrost and its key"))
         .stdout(predicate::str::contains(
-            "signet chain data is back to the default: mempool",
+            "signet Bitcoin data is back to the default: mempool.space",
         ));
     let config = config_text(&dir);
     assert!(!config.contains(KEY));

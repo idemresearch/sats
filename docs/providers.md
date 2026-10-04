@@ -1,7 +1,7 @@
 # Providers
 
-Each network gets its chain data from one provider. You don't need any
-configuration to start.
+Each network gets its Bitcoin data (balance, history, fee estimates, and
+sending) from one provider. You don't need any configuration to start.
 
 | Provider | Connect with | Command |
 |---|---|---|
@@ -11,25 +11,34 @@ configuration to start.
 
 ```sh
 sats providers                    # what this network uses (same as `sats providers list`)
-sats providers add subfrost       # save and check your key, use Subfrost for chain data
-sats providers use mempool        # switch chain data: mempool, subfrost, or esplora
+sats providers add subfrost       # save and check your key, use Subfrost for Bitcoin data
+sats providers use mempool        # switch Bitcoin data: mempool, subfrost, or esplora
 sats providers remove subfrost    # delete the key
 ```
 
 ```text
-signet providers
+signet
 
-Chain data     subfrost  https://signet.subfrost.io  api key
-Alkanes views  subfrost  https://signet.subfrost.io  api key
+Bitcoin  Subfrost · signet.subfrost.io · key saved
+Alkanes  Subfrost
+```
+
+With the default Bitcoin source and no Subfrost:
+
+```text
+signet
+
+Bitcoin  mempool.space (default)
+Alkanes  not set up — sats providers add subfrost
 ```
 
 Every command acts on the active network; `--network` picks another. With
-`--json`, each prints the network's resulting overview: `chain` and
-`alkanes_views`, each an object with `provider`, `url` (the origin only),
+`--json`, each prints the network's resulting overview: `chain` (Bitcoin
+data) and `alkanes_views`, each an object with `provider`, `url` (the origin only),
 `auth` (`none`, `api_key`, or `bearer`), and `source` (`default`, `config`,
 or `override`). `alkanes_views` is `null` until Subfrost is set up.
 
-## Chain data
+## Bitcoin data
 
 Exactly one source serves a network's wallet sync, fee estimates, and
 broadcast.
@@ -40,7 +49,7 @@ broadcast.
 | `subfrost` | Subfrost's mainnet or signet endpoint, or a `--url` you give |
 | `esplora` | The server you add. Regtest defaults to `http://localhost:3002`. |
 
-`sats providers add` makes the added provider the network's chain source, and
+`sats providers add` makes the added provider the network's Bitcoin source, and
 `sats providers use` switches between them. Both check the endpoint's genesis
 block, and so its network, before saving. If the check fails, nothing is
 saved.
@@ -53,10 +62,10 @@ accident. This check is local and needs no provider. It is a heuristic:
 assets on other values aren't detected. A human can pass `--allow-dust` to
 include these outputs for one send. Agents never can.
 
-## Alkanes views
+## Alkanes
 
 `sats alkanes` uses Subfrost whenever it is set up for the network, whatever
-the chain source. Views are read-only and never authorize anything.
+the Bitcoin source. Views are read-only and never authorize anything.
 `sats alkanes` encodes only calls it builds itself (in the `sats-alkanes`
 crate) and displays view results without trusting them.
 
@@ -84,7 +93,7 @@ scripts on each of the receive and change keychains.
 ## Removing a provider
 
 `sats providers remove subfrost` deletes the key and every Subfrost endpoint
-setting. Any network that used Subfrost for chain data goes back to its
+setting. Any network that used Subfrost for Bitcoin data goes back to its
 default, and the command says so. `sats providers remove esplora` removes the
 active network's Esplora server, and the network goes back to its default if
 it was using it.
@@ -101,7 +110,7 @@ network = "signet"
 api_key = "replace-with-key"        # shared by every network
 
 [signet]
-chain = "subfrost"                  # mempool (default), subfrost, or esplora
+chain = "subfrost"                  # Bitcoin data: mempool (default), subfrost, or esplora
 fee_target = 1008                   # confirmation target in blocks
 
 [mainnet]
@@ -132,7 +141,7 @@ run `sats providers add` again.
 
 A choice the network can't serve, such as `chain = "esplora"` with no URL or
 `chain = "subfrost"` with no Subfrost set up, is an error for every command
-that needs the chain. Local commands keep working while you fix it, and
+that needs Bitcoin data. Local commands keep working while you fix it, and
 `sats providers` shows the settings as written next to the error.
 
 ### Fee targets
@@ -150,8 +159,8 @@ sats --provider esplora=https://mempool.space/signet/api balance
 sats --provider subfrost=https://signet.subfrost.io/v4/jsonrpc balance
 ```
 
-`--provider KIND=URL` replaces the chain source for one command, and can be
-given once. Alkanes views stay as configured. The saved Subfrost key is never
+`--provider KIND=URL` replaces the Bitcoin source for one command, and can be
+given once. Alkanes stays as configured. The saved Subfrost key is never
 sent to an override URL.
 
 ## Failure behavior

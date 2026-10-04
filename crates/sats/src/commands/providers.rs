@@ -1,4 +1,4 @@
-//! `sats providers`: where a network's chain data comes from.
+//! `sats providers`: where a network's Bitcoin data comes from.
 //!
 //! Every change is a human trust decision written to the config file. A
 //! change that points at an endpoint is resolved and checked against the
@@ -105,9 +105,9 @@ pub fn use_chain(
     check_and_save(store, &config, network, false)?;
     if !json {
         ui::ok(&format!(
-            "{} chain data: {}",
+            "{} now gets Bitcoin data from {}",
             network_name(network),
-            choice.as_str()
+            display_name(choice.as_str())
         ));
         println!();
     }
@@ -166,9 +166,9 @@ pub fn remove(
         });
         for net in reverted {
             ui::warn(&format!(
-                "{} chain data is back to the default: {}",
+                "{} Bitcoin data is back to the default: {}",
                 network_name(net),
-                ChainChoice::default_for(net).as_str()
+                display_name(ChainChoice::default_for(net).as_str())
             ));
         }
         println!();
@@ -186,7 +186,7 @@ fn check_and_save(
 ) -> Result<()> {
     let net_name = network_name(network);
     let services = provider::resolve(config, None, network).context("nothing was saved")?;
-    let status = ui::StatusLine::start(&format!("checking {net_name} chain data…"));
+    let status = ui::StatusLine::start(&format!("checking the {net_name} endpoint…"));
     let checked = services.check_chain();
     status.finish();
     let hint = if credential {
@@ -239,7 +239,7 @@ fn show(
         Ok(view) => view,
         Err(err) => {
             if !json {
-                println!("{net_name} providers, as configured");
+                println!("{net_name}, as configured");
                 println!();
                 configured(config, network);
                 println!();
@@ -252,50 +252,63 @@ fn show(
         return Ok(());
     }
 
-    println!("{net_name} providers");
+    println!("{net_name}");
     println!();
-    let chain = &view.chain;
-    let note = match chain.source {
-        Source::Default => " (default)",
-        Source::Override => " (--provider)",
-        Source::Config => "",
+    let alkanes = match &view.alkanes {
+        // Same endpoint as the row above: its details are already shown.
+        Some(endpoint)
+            if endpoint.provider == view.chain.provider && endpoint.url == view.chain.url =>
+        {
+            display_name(endpoint.provider).to_string()
+        }
+        Some(endpoint) => describe(endpoint),
+        None => {
+            let url = if provider::subfrost::default_url(network).is_some() {
+                ""
+            } else {
+                " --url URL"
+            };
+            format!("not set up — sats providers add subfrost{url}")
+        }
     };
-    let rows = [
-        [
-            "Chain data".to_string(),
-            format!("{}{note}", chain.provider),
-            endpoint_detail(chain),
-        ],
-        match &view.alkanes {
-            Some(endpoint) => [
-                "Alkanes views".into(),
-                endpoint.provider.into(),
-                endpoint_detail(endpoint),
-            ],
-            None => ["Alkanes views".into(), "—".into(), "needs Subfrost".into()],
-        },
-    ];
-    table(&rows);
-    println!();
-    if view.alkanes.is_none() {
-        let url = if provider::subfrost::default_url(network).is_some() {
-            ""
-        } else {
-            " --url URL"
-        };
-        ui::dim(&format!(
-            "add Subfrost for chain data and Alkanes views: sats providers add subfrost{url}"
-        ));
-    }
+    table(&[
+        ["Bitcoin".to_string(), describe(&view.chain)],
+        ["Alkanes".to_string(), alkanes],
+    ]);
     Ok(())
 }
 
-fn endpoint_detail(endpoint: &Endpoint) -> String {
-    match endpoint.auth {
-        provider::AuthKind::None => endpoint.url.clone(),
-        provider::AuthKind::ApiKey => format!("{}  api key", endpoint.url),
-        provider::AuthKind::Bearer => format!("{}  bearer token", endpoint.url),
+/// The name people know a provider by.
+fn display_name(provider: &str) -> &str {
+    match provider {
+        "mempool" => "mempool.space",
+        "subfrost" => "Subfrost",
+        "esplora" => "Esplora",
+        other => other,
     }
+}
+
+/// `Subfrost · signet.subfrost.io · key saved`, `mempool.space (default)`.
+fn describe(endpoint: &Endpoint) -> String {
+    let mut parts = vec![display_name(endpoint.provider).to_string()];
+    if endpoint.provider != "mempool" {
+        let host = endpoint
+            .url
+            .split_once("://")
+            .map_or(endpoint.url.as_str(), |(_, host)| host);
+        parts.push(host.to_string());
+    }
+    match endpoint.auth {
+        provider::AuthKind::None => {}
+        provider::AuthKind::ApiKey => parts.push("key saved".into()),
+        provider::AuthKind::Bearer => parts.push("token saved".into()),
+    }
+    let note = match endpoint.source {
+        Source::Default => " (default)",
+        Source::Override => " (--provider, this run only)",
+        Source::Config => "",
+    };
+    format!("{}{note}", parts.join(" · "))
 }
 
 fn endpoint_json(endpoint: &Endpoint) -> serde_json::Value {
@@ -320,12 +333,15 @@ fn overview_json(net_name: &str, view: &Overview) -> serde_json::Value {
 fn configured(config: &Config, network: Network) {
     let net = config.net(network);
     let chain = match net.chain {
-        Some(choice) => choice.as_str().to_string(),
-        None => format!("{} (default)", ChainChoice::default_for(network).as_str()),
+        Some(choice) => display_name(choice.as_str()).to_string(),
+        None => format!(
+            "{} (default)",
+            display_name(ChainChoice::default_for(network).as_str())
+        ),
     };
     let redact = crate::provider::error::redact_url;
     let rows = [
-        ["Chain data".to_string(), chain, String::new()],
+        ["Bitcoin".to_string(), chain, String::new()],
         [
             "Subfrost".into(),
             if config.subfrost.is_some() {
@@ -356,8 +372,8 @@ fn configured(config: &Config, network: Network) {
     table(&rows);
 }
 
-fn table(rows: &[[String; 3]]) {
-    let mut widths = [0usize; 3];
+fn table<const N: usize>(rows: &[[String; N]]) {
+    let mut widths = [0usize; N];
     for row in rows {
         for (w, cell) in widths.iter_mut().zip(row.iter()) {
             *w = (*w).max(cell.chars().count());

@@ -24,7 +24,7 @@ const PUBLIC_DOCS_INDEX = [
   "",
   "## Configure and trust",
   "",
-  "- [Providers](providers.md): where chain data comes from, and how to set up Subfrost.",
+  "- [Providers](providers.md): where Bitcoin data comes from, and how to set up Subfrost.",
   "- [Security and trust model](security.md): keys, signing, grants, and failure behavior.",
   "",
   "## Under the hood",

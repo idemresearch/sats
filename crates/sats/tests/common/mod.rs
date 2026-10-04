@@ -200,7 +200,7 @@ impl Drop for HttpServer {
 /// What every chain command reports for [`write_unresolvable_providers`].
 pub const UNRESOLVABLE: &str = "no Esplora URL is configured";
 
-/// A configuration that loads but cannot be served: chain data is set to
+/// A configuration that loads but cannot be served: Bitcoin data is set to
 /// Esplora with no URL. Subfrost (Alkanes views) points at a live
 /// listener, kept so tests can also assert no provider was called.
 pub fn write_unresolvable_providers(dir: &TempDir) -> HttpServer {

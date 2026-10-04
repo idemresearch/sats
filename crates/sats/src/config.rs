@@ -26,7 +26,7 @@ pub struct Config {
     pub regtest: NetworkConfig,
 }
 
-/// Where a network's chain data (sync, fee estimates, broadcast) comes
+/// Where a network's Bitcoin data (sync, fee estimates, broadcast) comes
 /// from. Exactly one source per network.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

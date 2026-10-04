@@ -27,9 +27,9 @@ exact options in your installed version.
 | `sats agent dismiss <ID>` | Decline a request |
 | `sats agent log [--limit N] [--request ID]` | Show the agent event log |
 | `sats agent serve <name>` | Run the MCP server for an agent ([MCP](mcp.md)) |
-| `sats providers [list]` | Show where chain data and Alkanes views come from |
-| `sats providers add <subfrost\|esplora>` | Add a provider, asking for its key, and use it for chain data |
-| `sats providers use <mempool\|subfrost\|esplora>` | Switch where chain data comes from |
+| `sats providers [list]` | Show where Bitcoin and Alkanes data come from |
+| `sats providers add <subfrost\|esplora>` | Add a provider, asking for its key, and use it for Bitcoin data |
+| `sats providers use <mempool\|subfrost\|esplora>` | Switch where Bitcoin data comes from |
 | `sats providers remove <subfrost\|esplora>` | Remove a provider and its stored key |
 | `sats alkanes inspect <BLOCK:TX>` | Show a contract's bytecode hash (experimental) |
 | `sats alkanes simulate <BLOCK:TX> <INPUTS...>` | Simulate a contract call (experimental) |
@@ -39,7 +39,7 @@ exact options in your installed version.
 | Option | Meaning |
 |---|---|
 | `--network <NET>` | `mainnet`, `signet`, `testnet4`, or `regtest`. Overrides the config. |
-| `--provider <KIND=URL>` | Replace the chain source for this run. See [Providers](providers.md#one-off-overrides). |
+| `--provider <KIND=URL>` | Replace the Bitcoin data source for this run. See [Providers](providers.md#one-off-overrides). |
 | `--json` | Machine-readable output, where supported |
 
 | Variable | Meaning |
@@ -323,7 +323,7 @@ network = "signet"        # default network
 fee_target = 1008         # confirmation target in blocks (1–1008, default 2)
 ```
 
-Each network's chain source lives under `[<network>]` too, written by
+Each network's Bitcoin data source lives under `[<network>]` too, written by
 `sats providers` or by hand. See [Providers](providers.md#configuration). sats writes
 `config.toml` owner-only, because it can hold provider API keys.
 

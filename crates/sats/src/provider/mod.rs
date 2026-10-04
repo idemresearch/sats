@@ -272,7 +272,7 @@ fn configured_chain(
                 Source::Config,
             ),
             (None, Some(url)) => esplora_chain("esplora", url, None, Source::Default),
-            (None, None) => Err("chain data is set to esplora, but no Esplora URL is \
+            (None, None) => Err("Bitcoin data is set to esplora, but no Esplora URL is \
                  configured — run `sats providers add esplora --url URL`"
                 .into()),
         },
@@ -284,7 +284,7 @@ fn configured_chain(
                 Ok((ChainSource::Mock(m.clone()), endpoint.clone()))
             }
             None => Err(
-                "chain data is set to subfrost, but Subfrost isn't set up for \
+                "Bitcoin data is set to subfrost, but Subfrost isn't set up for \
                  this network — run `sats providers add subfrost`"
                     .into(),
             ),

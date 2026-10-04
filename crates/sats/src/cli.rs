@@ -14,7 +14,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NET")]
     pub network: Option<String>,
 
-    /// Chain data override for this run: --provider esplora=URL or
+    /// Bitcoin data source for this run only: --provider esplora=URL or
     /// --provider subfrost=URL
     #[arg(long, global = true, value_name = "KIND=URL",
           value_parser = crate::provider::parse_cli_provider)]
@@ -103,7 +103,7 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
-    /// Show and choose where chain data comes from
+    /// Show and choose where Bitcoin data comes from
     Providers {
         #[command(subcommand)]
         command: Option<ProvidersCommand>,
@@ -117,14 +117,14 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum ProvidersCommand {
-    /// Show where the active network's chain data and Alkanes views come
+    /// Show where the active network's Bitcoin data and Alkanes data come
     /// from (the default)
     List,
-    /// Add a provider and use it for the active network's chain data:
+    /// Add a provider and use it for the active network's Bitcoin data:
     /// asks for its key (hidden, or one line on stdin) and checks the
     /// endpoint before saving
     Add(AddArgs),
-    /// Choose where the active network's chain data comes from
+    /// Choose where the active network's Bitcoin data comes from
     Use {
         #[arg(value_enum, value_name = "SOURCE")]
         source: ChainArg,
@@ -149,7 +149,7 @@ pub struct AddArgs {
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ProviderArg {
-    /// Subfrost: chain data and Alkanes views (API key)
+    /// Subfrost: Bitcoin and Alkanes data (API key)
     Subfrost,
     /// Your own Esplora server (URL, optional bearer token)
     Esplora,

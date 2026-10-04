@@ -13,7 +13,7 @@ pub enum ProviderError {
         reason: String,
     },
 
-    #[error("Alkanes views on {network} need Subfrost — run `sats providers add subfrost`")]
+    #[error("Alkanes on {network} needs Subfrost — run `sats providers add subfrost`")]
     NoAlkanesView { network: &'static str },
 
     #[error("provider {name:?} ({url}) serves a different network than {expected}")]

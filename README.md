@@ -101,10 +101,10 @@ Signet is the default. `mainnet`, `testnet4`, and `regtest` are available
 with `--network`, and mainnet is always an explicit choice. Each network has
 its own wallet, derived from the same seed.
 
-sats uses mempool.space for chain data unless you choose another provider:
+sats uses mempool.space for Bitcoin data unless you choose another provider:
 `sats providers add subfrost` switches to Subfrost after asking for your API
 key, and `sats providers` shows what each network uses. sats fails closed: it
-won't spend on stale chain data, and by default it never spends 546- or
+won't spend on out-of-date Bitcoin data, and by default it never spends 546- or
 330-sat outputs, which may carry inscriptions. See
 [Providers](docs/providers.md).
 

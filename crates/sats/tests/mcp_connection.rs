@@ -325,7 +325,7 @@ fn check_connection(
     };
     // Config-selected network must be pinned just as an explicit override of
     // a conflicting configured network is.
-    // Credentialed, and unresolvable: chain data is set to Subfrost, which
+    // Credentialed, and unresolvable: Bitcoin data is set to Subfrost, which
     // isn't set up.
     let providers = format!(
         "[{network}]\nchain = \"subfrost\"\n\n[{network}.esplora]\nurl = \"http://127.0.0.1:1/private-provider-secret\"\nbearer = \"private-bearer-secret\"\n"

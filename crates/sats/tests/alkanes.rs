@@ -92,9 +92,7 @@ fn unconfigured_view_is_a_typed_resolution_error() {
         .args(["alkanes", "inspect", "2:1"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            "Alkanes views on signet need Subfrost",
-        ))
+        .stderr(predicate::str::contains("Alkanes on signet needs Subfrost"))
         .stderr(predicate::str::contains("sats providers add subfrost"));
 }
 
