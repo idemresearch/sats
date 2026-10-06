@@ -20,7 +20,6 @@ pub fn run(
         amount: args.amount,
         fee_rate: args.fee_rate,
         allow_dust: args.allow_dust,
-        no_guards: args.no_guards,
     };
     let prepared = prepare::build(&mut ctx, services, &req)?;
 

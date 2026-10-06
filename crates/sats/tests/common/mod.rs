@@ -48,11 +48,10 @@ pub fn foreign_address(network: Network) -> String {
 pub fn write_mock_provider(dir: &TempDir) -> std::path::PathBuf {
     let mockdata = dir.path().join("mockdata");
     std::fs::create_dir_all(&mockdata).unwrap();
-    // The mock driver is also a guard, and guards fail closed on a missing
-    // answer — give it an empty one by default.
-    std::fs::write(mockdata.join("guard.json"), r#"{"protected": []}"#).unwrap();
+    // The mock stands in for both the chain source and Subfrost (Alkanes
+    // views).
     let config = format!(
-        "network = \"signet\"\n\n[providers.mock]\ndriver = \"mock\"\nnetwork = \"signet\"\nurl = \"file://{}\"\n",
+        "network = \"signet\"\n\n[signet]\nchain = \"esplora\"\nsubfrost_url = \"file://{0}\"\n\n[signet.esplora]\nurl = \"file://{0}\"\n",
         mockdata.display()
     );
     std::fs::write(dir.path().join("config.toml"), config).unwrap();
@@ -113,6 +112,13 @@ pub struct HttpServer {
 
 impl HttpServer {
     pub fn start(handler: impl Fn(&str) -> Option<(u16, String)> + Send + 'static) -> Self {
+        Self::start_with_body(move |request, _body| handler(request))
+    }
+
+    /// [`Self::start`] for a handler that also reads the request body.
+    pub fn start_with_body(
+        handler: impl Fn(&str, &str) -> Option<(u16, String)> + Send + 'static,
+    ) -> Self {
         use std::io::{BufRead, Read, Write};
         use std::sync::{
             Arc,
@@ -154,9 +160,10 @@ impl HttpServer {
                                 length = value.trim().parse::<usize>().unwrap();
                             }
                         }
-                        reader.read_exact(&mut vec![0; length]).unwrap();
+                        let mut body = vec![0; length];
+                        reader.read_exact(&mut body).unwrap();
                         count.fetch_add(1, Ordering::SeqCst);
-                        match handler(request.trim()) {
+                        match handler(request.trim(), &String::from_utf8_lossy(&body)) {
                             Some((status, body)) => {
                                 let response = format!(
                                     "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -190,25 +197,22 @@ impl Drop for HttpServer {
     }
 }
 
-/// Individually valid Esplora entries whose chain capabilities conflict.
-/// Keep both listeners alive so tests can also assert no provider was called.
-pub fn write_ambiguous_providers(dir: &TempDir) -> [HttpServer; 2] {
-    let servers = std::array::from_fn(|_| {
-        HttpServer::start(|_| Some((400, "unexpected provider call".into())))
-    });
-    let mut config = "network = \"signet\"\n".to_string();
-    for (name, server) in ["first", "second"].into_iter().zip(&servers) {
-        config.push_str(&format!(
-            "\n[providers.{name}]\ndriver = \"esplora\"\nnetwork = \"signet\"\nurl = {:?}\n",
-            server.url
-        ));
-    }
+/// What every chain command reports for [`write_unresolvable_providers`].
+pub const UNRESOLVABLE: &str = "no Esplora URL is configured";
+
+/// A configuration that loads but cannot be served: Bitcoin data is set to
+/// Esplora with no URL. Subfrost (Alkanes views) points at a live
+/// listener, kept so tests can also assert no provider was called.
+pub fn write_unresolvable_providers(dir: &TempDir) -> HttpServer {
+    let server = HttpServer::start(|_| Some((400, "unexpected provider call".into())));
+    let config = format!(
+        "network = \"signet\"\n\n[signet]\nchain = \"esplora\"\nsubfrost_url = {:?}\n",
+        server.url
+    );
     std::fs::write(dir.path().join("config.toml"), config).unwrap();
-    servers
+    server
 }
 
-pub fn assert_no_provider_calls(servers: &[HttpServer; 2]) {
-    for server in servers {
-        assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 0);
-    }
+pub fn assert_no_provider_calls(server: &HttpServer) {
+    assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 0);
 }

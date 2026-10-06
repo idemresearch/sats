@@ -49,7 +49,8 @@ claude mcp add --transport stdio --scope local sats --env SATS_AGENT_TOKEN=<toke
 At startup the server checks that the grant exists and hasn't expired, that
 `SATS_AGENT_TOKEN` matches it, that a wallet exists on the network, and that
 the configuration parses. It doesn't select a provider until `get_balance`
-needs one, so an ambiguous provider setup never blocks the other tools.
+needs one, so a provider choice that can't be served never blocks the other
+tools.
 
 ## Tools
 
@@ -67,8 +68,8 @@ needs one, so an ambiguous provider setup never blocks the other tools.
 { "balance_sat": 118500, "pending_sat": 0, "synced": true, "network": "signet" }
 ```
 
-`synced: false` means the chain was unreachable and the balance is cached. An
-invalid or ambiguous provider configuration returns an error, not a cached
+`synced: false` means the chain was unreachable and the balance is cached. A
+provider choice the network can't serve returns an error, not a cached
 balance.
 
 ### `get_receive_address`
@@ -206,7 +207,7 @@ prepares the transaction on fresh chain state, verifies it matches the
 request, re-checks the grant with the real fee, and signs only after the
 human enters the wallet password.
 
-If preparation fails because of a sync, guard, fee, or provider problem, the
+If preparation fails because of a sync, fee, or provider problem, the
 request becomes `failed` and the human can try again. The agent keeps
 observing with `check_request`. It shouldn't poll the balance or file again.
 

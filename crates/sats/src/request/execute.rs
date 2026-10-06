@@ -116,7 +116,7 @@ pub enum Outcome {
 /// instance that created the request. Providers are resolved only after
 /// these local checks pass. Preparation runs on the human's
 /// side of the boundary with no safety bypasses. Operational failures
-/// (sync, guards, fee estimation) record a safe pre-signature failure so
+/// (sync, fee estimation) record a safe pre-signature failure so
 /// the human can inspect the attempt and authorize again; a mismatch between the prepared transaction and
 /// the recorded intent refuses without signing.
 pub fn stage(
@@ -169,8 +169,8 @@ pub fn stage(
         return Ok(Stage::Denied(Box::new(denied), reason));
     }
 
-    // Preparation: the shared pipeline, agent form — no dust or guard
-    // bypass, and a failed sync is a hard stop.
+    // Preparation: the shared pipeline, agent form — no dust bypass, and
+    // a failed sync is a hard stop.
     let preparation = (|| -> Result<_> {
         let mut ctx = walletd::open(store, network)?;
         let prepare_request =
@@ -701,11 +701,10 @@ mod tests {
             let store = Store::open(Some(dir.path())).unwrap();
             let mockdata = dir.path().join("mockdata");
             std::fs::create_dir_all(&mockdata).unwrap();
-            std::fs::write(mockdata.join("guard.json"), r#"{"protected": []}"#).unwrap();
             std::fs::write(
                 dir.path().join("config.toml"),
                 format!(
-                    "network = \"signet\"\n\n[providers.mock]\ndriver = \"mock\"\nnetwork = \"signet\"\nurl = \"file://{}\"\n",
+                    "network = \"signet\"\n\n[signet]\nchain = \"esplora\"\nsubfrost_url = \"file://{0}\"\n\n[signet.esplora]\nurl = \"file://{0}\"\n",
                     mockdata.display()
                 ),
             )
@@ -748,7 +747,7 @@ mod tests {
 
         fn services(&self) -> Services {
             let config = Config::load(&self.store).unwrap();
-            crate::provider::resolve(&config, &[], Network::Signet).unwrap()
+            crate::provider::resolve(&config, None, Network::Signet).unwrap()
         }
 
         /// Persist a signet grant for `agent` and hand back its token.
@@ -2217,15 +2216,13 @@ mod tests {
         drop(fx.dir);
     }
     #[test]
-    fn guard_fee_and_resolution_failures_are_observable_without_drawing_budget() {
-        for failure in ["guard", "fee", "resolution"] {
+    fn fee_and_resolution_failures_are_observable_without_drawing_budget() {
+        for failure in ["fee", "resolution"] {
             let fx = Fixture::new(&[100_000]);
             let token = fx.grant(50_000, 5_000);
             let id = fx.create(&token, "pay", 10_000).id;
-            match failure {
-                "guard" => std::fs::remove_file(fx.mockdata.join("guard.json")).unwrap(),
-                "fee" => std::fs::write(fx.mockdata.join("fees.json"), "invalid").unwrap(),
-                _ => {}
+            if failure == "fee" {
+                std::fs::write(fx.mockdata.join("fees.json"), "invalid").unwrap();
             }
             assert!(
                 stage(
@@ -2491,16 +2488,9 @@ mod tests {
             // The fixture accepted these bytes, then lost the response.
             String::from_utf8(bytes).unwrap()
         });
-        let config_path = fx.dir.path().join("config.toml");
-        let original = std::fs::read_to_string(&config_path).unwrap();
-        let mut config: toml::Value = toml::from_str(&original).unwrap();
-        config["providers"]["mock"].as_table_mut().unwrap().insert(
-            "capabilities".into(),
-            toml::Value::try_from(vec!["chain.sync", "chain.fees", "guard.native"]).unwrap(),
-        );
-        config["providers"].as_table_mut().unwrap().insert("broadcast".into(),
-            toml::Value::try_from(serde_json::json!({"network":"signet","driver":"esplora","url":url,"capabilities":["chain.broadcast"]})).unwrap());
-        std::fs::write(&config_path, toml::to_string(&config).unwrap()).unwrap();
+        // Mock sync and fees; broadcast through the real Esplora transport.
+        let broadcast_via = fx.mockdata.join("broadcast-via");
+        std::fs::write(&broadcast_via, &url).unwrap();
         let Outcome::BroadcastPending { txid, .. } = approve(&fx, &id, &probe).unwrap() else {
             panic!("response must be uncertain");
         };
@@ -2509,7 +2499,7 @@ mod tests {
         assert_eq!(saved.tx_hex, received_hex);
         assert_eq!(saved.status, TransactionStatus::Pending);
         let spent = fx.grant_state().spent_sat;
-        std::fs::write(&config_path, original).unwrap();
+        std::fs::remove_file(&broadcast_via).unwrap();
         crate::commands::tx::broadcast(
             &fx.store,
             Network::Signet,

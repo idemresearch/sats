@@ -43,12 +43,11 @@ mod dialect {
     /// Subfrost documents broadcast through its Bitcoin Core passthrough.
     /// `esplora_broadcast` is not a supported route on the public gateway.
     pub const BROADCAST: &str = "btc_sendrawtransaction";
-    pub const ORD_OUTPUT: &str = "ord_output";
-    pub const ALKANES_BY_OUTPOINT: &str = "alkanes_protorunesbyoutpoint";
-    /// Contract bytecode by alkane id. Params: one `{block, tx}` object
-    /// with decimal-string values (u128s exceed JSON number range).
-    /// Result: hex string.
-    pub const ALKANES_GET_BYTECODE: &str = "alkanes_getbytecode";
+    /// The indexer's view functions. Params: `[view name, "0x" + hex of the
+    /// protobuf request, "latest"]`. Result: hex string. The gateway's
+    /// `alkanes_getbytecode` shortcut drops the alkane id (the indexer
+    /// panics unwrapping it), so bytecode is fetched through this view.
+    pub const METASHREW_VIEW: &str = "metashrew_view";
     /// Simulate a contract call. Params: one
     /// `{target: {block, tx}, inputs: [...]}` object, decimal strings.
     /// Result: opaque JSON, displayed rather than trusted.
@@ -65,6 +64,16 @@ mod dialect {
     pub const TX: &str = "esplora_tx";
     /// `GET /tx/:txid/outspend/:vout` — spend status. Params: `[txid, vout]`.
     pub const TX_OUTSPEND: &str = "esplora_tx::outspend";
+}
+
+/// Subfrost's public JSON-RPC endpoint for a network, where it runs one.
+/// Other networks need an explicit URL.
+pub fn default_url(network: Network) -> Option<&'static str> {
+    match network {
+        Network::Bitcoin => Some("https://mainnet.subfrost.io/v4/jsonrpc"),
+        Network::Signet => Some("https://signet.subfrost.io/v4/jsonrpc"),
+        _ => None,
+    }
 }
 
 #[derive(Clone)]
@@ -180,31 +189,6 @@ impl SubfrostClient {
         Ok(txid)
     }
 
-    fn guard_err(&self, name: &'static str, message: String) -> ProviderError {
-        ProviderError::Guard {
-            name: name.to_string(),
-            url: self.display_url.clone(),
-            message,
-        }
-    }
-
-    /// Which of these outpoints carry ord assets (inscriptions or runes)?
-    pub fn ord_protected(&self, outpoints: &[OutPoint]) -> Result<Vec<OutPoint>, ProviderError> {
-        let mut protected = Vec::new();
-        for outpoint in outpoints {
-            let value: serde_json::Value = self
-                .call(
-                    dialect::ORD_OUTPUT,
-                    serde_json::json!([outpoint.to_string()]),
-                )
-                .map_err(|m| self.guard_err("ord", m))?;
-            if parse_ord_output(&value) {
-                protected.push(*outpoint);
-            }
-        }
-        Ok(protected)
-    }
-
     fn view_err(&self, message: String) -> ProviderError {
         ProviderError::View {
             url: self.display_url.clone(),
@@ -215,10 +199,15 @@ impl SubfrostClient {
     /// Contract bytecode for an alkane id, decoded from the endpoint's
     /// hex result.
     pub fn alkanes_bytecode(&self, block: u128, tx: u128) -> Result<Vec<u8>, ProviderError> {
+        let request = sats_alkanes::view::bytecode_request(block, tx);
         let value: serde_json::Value = self
             .call(
-                dialect::ALKANES_GET_BYTECODE,
-                serde_json::json!([{ "block": block.to_string(), "tx": tx.to_string() }]),
+                dialect::METASHREW_VIEW,
+                serde_json::json!([
+                    "getbytecode",
+                    format!("0x{}", hex::encode(request)),
+                    "latest"
+                ]),
             )
             .map_err(|m| self.view_err(m))?;
         parse_bytecode_result(&value).map_err(|m| self.view_err(m))
@@ -240,26 +229,6 @@ impl SubfrostClient {
             }]),
         )
         .map_err(|m| self.view_err(m))
-    }
-
-    /// Which of these outpoints carry alkanes balances?
-    pub fn alkanes_protected(
-        &self,
-        outpoints: &[OutPoint],
-    ) -> Result<Vec<OutPoint>, ProviderError> {
-        let mut protected = Vec::new();
-        for outpoint in outpoints {
-            let value: serde_json::Value = self
-                .call(
-                    dialect::ALKANES_BY_OUTPOINT,
-                    serde_json::json!([{ "txid": outpoint.txid.to_string(), "vout": outpoint.vout }]),
-                )
-                .map_err(|m| self.guard_err("alkanes", m))?;
-            if parse_alkanes_outpoint(&value) {
-                protected.push(*outpoint);
-            }
-        }
-        Ok(protected)
     }
 }
 
@@ -701,37 +670,6 @@ fn parse_jsonrpc<T: DeserializeOwned>(body: &str) -> Result<T, String> {
     serde_json::from_value(result.clone()).map_err(|_| "unexpected result shape".to_string())
 }
 
-/// An ord `output` result marks the outpoint protected iff it lists any
-/// inscriptions or runes. Opaque to sats: no decoding, only presence.
-fn parse_ord_output(value: &serde_json::Value) -> bool {
-    let has_inscriptions = value
-        .get("inscriptions")
-        .and_then(|i| i.as_array())
-        .is_some_and(|a| !a.is_empty());
-    let has_runes = match value.get("runes") {
-        Some(serde_json::Value::Array(a)) => !a.is_empty(),
-        Some(serde_json::Value::Object(o)) => !o.is_empty(),
-        _ => false,
-    };
-    has_inscriptions || has_runes
-}
-
-/// An alkanes by-outpoint result marks the outpoint protected iff it
-/// reports any balance entries.
-fn parse_alkanes_outpoint(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Null => false,
-        serde_json::Value::Array(a) => !a.is_empty(),
-        serde_json::Value::Object(o) => match o.get("balances") {
-            Some(serde_json::Value::Array(a)) => !a.is_empty(),
-            Some(serde_json::Value::Object(inner)) => !inner.is_empty(),
-            Some(serde_json::Value::Null) | None => !o.is_empty(),
-            Some(_) => true,
-        },
-        _ => false,
-    }
-}
-
 /// A bytecode result is a hex string, with or without a 0x prefix. An
 /// empty result means nothing is deployed at that id.
 fn parse_bytecode_result(value: &serde_json::Value) -> Result<Vec<u8>, String> {
@@ -1029,10 +967,10 @@ mod tests {
     fn sync_services(url: String) -> provider::Services {
         provider::resolve(
             &Config::default(),
-            &[provider::CliProvider {
+            Some(&provider::CliProvider {
                 kind: provider::DriverKind::Subfrost,
                 url,
-            }],
+            }),
             Network::Signet,
         )
         .unwrap()
@@ -1184,38 +1122,6 @@ mod tests {
     }
 
     #[test]
-    fn ord_output_protection() {
-        let empty: serde_json::Value =
-            serde_json::from_str(r#"{"inscriptions":[],"runes":{}}"#).unwrap();
-        assert!(!parse_ord_output(&empty));
-        let inscribed: serde_json::Value =
-            serde_json::from_str(r#"{"inscriptions":["abc123i0"],"runes":{}}"#).unwrap();
-        assert!(parse_ord_output(&inscribed));
-        let runic: serde_json::Value = serde_json::from_str(
-            r#"{"inscriptions":[],"runes":{"UNCOMMON•GOODS":{"amount":420}}}"#,
-        )
-        .unwrap();
-        assert!(parse_ord_output(&runic));
-        let bare: serde_json::Value = serde_json::from_str("{}").unwrap();
-        assert!(!parse_ord_output(&bare));
-    }
-
-    #[test]
-    fn alkanes_outpoint_protection() {
-        assert!(!parse_alkanes_outpoint(&serde_json::Value::Null));
-        let empty: serde_json::Value = serde_json::from_str("[]").unwrap();
-        assert!(!parse_alkanes_outpoint(&empty));
-        let some: serde_json::Value =
-            serde_json::from_str(r#"[{"token":{"id":"2:0"},"value":"1000"}]"#).unwrap();
-        assert!(parse_alkanes_outpoint(&some));
-        let object: serde_json::Value =
-            serde_json::from_str(r#"{"balances":[{"id":"2:0"}]}"#).unwrap();
-        assert!(parse_alkanes_outpoint(&object));
-        let object_empty: serde_json::Value = serde_json::from_str(r#"{"balances":[]}"#).unwrap();
-        assert!(!parse_alkanes_outpoint(&object_empty));
-    }
-
-    #[test]
     fn secrets_never_appear_in_errors() {
         let client = SubfrostClient::new(
             "https://USERSECRET:PASSSECRET@mainnet.subfrost.io/v4/SECRETKEY/jsonrpc?unknown=QUERYSECRET#FRAGMENTSECRET".into(),
@@ -1240,10 +1146,6 @@ mod tests {
         ] {
             let message = parse_jsonrpc::<HashMap<u16, f64>>(&body.to_string()).unwrap_err();
             super::super::error::assert_safe_error(client.sync_err(message.clone()), &secrets);
-            super::super::error::assert_safe_error(
-                client.guard_err("ord", message.clone()),
-                &secrets,
-            );
             super::super::error::assert_safe_error(client.view_err(message), &secrets);
         }
     }
@@ -1263,7 +1165,6 @@ mod tests {
             rpc_response(serde_json::json!({"2": 3.0})),
             bad.clone(),
             bad.clone(),
-            bad.clone(),
             bad,
             rpc_response(serde_json::json!(echo)),
         ]);
@@ -1278,11 +1179,9 @@ mod tests {
             input: vec![],
             output: vec![],
         };
-        let outpoint = OutPoint::null();
         for error in [
             client.check_network(Network::Signet).unwrap_err(),
             client.fee_estimates().unwrap_err(),
-            client.ord_protected(&[outpoint]).unwrap_err(),
             client.alkanes_bytecode(2, 0).unwrap_err(),
             client.broadcast(&tx).unwrap_err(),
         ] {
@@ -1301,6 +1200,23 @@ mod tests {
                     .contains("x-subfrost-api-key: headersecret")
             );
         }
+    }
+
+    /// The gateway's `alkanes_getbytecode` shortcut drops the id; the view
+    /// takes the protobuf request that a live signet indexer answered.
+    #[test]
+    fn bytecode_is_fetched_through_the_indexer_view() {
+        let (url, requests) = local_server(vec![rpc_response(serde_json::json!("0x0061736d"))]);
+        let client = SubfrostClient::new(url, None);
+        assert_eq!(client.alkanes_bytecode(2, 0).unwrap(), b"\0asm");
+        let request = requests.recv().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["method"], "metashrew_view");
+        assert_eq!(
+            body["params"],
+            serde_json::json!(["getbytecode", "0x0a060a0208021200", "latest"])
+        );
     }
 
     #[test]

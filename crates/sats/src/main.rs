@@ -37,11 +37,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
     // Workflows with local branches resolve only when they reach chain work.
     let overrides = cli.provider;
-    let services = |config: &Config| provider::resolve(config, &overrides, network);
+    let services = |config: &Config| provider::resolve(config, overrides.as_ref(), network);
 
     match cli.command {
         Command::Init { words, restore } => {
-            commands::init::run(&store, config, network, words, restore, &overrides)
+            commands::init::run(&store, config, network, words, restore, overrides.as_ref())
         }
         Command::Balance { offline } => {
             commands::balance::run(&store, network, || Ok(services(&config)?), offline, json)
@@ -105,6 +105,20 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             #[cfg(feature = "mcp")]
             cli::AgentCommand::Serve { name } => {
                 mcp::run(&store, network, &name, overrides.clone())
+            }
+        },
+        Command::Providers { command } => match command {
+            None | Some(cli::ProvidersCommand::List) => {
+                commands::providers::list(&config, overrides.as_ref(), network, json)
+            }
+            Some(cli::ProvidersCommand::Add(args)) => {
+                commands::providers::add(&store, config, network, &args, json)
+            }
+            Some(cli::ProvidersCommand::Use { source }) => {
+                commands::providers::use_chain(&store, config, network, source, json)
+            }
+            Some(cli::ProvidersCommand::Remove { kind }) => {
+                commands::providers::remove(&store, config, network, kind, json)
             }
         },
         Command::Alkanes { command } => match command {

@@ -246,52 +246,6 @@ fn send_refuses_stale_state_when_sync_fails() {
 }
 
 #[test]
-fn guard_failure_stops_planning() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    let mockdata = write_mock_provider(&dir);
-    common::fund_wallet(&dir, &[100_000]);
-    // A configured guard that cannot answer must stop planning with candidates.
-    std::fs::remove_file(mockdata.join("guard.json")).unwrap();
-    sats(&dir)
-        .args([
-            "send",
-            "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
-            "25000",
-            "--fee-rate",
-            "2",
-            "--dry-run",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "refusing to plan without the asset check",
-        ));
-}
-
-#[test]
-fn no_guards_flag_skips_the_asset_check() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    let mockdata = write_mock_provider(&dir);
-    std::fs::remove_file(mockdata.join("guard.json")).unwrap();
-    common::fund_wallet(&dir, &[100_000]);
-    // With candidates and the explicit escape, preparation skips the guard.
-    sats(&dir)
-        .args([
-            "send",
-            "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n",
-            "25000",
-            "--fee-rate",
-            "2",
-            "--dry-run",
-            "--no-guards",
-        ])
-        .assert()
-        .success();
-}
-
-#[test]
 fn dry_run_conflicts_with_yes_and_export() {
     let dir = TempDir::new().unwrap();
     sats(&dir)
@@ -326,7 +280,7 @@ fn provider_flag_overrides_config() {
             "balance",
             "--json",
             "--provider",
-            &format!("mock=file://{}", override_data.display()),
+            &format!("esplora=file://{}", override_data.display()),
         ])
         .assert()
         .success();
@@ -347,20 +301,21 @@ fn provider_flag_rejects_bad_grammar() {
 }
 
 #[test]
-fn two_chain_providers_are_ambiguous() {
+fn provider_flag_is_one_chain_source() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
         .args([
             "balance",
             "--provider",
-            "esplora=http://a.invalid",
+            "esplora=http://a.invalid/PATHSECRET",
             "--provider",
-            "subfrost=http://b.invalid",
+            "subfrost=http://b.invalid/PATHSECRET",
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("multiple chain.sync providers"));
+        .stderr(predicate::str::contains("cannot be used multiple times"))
+        .stderr(predicate::str::contains("PATHSECRET").not());
 }
 
 #[test]
@@ -368,7 +323,7 @@ fn provider_resolution_is_only_required_for_online_commands() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     let txid = common::fund_wallet(&dir, &[100_000])[0].txid.to_string();
-    let servers = common::write_ambiguous_providers(&dir);
+    let servers = common::write_unresolvable_providers(&dir);
     sats(&dir)
         .args(["agent", "grant", "claude", "--budget", "50000"])
         .assert()
@@ -430,7 +385,7 @@ fn provider_resolution_is_only_required_for_online_commands() {
             .args(args)
             .assert()
             .failure()
-            .stderr(predicate::str::contains("multiple chain.sync providers"))
+            .stderr(predicate::str::contains(common::UNRESOLVABLE))
             .stderr(predicate::str::contains("invalid config").not());
     }
     let attempted = request_json(&dir, "r-pending");
@@ -440,7 +395,7 @@ fn provider_resolution_is_only_required_for_online_commands() {
         attempted["message"]
             .as_str()
             .unwrap()
-            .contains("multiple chain.sync providers")
+            .contains(common::UNRESOLVABLE)
     );
     // An unsaved incoming txid fails locally, before provider selection.
     sats(&dir)
@@ -472,7 +427,7 @@ fn provider_resolution_follows_settled_and_revoked_approval_checks() {
     );
     assert_eq!(sent["status"], "sent");
     fabricate_pending_request(&dir, "claude", "r-revoked");
-    let servers = common::write_ambiguous_providers(&dir);
+    let servers = common::write_unresolvable_providers(&dir);
     let record_before = request_json(&dir, "r-sent");
     let grant_path = dir.path().join("signet/grants/claude.json");
     let grant_before = std::fs::read(&grant_path).unwrap();
@@ -518,7 +473,7 @@ fn provider_resolution_deferral_does_not_hide_malformed_config() {
     for config in [
         "network = [",
         "network = 7",
-        "network = \"signet\"\n[fee_targets]\nsignet = 0",
+        "network = \"signet\"\n[signet]\nfee_target = 0",
     ] {
         std::fs::write(dir.path().join("config.toml"), config).unwrap();
         for args in [
@@ -533,7 +488,7 @@ fn provider_resolution_deferral_does_not_hide_malformed_config() {
                 .assert()
                 .failure()
                 .stderr(predicate::str::contains("invalid config"))
-                .stderr(predicate::str::contains("multiple chain.sync providers").not());
+                .stderr(predicate::str::contains(common::UNRESOLVABLE).not());
         }
     }
 }
@@ -642,6 +597,8 @@ fn old_command_names_are_gone() {
         vec!["daemon", "status"],
         vec!["agent", "deny", "r-1"],
         vec!["agent", "approve", "r-1", "--for", "1h"],
+        vec!["send", common::ADDRESS, "1000", "--no-guards"],
+        vec!["providers", "protect", "on"],
     ] {
         sats(&dir).args(&args).assert().code(2);
     }
@@ -1868,13 +1825,13 @@ fn pending_saved_transaction_requires_providers_but_receipt_repair_does_not() {
     let txid = signed["txid"].as_str().unwrap();
     let record_path = dir.path().join(format!("signet/transactions/{txid}.json"));
     let before = std::fs::read(&record_path).unwrap();
-    let servers = common::write_ambiguous_providers(&dir);
+    let servers = common::write_unresolvable_providers(&dir);
     sats(&dir)
         .env_remove("SATS_PASSWORD")
         .args(["tx", "broadcast", txid])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("multiple chain.sync providers"));
+        .stderr(predicate::str::contains(common::UNRESOLVABLE));
     assert_eq!(std::fs::read(&record_path).unwrap(), before);
     let mut record: serde_json::Value = serde_json::from_slice(&before).unwrap();
     record["status"] = "broadcast".into();

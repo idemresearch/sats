@@ -6,25 +6,15 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
-    #[error(
-        "no {cap} provider configured for {network} — add one under [providers] in config.toml"
-    )]
-    NoProvider {
-        cap: &'static str,
+    /// A configured choice that cannot be served: the reason names the fix.
+    #[error("{network} providers: {reason}")]
+    Setup {
         network: &'static str,
+        reason: String,
     },
 
-    #[error(
-        "multiple {cap} providers for {network} ({names}) — restrict one with capabilities = [...] or remove it"
-    )]
-    Ambiguous {
-        cap: &'static str,
-        network: &'static str,
-        names: String,
-    },
-
-    #[error("invalid provider {name:?}: {reason}")]
-    BadConfig { name: String, reason: String },
+    #[error("Alkanes on {network} needs Subfrost — run `sats providers add subfrost`")]
+    NoAlkanesView { network: &'static str },
 
     #[error("provider {name:?} ({url}) serves a different network than {expected}")]
     WrongNetwork {
@@ -41,15 +31,6 @@ pub enum ProviderError {
 
     #[error("broadcast failed ({url}): {message}")]
     Broadcast { url: String, message: String },
-
-    #[error(
-        "guard {name} unreachable ({url}): {message} — refusing to plan without the asset check; retry, or pass --no-guards to plan anyway"
-    )]
-    Guard {
-        name: String,
-        url: String,
-        message: String,
-    },
 
     #[error("alkanes view failed ({url}): {message}")]
     View { url: String, message: String },

@@ -20,7 +20,7 @@ Primary references:
 - [Security](docs/security.md): key, grant, signing, and provider invariants.
 - [CLI](docs/cli.md): current user-facing commands and configuration.
 - [MCP](docs/mcp.md): agent tool contracts and denial semantics.
-- [Providers](docs/providers.md): capability resolution and UTXO guards.
+- [Providers](docs/providers.md): chain sources and Subfrost setup.
 - [Development](docs/development.md): local workflow and verification.
 
 ## Product contract
@@ -46,7 +46,7 @@ Prepared spends are PSBTs. Normal sends keep them in memory; an explicit
 export writes the unsigned PSBT to a user-named file artifact. Once signed,
 durable state contains private raw transaction hex rather than a signed
 PSBT. The persisted BDK wallet is watch-only. Human sends and approved
-agent requests share validation, sync, protection, fee estimation, and
+agent requests share validation, sync, the dust exclusion, fee estimation, and
 preparation. There is no autonomous agent spend mode and no resident
 unlocked signer. See `docs/direction.md`.
 
@@ -89,7 +89,7 @@ advice for exactly that file.
 | `crates/sats/src/main.rs` | Composition and command dispatch only |
 | `crates/sats/src/cli.rs` | Clap command and flag definitions |
 | `crates/sats/src/commands/` | Human CLI workflows and rendering |
-| `crates/sats/src/provider/` | Native chain providers, capability resolution, and guards |
+| `crates/sats/src/provider/` | Native chain providers and per-network resolution |
 | `crates/sats/src/store.rs` | Paths, atomic files, permissions, finalized transactions, grants, requests, and the event log |
 | `crates/sats/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
 | `crates/sats/src/request/` | The native request workflow: create, dismiss, reconcile, and the human-authorized executor |
@@ -219,17 +219,20 @@ and rendering belong to callers.
 - The agent never retries to make a payment happen: after filing it only
   observes. Do not add an agent-facing tool that approves, unlocks,
   signs, executes, or broadcasts.
-- Agents must not receive `--allow-dust`, `--no-guards`, password, seed, or
+- Agents must not receive `--allow-dust`, password, seed, or
   raw signing authority outside the grant contract.
 
 ### Providers and UTXO safety
 
 - Planning must not continue on stale chain state after sync failure.
-- Guards may only remove spendable candidates; they never authorize spends.
-- Union every configured guard result with the local dust heuristic.
-- A configured guard fails closed unless a human explicitly uses the
-  per-invocation CLI bypass.
-- Do not ship or silently enable a default third-party asset guard.
+- The local dust heuristic (546/330 sats) excludes candidates before coin
+  selection; only a human's per-invocation `--allow-dust` bypasses it.
+- sats ships no third-party asset guard. Never add one that can add
+  candidates or authorize a spend, that is enabled by default, or that
+  doesn't fail closed.
+- Each network has exactly one chain source for sync, fees, and broadcast.
+  A `--provider` override replaces only that source, and a saved credential
+  never follows an override URL.
 - Validate that a provider serves the selected Bitcoin network.
 - Treat authentication material as secret in errors and debug output. Keep
   Subfrost path credentials behind its redacted display URL, never print
@@ -283,15 +286,17 @@ Call it from the shared native workflow so CLI and MCP cannot diverge.
 5. Add or extend `crates/sats/tests/mcp.rs`.
 6. Update `docs/mcp.md`.
 
-### New provider or capability
+### New provider
 
-1. Add the audited capability to `provider::Capability` only if necessary.
-2. Implement the driver under `crates/sats/src/provider/`.
+1. Implement the driver under `crates/sats/src/provider/` as an audited
+   enum variant, not a plugin surface.
+2. Add it as a per-network choice in `config.rs` and the `sats providers`
+   commands; do not reintroduce user-facing capability routing.
 3. Keep resolution pure and network I/O inside driver operations.
 4. Give the driver a display-safe URL and keep credentials out of every error
    surface.
-5. Test network mismatch, unavailable service, ambiguous configuration, and
-   the successful path with deterministic mocks.
+5. Test network mismatch, unavailable service, a choice that can't be served,
+   and the successful path with deterministic mocks.
 6. Update `docs/providers.md`.
 
 ### State format change

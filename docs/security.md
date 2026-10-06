@@ -196,8 +196,7 @@ place an agent request reaches the signer.
    unknown. A revoked or re-issued grant makes the request `denied` with
    reason `revoked`. A new grant never inherits old requests.
 2. **Prepare.** sats builds the transaction on fresh chain state through the
-   same pipeline as a human send. Approval has no `--allow-dust` or
-   `--no-guards` option.
+   same pipeline as a human send. Approval has no `--allow-dust` option.
 3. **Verify.** sats derives what the PSBT pays from the wallet's own
    descriptors and refuses unless it matches the recorded recipient and
    amount. A foreign input is refused outright.
@@ -239,7 +238,7 @@ signer can sign, or leak a signature, and still return an error.
 
 A failure before signing, such as an unwritable audit log or a signer that
 can't be constructed, returns the draw and leaves the request `failed`. Sync,
-guard, fee, and provider failures during preparation also leave it `failed`.
+fee, and provider failures during preparation also leave it `failed`.
 They happen before any draw. A signer error, an unfinalized result, or a failure to
 finalize or save leaves the request `unresolved`. A `failed` record never
 overwrites a settled or uncertain one.
@@ -276,7 +275,7 @@ signature for one approval, or a refund after a signature may exist.
 The MCP server reads the wallet and files requests under the grant its token
 names. It holds no key material and never prepares, signs, or broadcasts.
 Agents never receive the password, mnemonic, a signer, a PSBT-signing or
-unlock tool, or the `--allow-dust` and `--no-guards` bypasses.
+unlock tool, or the `--allow-dust` bypass.
 
 The token authenticates every tool call, never execution. Each call re-reads
 the grant, so revocation, re-issue, or expiry cuts a running session off at
@@ -286,30 +285,30 @@ never syncs, mutates records, reconciles, refunds, signs, or broadcasts. An
 absent execution lock never proves a request is unsigned. The full contract
 is in [MCP](mcp.md).
 
-## Providers and asset guards
+## Providers and inscription postage
 
 Preparing a spend requires fresh chain state. A sync failure stops every send
 mode, including `--dry-run` and `--export-psbt`, and stops agent execution.
 Balance, status, and history may show cached state and say so.
 
-Coin selection excludes the union of two layers:
-
-1. a local heuristic: outputs of exactly 546 or 330 sats;
-2. every configured asset guard's list of outpoints that carry assets.
-
-Guards can only exclude outputs. They can't make anything spendable or
-authorize a spend. A configured guard that can't answer fails closed. Only a
-human CLI invocation can bypass a guard or the dust heuristic, and only for
-that invocation. A `--provider` override also replaces configured guards for
-that one command, on `send` and `agent approve` alike. sats enables no asset guard by default, because configuring
-one is a trust decision. A dishonest guard can deny service by over-protecting
-outputs, and an incomplete one can miss an asset.
+Coin selection excludes outputs of exactly 546 or 330 sats, common
+inscription postage. The check is local: no provider is asked which outputs
+carry assets, so an asset on any other value is not detected. Only a human
+CLI invocation can bypass the check, with `--allow-dust`, and only for that
+invocation.
 
 Provider data is untrusted. A fee rate that is non-finite, negative, or above
 10,000 sat/vB is a typed error. Malformed checkpoint data fails the sync,
 not the process. Diagnostics show only a provider's origin, never user-info,
 paths, queries, or response bodies. Credentials still go to the configured
 endpoint. Redaction does not make a provider honest.
+
+Provider credentials live in `config.toml`, which sats writes owner-only.
+`sats providers add` reads a key from a hidden prompt or stdin, never from
+the command line, and checks the endpoint before saving it. A saved Esplora
+token never follows a new URL, and the Subfrost key is never sent to a
+`--provider` override. Configuring providers is a human CLI task: no MCP
+tool configures them, and the MCP server only uses what is configured.
 
 ## PSBTs
 
@@ -341,8 +340,8 @@ dialect has not been verified against a live endpoint.
 | Debugger on an approving process | Key material lives only for one approval | Seed recoverable in that window where ptrace is allowed |
 | Pre-daemon wrapped-seed grant | Reported and refused | The file is a seed disclosure until the wallet is rotated |
 | Revoked agent | Grant and token rechecked on every MCP tool call and under the lock at execution | Transactions signed before revocation stay valid |
-| Provider outage | Planning and configured guards fail closed | Loss of availability |
-| Malicious asset guard | Restrictive only | Can hide funds; can miss assets |
+| Provider outage | Planning fails closed on a failed sync | Loss of availability |
+| Inscription on a non-postage value | Not detected | Can be spent by accident |
 | Broadcast failure | Transaction saved first; request `broadcast_pending` | Retry with `sats tx broadcast` |
 | Wrong network | Address and provider network validation | Misconfigured third-party responses |
 | Malicious Alkanes view | Advisory display only | Can mislead inspection or simulation |

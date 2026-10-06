@@ -14,12 +14,11 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NET")]
     pub network: Option<String>,
 
-    /// Provider override for the active network, repeatable:
-    /// --provider esplora=URL or --provider subfrost=URL.
-    /// Replaces every configured provider for this invocation.
+    /// Bitcoin data source for this run only: --provider esplora=URL or
+    /// --provider subfrost=URL
     #[arg(long, global = true, value_name = "KIND=URL",
           value_parser = crate::provider::parse_cli_provider)]
-    pub provider: Vec<crate::provider::CliProvider>,
+    pub provider: Option<crate::provider::CliProvider>,
 
     /// Machine-readable JSON output
     #[arg(long, global = true)]
@@ -104,11 +103,66 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Show and choose where Bitcoin data comes from
+    Providers {
+        #[command(subcommand)]
+        command: Option<ProvidersCommand>,
+    },
     /// Alkanes contract tools (experimental, signet-first)
     Alkanes {
         #[command(subcommand)]
         command: AlkanesCommand,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ProvidersCommand {
+    /// Show where the active network's Bitcoin data and Alkanes data come
+    /// from (the default)
+    List,
+    /// Add a provider and use it for the active network's Bitcoin data:
+    /// asks for its key (hidden, or one line on stdin) and checks the
+    /// endpoint before saving
+    Add(AddArgs),
+    /// Choose where the active network's Bitcoin data comes from
+    Use {
+        #[arg(value_enum, value_name = "SOURCE")]
+        source: ChainArg,
+    },
+    /// Remove a provider and its stored credential
+    Remove {
+        #[arg(value_enum, value_name = "PROVIDER")]
+        kind: ProviderArg,
+    },
+}
+
+#[derive(clap::Args)]
+pub struct AddArgs {
+    /// Provider to add
+    #[arg(value_enum, value_name = "PROVIDER")]
+    pub kind: ProviderArg,
+    /// Endpoint URL (default: Subfrost's endpoint for mainnet and signet;
+    /// required for esplora)
+    #[arg(long, value_name = "URL")]
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ProviderArg {
+    /// Subfrost: Bitcoin and Alkanes data (API key)
+    Subfrost,
+    /// Your own Esplora server (URL, optional bearer token)
+    Esplora,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ChainArg {
+    /// The public mempool.space API (the default)
+    Mempool,
+    /// Subfrost, with the saved key
+    Subfrost,
+    /// The Esplora server added for this network
+    Esplora,
 }
 
 #[derive(Subcommand)]
@@ -193,9 +247,6 @@ pub struct SendArgs {
     /// Spend UTXOs at inscription postage values (546/330 sats)
     #[arg(long)]
     pub allow_dust: bool,
-    /// Skip the configured metaprotocol guards, loudly
-    #[arg(long)]
-    pub no_guards: bool,
     /// Skip the confirmation prompt
     #[arg(short, long, conflicts_with_all = ["dry_run", "export_psbt"])]
     pub yes: bool,
@@ -314,4 +365,37 @@ pub enum AgentCommand {
         /// Agent name the server acts as (must hold an active grant)
         name: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn command_definitions_are_consistent() {
+        super::Cli::command().debug_assert();
+    }
+
+    /// A subcommand field named like a global flag (`provider`) only fails
+    /// when clap downcasts the parsed value, so parse each one.
+    #[test]
+    fn provider_subcommands_parse_beside_the_global_override() {
+        for args in [
+            &["sats", "providers"][..],
+            &["sats", "providers", "list"],
+            &["sats", "providers", "add", "subfrost", "--url", "http://x"],
+            &["sats", "providers", "use", "mempool"],
+            &["sats", "providers", "remove", "esplora"],
+            &[
+                "sats",
+                "--provider",
+                "esplora=http://x",
+                "providers",
+                "remove",
+                "subfrost",
+            ],
+        ] {
+            assert!(super::Cli::try_parse_from(args).is_ok(), "{args:?}");
+        }
+    }
 }

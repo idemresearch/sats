@@ -87,41 +87,13 @@ fn simulate_shows_parsed_fields_and_the_raw_result() {
 fn unconfigured_view_is_a_typed_resolution_error() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
-    // No providers configured: the built-in esplora fallback covers chain
-    // capabilities but never alkanes.view.
+    // No Subfrost set up: the default chain source serves no views.
     sats(&dir)
         .args(["alkanes", "inspect", "2:1"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("no alkanes.view provider"))
-        .stderr(predicate::str::contains("[providers]"));
-}
-
-#[test]
-fn ambiguous_view_providers_are_rejected() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    let mockdata = dir.path().join("mockdata");
-    std::fs::create_dir_all(&mockdata).unwrap();
-    let config = format!(
-        concat!(
-            "network = \"signet\"\n\n",
-            "[providers.chain]\ndriver = \"mock\"\nnetwork = \"signet\"\n",
-            "url = \"file://{dir}\"\ncapabilities = [\"chain\"]\n\n",
-            "[providers.viewa]\ndriver = \"mock\"\nnetwork = \"signet\"\n",
-            "url = \"file://{dir}\"\ncapabilities = [\"alkanes.view\"]\n\n",
-            "[providers.viewb]\ndriver = \"mock\"\nnetwork = \"signet\"\n",
-            "url = \"file://{dir}\"\ncapabilities = [\"alkanes.view\"]\n",
-        ),
-        dir = mockdata.display()
-    );
-    std::fs::write(dir.path().join("config.toml"), config).unwrap();
-
-    sats(&dir)
-        .args(["alkanes", "inspect", "2:1"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("multiple alkanes.view providers"));
+        .stderr(predicate::str::contains("Alkanes on signet needs Subfrost"))
+        .stderr(predicate::str::contains("sats providers add subfrost"));
 }
 
 #[test]
@@ -220,26 +192,6 @@ fn execute_fails_closed_without_simulation() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("alkanes view failed"));
-    assert!(!dir.path().join("signet/transactions").exists());
-}
-
-#[test]
-#[cfg(feature = "experimental-alkanes-execute")]
-fn execute_fails_closed_without_a_guard_answer() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    let mockdata = write_mock_provider(&dir);
-    std::fs::write(mockdata.join("alkanes-simulate.json"), r#"{"status": 0}"#).unwrap();
-    common::fund_wallet(&dir, &[100_000]);
-    std::fs::remove_file(mockdata.join("guard.json")).unwrap();
-
-    sats(&dir)
-        .args(["alkanes", "execute", "2:1", "77", "-y"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "refusing to plan without the asset check",
-        ));
     assert!(!dir.path().join("signet/transactions").exists());
 }
 

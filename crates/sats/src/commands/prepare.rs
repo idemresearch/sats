@@ -12,13 +12,12 @@ use crate::ui;
 use crate::walletd::WalletCtx;
 
 /// One preparation request. Human-approved agent requests always use the
-/// defaults for the safety escapes: agents get no bypass.
+/// default for the dust escape: agents get no bypass.
 pub struct PrepareRequest<'a> {
     pub address: &'a str,
     pub amount: u64,
     pub fee_rate: Option<u64>,
     pub allow_dust: bool,
-    pub no_guards: bool,
 }
 
 impl<'a> PrepareRequest<'a> {
@@ -28,17 +27,16 @@ impl<'a> PrepareRequest<'a> {
             amount,
             fee_rate: None,
             allow_dust: false,
-            no_guards: false,
         }
     }
 }
 
 /// The shared preparation pipeline for human sends and approved agent
 /// requests:
-/// validate → sync → check funds → protect → estimate → build. A request
-/// that can never succeed (bad address) fails before any network IO.
-/// Spending never plans on stale chain state — a failed sync is a hard
-/// error. With candidates present, every configured guard must answer.
+/// validate → sync → check funds → exclude dust → estimate → build. A
+/// request that can never succeed (bad address) fails before any network
+/// IO. Spending never plans on stale chain state — a failed sync is a hard
+/// error.
 pub fn build(
     ctx: &mut WalletCtx,
     services: &Services,
@@ -52,8 +50,8 @@ pub fn build(
         .sync_wallet(ctx)
         .map_err(|e| anyhow!("{e} — refusing to plan on stale state"))?;
 
-    // Exclusions: the dust heuristic unions with every configured guard;
-    // conservatism stacks. Escapes are per-invocation flags only.
+    // Exclusions: the dust heuristic. The escape is a per-invocation flag
+    // only.
     let utxos: Vec<(OutPoint, Amount)> = ctx
         .wallet
         .list_unspent()
@@ -77,28 +75,11 @@ pub fn build(
         }
         unspendable.extend(dust);
     }
-    if !req.no_guards && services.has_guards() {
-        let outpoints: Vec<OutPoint> = utxos.iter().map(|(op, _)| *op).collect();
-        let report = services.protected_outpoints(&outpoints)?;
-        let fresh: Vec<OutPoint> = report
-            .protected
-            .iter()
-            .filter(|op| !unspendable.contains(op))
-            .copied()
-            .collect();
-        if !fresh.is_empty() {
-            eprintln!(
-                "⚠ {} utxo{} excluded (guard: carrying assets)",
-                fresh.len(),
-                if fresh.len() == 1 { "" } else { "s" },
-            );
-        }
-        unspendable.extend(fresh);
-    }
     if utxos.iter().all(|(op, _)| unspendable.contains(op)) {
         bail!(
-            "Insufficient spendable funds: all {} unspent outputs are protected by the dust \
-             heuristic or configured asset guards — add funds in unprotected outputs before retrying",
+            "Insufficient spendable funds: all {} unspent outputs are excluded by the dust \
+             heuristic (546 or 330 sats, possible inscriptions) — add funds in other outputs \
+             before retrying",
             utxos.len()
         );
     }

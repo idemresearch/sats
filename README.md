@@ -101,18 +101,18 @@ Signet is the default. `mainnet`, `testnet4`, and `regtest` are available
 with `--network`, and mainnet is always an explicit choice. Each network has
 its own wallet, derived from the same seed.
 
-sats uses mempool.space for chain data unless you configure another provider.
-It fails closed: it won't spend on stale chain data or while a configured
-asset guard is down, and by default it never spends 546- or 330-sat outputs,
-which may carry inscriptions. Optional asset guards, such as Subfrost for ord
-and Alkanes, are never enabled implicitly. See
-[Providers and guards](docs/providers.md).
+sats uses mempool.space for Bitcoin data unless you choose another provider:
+`sats providers add subfrost` switches to Subfrost after asking for your API
+key, and `sats providers` shows what each network uses. sats fails closed: it
+won't spend on out-of-date Bitcoin data, and by default it never spends 546- or
+330-sat outputs, which may carry inscriptions. See
+[Providers](docs/providers.md).
 
 ## Documentation
 
 Visit [sats.sh/docs](https://sats.sh/docs) for the manual: the
 [CLI reference](docs/cli.md), [MCP and agent grants](docs/mcp.md),
-[providers and guards](docs/providers.md), and the
+[providers](docs/providers.md), and the
 [security and trust model](docs/security.md). The same pages live in
 [`docs/`](docs/README.md).
 

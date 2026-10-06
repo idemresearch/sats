@@ -26,7 +26,7 @@ pub fn run(
     store: &Store,
     network: Network,
     agent: &str,
-    providers: Vec<crate::provider::CliProvider>,
+    providers: Option<crate::provider::CliProvider>,
 ) -> Result<()> {
     let net_name = network_name(network);
 
