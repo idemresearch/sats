@@ -3,11 +3,26 @@
 Each network gets its Bitcoin data (balance, history, fee estimates, and
 sending) from one provider. You don't need any configuration to start.
 
-| Provider | Connect with | Command |
+## Supported providers
+
+| Provider | Bitcoin data | Alkanes | Connect with | Command |
+|---|---|---|---|---|
+| [mempool.space](https://mempool.space) | Yes | — | Nothing: the default | — |
+| [Subfrost](https://subfrost.io) | Yes | Yes | API key | `sats providers add subfrost` |
+| Your own Esplora server | Yes | — | URL, optional bearer token | `sats providers add esplora --url URL` |
+
+## Not yet supported
+
+sats can't connect to these providers yet. The coverage listed is what each
+provider documents, not what sats uses.
+
+| Provider | Provider's coverage | Interface |
 |---|---|---|
-| mempool.space | Nothing: the default | — |
-| Subfrost | API key | `sats providers add subfrost` |
-| Your own Esplora server | URL, optional bearer token | `sats providers add esplora --url URL` |
+| [Sandshrew](https://sandshrew.io) | Bitcoin Core, Esplora, ord, Alkanes, Runes, BRC-20 | One JSON-RPC endpoint for Bitcoin and metaprotocol services |
+| [Rebar Labs](https://rebarlabs.io) | Bitcoin, Alkanes, Ordinals, Runes, BRC-20 | REST for indexed assets; JSON-RPC for Alkanes, with simulation and execution tracing |
+| [UniSat](https://unisat.io) | Bitcoin, Ordinals, Alkanes, Runes, BRC-20 | REST indexer APIs |
+
+## Commands
 
 ```sh
 sats providers                    # what this network uses (same as `sats providers list`)
