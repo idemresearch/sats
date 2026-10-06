@@ -1,26 +1,23 @@
 # Providers
 
-Each network gets its Bitcoin data (balance, history, fee estimates, and
-sending) from one provider. You don't need any configuration to start.
+A provider is where sats gets its chain data. You don't need one to start:
+mempool.space is the default.
 
-## Supported providers
+| Provider | Bitcoin | Alkanes | Set up |
+|---|---|---|---|
+| [mempool.space](https://mempool.space) | ✓ | | Default |
+| [Subfrost](https://subfrost.io) | ✓ | ✓ | `sats providers add subfrost` |
+| Your Esplora server | ✓ | | `sats providers add esplora --url URL` |
 
-| Provider | Bitcoin data | Alkanes | Connect with | Command |
-|---|---|---|---|---|
-| [mempool.space](https://mempool.space) | Yes | — | Nothing: the default | — |
-| [Subfrost](https://subfrost.io) | Yes | Yes | API key | `sats providers add subfrost` |
-| Your own Esplora server | Yes | — | URL, optional bearer token | `sats providers add esplora --url URL` |
+**Bitcoin** covers your balance, history, fee estimates, and sending.
+**Alkanes** covers `sats alkanes`. These are the rows `sats providers` prints.
 
-## Not yet supported
+sats doesn't show inscriptions, Runes, or BRC-20 yet, whatever the provider.
+To avoid spending an inscription by accident, it skips outputs worth 546 or
+330 sats (see [Inscription postage](#inscription-postage)).
 
-sats can't connect to these providers yet. The coverage listed is what each
-provider documents, not what sats uses.
-
-| Provider | Provider's coverage | Interface |
-|---|---|---|
-| [Sandshrew](https://sandshrew.io) | Bitcoin Core, Esplora, ord, Alkanes, Runes, BRC-20 | One JSON-RPC endpoint for Bitcoin and metaprotocol services |
-| [Rebar Labs](https://rebarlabs.io) | Bitcoin, Alkanes, Ordinals, Runes, BRC-20 | REST for indexed assets; JSON-RPC for Alkanes, with simulation and execution tracing |
-| [UniSat](https://unisat.io) | Bitcoin, Ordinals, Alkanes, Runes, BRC-20 | REST indexer APIs |
+Not supported yet: [Rebar Labs](https://rebarlabs.io) and
+[UniSat](https://unisat.io).
 
 ## Commands
 
