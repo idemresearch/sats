@@ -27,19 +27,17 @@ exact options in your installed version.
 | `sats agent dismiss <ID>` | Decline a request |
 | `sats agent log [--limit N] [--request ID]` | Show the agent event log |
 | `sats agent serve <name>` | Run the MCP server for an agent ([MCP](mcp.md)) |
-| `sats providers [list]` | Show where Bitcoin and Alkanes data come from |
-| `sats providers add <subfrost\|esplora>` | Add a provider, asking for its key, and use it for Bitcoin data |
-| `sats providers use <mempool\|subfrost\|esplora>` | Switch where Bitcoin data comes from |
+| `sats providers [list]` | Show the network's provider |
+| `sats providers add <subfrost\|esplora>` | Add a provider, asking for its key, and use it |
+| `sats providers use <mempool\|subfrost\|esplora>` | Switch the network's provider |
 | `sats providers remove <subfrost\|esplora>` | Remove a provider and its stored key |
-| `sats alkanes inspect <BLOCK:TX>` | Show a contract's bytecode hash (experimental) |
-| `sats alkanes simulate <BLOCK:TX> <INPUTS...>` | Simulate a contract call (experimental) |
 
 ## Global options
 
 | Option | Meaning |
 |---|---|
 | `--network <NET>` | `mainnet`, `signet`, `testnet4`, or `regtest`. Overrides the config. |
-| `--provider <KIND=URL>` | Replace the Bitcoin data source for this run. See [Providers](providers.md#one-off-overrides). |
+| `--provider <KIND=URL>` | Replace the network's provider for this run. See [Providers](providers.md#one-off-overrides). |
 | `--json` | Machine-readable output, where supported |
 
 | Variable | Meaning |
@@ -279,8 +277,10 @@ spending budget again.
 ## Alkanes
 
 `sats alkanes` is an experimental, signet-first client for Alkanes contracts.
-It needs Subfrost set up for the network (`sats providers add subfrost`), and
-there is no fallback.
+Default builds don't include it. Build it with
+`cargo install --locked --path crates/sats --features experimental-alkanes`.
+It needs Subfrost as the network's provider (`sats providers add subfrost`),
+and there is no fallback.
 
 ```sh
 sats alkanes inspect 2:1          # bytecode size and sha256 code hash
@@ -293,14 +293,14 @@ the raw result. It is display only, never authorization. Both commands are
 read-only and check the endpoint's network first. `inspect` reads bytecode
 through the indexer's `getbytecode` view, checked against Subfrost's signet
 endpoint; `simulate`'s request format hasn't been verified against a live
-endpoint yet. Default v0.0.1 builds don't include Alkanes execution.
+endpoint yet. Alkanes execution is never in released builds.
 
 ## JSON output
 
 `--json` is supported by `balance`, `receive`, `send` (all modes), `status`,
 `history`, `psbt inspect`, `psbt sign`, `tx broadcast`, every `agent`
 subcommand except `serve`, every `providers` subcommand, and both `alkanes`
-subcommands.
+subcommands in builds that include them.
 
 Field names are a compatibility surface. Branch on the documented `status`
 and `reason` fields, not on messages. `agent grant --json` includes `token`,
@@ -323,7 +323,7 @@ network = "signet"        # default network
 fee_target = 1008         # confirmation target in blocks (1–1008, default 2)
 ```
 
-Each network's Bitcoin data source lives under `[<network>]` too, written by
+Each network's provider lives under `[<network>]` too, written by
 `sats providers` or by hand. See [Providers](providers.md#configuration). sats writes
 `config.toml` owner-only, because it can hold provider API keys.
 

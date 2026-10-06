@@ -14,7 +14,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NET")]
     pub network: Option<String>,
 
-    /// Bitcoin data source for this run only: --provider esplora=URL or
+    /// Provider for this run only: --provider esplora=URL or
     /// --provider subfrost=URL
     #[arg(long, global = true, value_name = "KIND=URL",
           value_parser = crate::provider::parse_cli_provider)]
@@ -103,12 +103,13 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
-    /// Show and choose where Bitcoin data comes from
+    /// Show and choose each network's provider
     Providers {
         #[command(subcommand)]
         command: Option<ProvidersCommand>,
     },
     /// Alkanes contract tools (experimental, signet-first)
+    #[cfg(feature = "experimental-alkanes")]
     Alkanes {
         #[command(subcommand)]
         command: AlkanesCommand,
@@ -117,14 +118,13 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum ProvidersCommand {
-    /// Show where the active network's Bitcoin data and Alkanes data come
-    /// from (the default)
+    /// Show the active network's provider (the default)
     List,
-    /// Add a provider and use it for the active network's Bitcoin data:
-    /// asks for its key (hidden, or one line on stdin) and checks the
-    /// endpoint before saving
+    /// Add a provider and make it the active network's provider: asks for
+    /// its key (hidden, or one line on stdin) and checks the endpoint
+    /// before saving
     Add(AddArgs),
-    /// Choose where the active network's Bitcoin data comes from
+    /// Choose the active network's provider
     Use {
         #[arg(value_enum, value_name = "SOURCE")]
         source: ChainArg,
@@ -149,7 +149,7 @@ pub struct AddArgs {
 
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ProviderArg {
-    /// Subfrost: Bitcoin and Alkanes data (API key)
+    /// Subfrost (API key)
     Subfrost,
     /// Your own Esplora server (URL, optional bearer token)
     Esplora,
@@ -165,6 +165,7 @@ pub enum ChainArg {
     Esplora,
 }
 
+#[cfg(feature = "experimental-alkanes")]
 #[derive(Subcommand)]
 pub enum AlkanesCommand {
     /// Fetch a contract's bytecode and show its code hash

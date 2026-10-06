@@ -1,13 +1,35 @@
 //! Alkanes CLI integration tests: the view commands against the
-//! file-driven mock provider, and the resolution failure modes.
+//! file-driven mock provider, and the resolution failure modes. Default
+//! builds have no `sats alkanes` command; the rest needs
+//! `--features experimental-alkanes`.
 
 mod common;
 
-use common::{init_wallet, json_stdout, sats, write_mock_provider};
+use common::sats;
+#[cfg(feature = "experimental-alkanes")]
+use common::{init_wallet, json_stdout, write_mock_provider};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
 #[test]
+#[cfg(not(feature = "experimental-alkanes"))]
+fn default_build_has_no_alkanes_command() {
+    let dir = TempDir::new().unwrap();
+    sats(&dir)
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("alkanes").not());
+    sats(&dir)
+        .args(["alkanes", "inspect", "2:1"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("unrecognized subcommand"));
+    assert!(!dir.path().join("signet").exists());
+}
+
+#[test]
+#[cfg(feature = "experimental-alkanes")]
 fn inspect_hashes_the_mock_bytecode() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
@@ -48,6 +70,7 @@ fn inspect_hashes_the_mock_bytecode() {
 }
 
 #[test]
+#[cfg(feature = "experimental-alkanes")]
 fn simulate_shows_parsed_fields_and_the_raw_result() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
@@ -84,16 +107,29 @@ fn simulate_shows_parsed_fields_and_the_raw_result() {
 }
 
 #[test]
-fn unconfigured_view_is_a_typed_resolution_error() {
+#[cfg(feature = "experimental-alkanes")]
+fn alkanes_need_subfrost_as_the_provider() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
-    // No Subfrost set up: the default chain source serves no views.
-    sats(&dir)
-        .args(["alkanes", "inspect", "2:1"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("Alkanes on signet needs Subfrost"))
-        .stderr(predicate::str::contains("sats providers add subfrost"));
+    // The default provider serves no views.
+    let refused = |dir: &TempDir| {
+        sats(dir)
+            .args(["alkanes", "inspect", "2:1"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "Alkanes on signet needs Subfrost as the provider",
+            ))
+            .stderr(predicate::str::contains("sats providers add subfrost"));
+    };
+    refused(&dir);
+    // A saved key alone isn't enough: Subfrost must be the provider.
+    std::fs::write(
+        dir.path().join("config.toml"),
+        "network = \"signet\"\n\n[subfrost]\napi_key = \"k\"\n",
+    )
+    .unwrap();
+    refused(&dir);
 }
 
 #[test]
@@ -214,8 +250,11 @@ fn execute_excludes_dust_suspects() {
 }
 
 #[test]
-#[cfg(not(feature = "experimental-alkanes-execute"))]
-fn default_release_has_no_alkanes_execution_command() {
+#[cfg(all(
+    feature = "experimental-alkanes",
+    not(feature = "experimental-alkanes-execute")
+))]
+fn views_build_has_no_alkanes_execution_command() {
     let dir = TempDir::new().unwrap();
     sats(&dir)
         .args(["alkanes", "--help"])

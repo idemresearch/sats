@@ -7,9 +7,9 @@
 //! - `fees.json`       `{"2": 3.0}` conf-target → sat/vB map (default: flat 2)
 //! - `broadcasts.log`  broadcast txids are appended here
 //! - `alkanes-bytecode.json`  `{"BLOCK:TX": "<hex>"}`; a missing file or
-//!   key is a typed view error
+//!   key is a typed view error (experimental Alkanes builds)
 //! - `alkanes-simulate.json`  returned verbatim for any simulate call;
-//!   missing file is a typed view error
+//!   missing file is a typed view error (experimental Alkanes builds)
 //! - `fees-via`, `broadcast-via`  an Esplora URL that serves that one role
 //!   instead, so tests reach the real HTTP transport behind a
 //!   deterministic sync
@@ -111,6 +111,7 @@ impl MockProvider {
         Ok(txid)
     }
 
+    #[cfg(feature = "experimental-alkanes")]
     fn view_err(&self, message: String) -> ProviderError {
         ProviderError::View {
             url: self.display.clone(),
@@ -118,6 +119,7 @@ impl MockProvider {
         }
     }
 
+    #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_bytecode(&self, block: u128, tx: u128) -> Result<Vec<u8>, ProviderError> {
         let text = std::fs::read_to_string(self.dir.join("alkanes-bytecode.json"))
             .map_err(|e| self.view_err(e.to_string()))?;
@@ -131,6 +133,7 @@ impl MockProvider {
             .map_err(|e| self.view_err(e.to_string()))
     }
 
+    #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_simulate(&self) -> Result<serde_json::Value, ProviderError> {
         let text = std::fs::read_to_string(self.dir.join("alkanes-simulate.json"))
             .map_err(|e| self.view_err(e.to_string()))?;

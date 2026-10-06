@@ -1,4 +1,5 @@
 pub mod agent_log;
+#[cfg(feature = "experimental-alkanes")]
 pub mod alkanes;
 pub mod approve;
 pub mod balance;

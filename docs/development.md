@@ -31,6 +31,7 @@ screenshot.
 | Build | Command |
 |---|---|
 | Without MCP | `cargo install --locked --path crates/sats --no-default-features` |
+| With Alkanes views (experimental) | `cargo install --locked --path crates/sats --features experimental-alkanes` |
 | With Alkanes execution (development only, never released) | `cargo test -p sats --locked --features experimental-alkanes-execute --test alkanes` |
 
 ## Verification gate
@@ -45,6 +46,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
 cargo build --release --locked
+cargo clippy -p sats --all-targets --features experimental-alkanes-execute -- -D warnings
+cargo test -p sats --locked --features experimental-alkanes-execute --bins --test alkanes
 cargo check -p sats-core --target wasm32-unknown-unknown
 cargo check -p sats-web --target wasm32-unknown-unknown
 ```

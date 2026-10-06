@@ -13,8 +13,11 @@ pub enum ProviderError {
         reason: String,
     },
 
-    #[error("Alkanes on {network} needs Subfrost — run `sats providers add subfrost`")]
-    NoAlkanesView { network: &'static str },
+    #[cfg(feature = "experimental-alkanes")]
+    #[error(
+        "Alkanes on {network} needs Subfrost as the provider — run `sats providers add subfrost`"
+    )]
+    NoAlkanes { network: &'static str },
 
     #[error("provider {name:?} ({url}) serves a different network than {expected}")]
     WrongNetwork {
@@ -32,6 +35,7 @@ pub enum ProviderError {
     #[error("broadcast failed ({url}): {message}")]
     Broadcast { url: String, message: String },
 
+    #[cfg(feature = "experimental-alkanes")]
     #[error("alkanes view failed ({url}): {message}")]
     View { url: String, message: String },
 }

@@ -322,10 +322,13 @@ reported as partially signed and written back as an artifact.
 
 ## Alkanes
 
-Default v0.0.1 builds include Alkanes inspection and advisory simulation
-only. Execution is compiled only with a non-default development feature and
-refuses mainnet. There is no Alkanes MCP tool or grant authority. The view
-dialect has not been verified against a live endpoint.
+Default builds include no Alkanes commands. Inspection and advisory
+simulation are compiled only with the non-default `experimental-alkanes`
+feature, and execution only with the development-only
+`experimental-alkanes-execute` feature, which also refuses mainnet. Views
+come from the network's provider, which must be Subfrost. There is no
+Alkanes MCP tool or grant authority. The simulation request format has not
+been verified against a live endpoint.
 
 ## Threat summary
 
@@ -344,7 +347,7 @@ dialect has not been verified against a live endpoint.
 | Inscription on a non-postage value | Not detected | Can be spent by accident |
 | Broadcast failure | Transaction saved first; request `broadcast_pending` | Retry with `sats tx broadcast` |
 | Wrong network | Address and provider network validation | Misconfigured third-party responses |
-| Malicious Alkanes view | Advisory display only | Can mislead inspection or simulation |
+| Malicious Alkanes view (experimental builds) | Advisory display only | Can mislead inspection or simulation |
 
 ## Operational guidance
 

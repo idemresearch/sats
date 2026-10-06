@@ -2,8 +2,8 @@
 //!
 //! Each network has exactly one chain source, chosen by `[<network>]
 //! chain`: the public mempool.space Esplora (the default), Subfrost, or a
-//! configured Esplora server. It serves sync, fee estimates, and broadcast.
-//! Alkanes views come from Subfrost whenever it is set up for the network.
+//! configured Esplora server. It serves sync, fee estimates, broadcast,
+//! and, in experimental builds, Alkanes views, which only Subfrost serves.
 //! Drivers are audited enums, not a plugin surface, and `sats-core` never
 //! sees any of this.
 //!
@@ -124,25 +124,10 @@ pub struct Endpoint {
     pub source: Source,
 }
 
-/// What one network uses, as `sats providers` shows it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Overview {
-    pub chain: Endpoint,
-    /// `None` while Subfrost is not set up for the network.
-    pub alkanes: Option<Endpoint>,
-}
-
 /// A chain-data transport. One source fills sync, fees, and broadcast.
 #[derive(Debug, Clone)]
 pub enum ChainSource {
     Esplora(EsploraProvider),
-    Subfrost(SubfrostClient),
-    Mock(MockProvider),
-}
-
-/// The indexer behind Alkanes views.
-#[derive(Debug, Clone)]
-pub enum IndexSource {
     Subfrost(SubfrostClient),
     Mock(MockProvider),
 }
@@ -155,14 +140,12 @@ pub struct Services {
     sync: ChainSource,
     fees: ChainSource,
     broadcast: ChainSource,
-    index: Option<IndexSource>,
 }
 
 /// The resolved choices before they become services.
 struct Plan {
     fee_target_blocks: u16,
     chain: (ChainSource, Endpoint),
-    index: Option<(IndexSource, Endpoint)>,
 }
 
 /// Resolve the services for `network` from config and an optional CLI
@@ -192,22 +175,17 @@ pub fn resolve(
         sync,
         fees,
         broadcast,
-        index: plan.index.map(|(source, _)| source),
     })
 }
 
-/// Describe what [`resolve`] would use for `network`. Pure, and fails
-/// exactly when `resolve` fails.
+/// Describe the provider [`resolve`] would use for `network`. Pure, and
+/// fails exactly when `resolve` fails.
 pub fn overview(
     config: &Config,
     cli: Option<&CliProvider>,
     network: Network,
-) -> Result<Overview, ProviderError> {
-    let plan = plan(config, cli, network)?;
-    Ok(Overview {
-        chain: plan.chain.1,
-        alkanes: plan.index.map(|(_, endpoint)| endpoint),
-    })
+) -> Result<Endpoint, ProviderError> {
+    Ok(plan(config, cli, network)?.chain.1)
 }
 
 fn plan(
@@ -226,7 +204,6 @@ fn plan(
         return Err(setup("fee_target must be between 1 and 1008 blocks".into()));
     }
 
-    let index = subfrost_index(config, network).map_err(setup)?;
     let chain = match cli {
         Some(p) => match p.kind {
             DriverKind::Esplora => esplora_chain("cli:esplora", &p.url, None, Source::Override),
@@ -235,20 +212,15 @@ fn plan(
             DriverKind::Subfrost => subfrost_chain(&p.url, None, Source::Override),
         }
         .map_err(setup)?,
-        None => configured_chain(config, network, index.as_ref()).map_err(setup)?,
+        None => configured_chain(config, network).map_err(setup)?,
     };
     Ok(Plan {
         fee_target_blocks,
         chain,
-        index,
     })
 }
 
-fn configured_chain(
-    config: &Config,
-    network: Network,
-    index: Option<&(IndexSource, Endpoint)>,
-) -> Result<(ChainSource, Endpoint), String> {
+fn configured_chain(config: &Config, network: Network) -> Result<(ChainSource, Endpoint), String> {
     let net = config.net(network);
     let chosen = net.chain.is_some();
     match net.chain.unwrap_or(ChainChoice::default_for(network)) {
@@ -272,33 +244,25 @@ fn configured_chain(
                 Source::Config,
             ),
             (None, Some(url)) => esplora_chain("esplora", url, None, Source::Default),
-            (None, None) => Err("Bitcoin data is set to esplora, but no Esplora URL is \
+            (None, None) => Err("the provider is set to esplora, but no Esplora URL is \
                  configured — run `sats providers add esplora --url URL`"
                 .into()),
         },
-        ChainChoice::Subfrost => match index {
-            Some((IndexSource::Subfrost(c), endpoint)) => {
-                Ok((ChainSource::Subfrost(c.clone()), endpoint.clone()))
-            }
-            Some((IndexSource::Mock(m), endpoint)) => {
-                Ok((ChainSource::Mock(m.clone()), endpoint.clone()))
-            }
-            None => Err(
-                "Bitcoin data is set to subfrost, but Subfrost isn't set up for \
-                 this network — run `sats providers add subfrost`"
-                    .into(),
-            ),
-        },
+        ChainChoice::Subfrost => subfrost_endpoint(config, network)?.ok_or_else(|| {
+            "the provider is set to subfrost, but Subfrost isn't set up for \
+             this network — run `sats providers add subfrost`"
+                .into()
+        }),
     }
 }
 
 /// The Subfrost endpoint for a network, when Subfrost is set up there: a
 /// saved key (with the built-in endpoint, where one exists) or an
 /// explicit `subfrost_url`.
-fn subfrost_index(
+fn subfrost_endpoint(
     config: &Config,
     network: Network,
-) -> Result<Option<(IndexSource, Endpoint)>, String> {
+) -> Result<Option<(ChainSource, Endpoint)>, String> {
     let api_key = config.subfrost.as_ref().map(|s| s.api_key.clone());
     let url = match &config.net(network).subfrost_url {
         Some(url) => url.0.clone(),
@@ -308,12 +272,7 @@ fn subfrost_index(
         },
         None => return Ok(None),
     };
-    let (source, endpoint) = match subfrost_chain(&url, api_key, Source::Config)? {
-        (ChainSource::Subfrost(c), endpoint) => (IndexSource::Subfrost(c), endpoint),
-        (ChainSource::Mock(m), endpoint) => (IndexSource::Mock(m), endpoint),
-        (ChainSource::Esplora(_), _) => unreachable!("subfrost_chain builds no Esplora"),
-    };
-    Ok(Some((source, endpoint)))
+    subfrost_chain(&url, api_key, Source::Config).map(Some)
 }
 
 /// The undocumented file-driven test driver answers any `file://`
@@ -383,16 +342,6 @@ fn subfrost_chain(
 }
 
 impl Services {
-    fn net_name(&self) -> &'static str {
-        network_name(self.network)
-    }
-
-    fn index(&self) -> Result<&IndexSource, ProviderError> {
-        self.index.as_ref().ok_or(ProviderError::NoAlkanesView {
-            network: self.net_name(),
-        })
-    }
-
     /// Confirm the chain source answers and serves this network, before a
     /// human relies on it.
     pub fn check_chain(&self) -> Result<(), ProviderError> {
@@ -486,32 +435,45 @@ impl Services {
         Ok(txid)
     }
 
+    /// Alkanes views come from the network's one provider; only Subfrost
+    /// serves them.
+    #[cfg(feature = "experimental-alkanes")]
+    fn no_alkanes(&self) -> ProviderError {
+        ProviderError::NoAlkanes {
+            network: network_name(self.network),
+        }
+    }
+
     /// Contract bytecode for an alkane id. Validates the endpoint's
     /// network before trusting its answer.
+    #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_bytecode(&self, block: u128, tx: u128) -> Result<Vec<u8>, ProviderError> {
-        match self.index()? {
-            IndexSource::Subfrost(c) => {
+        match &self.sync {
+            ChainSource::Subfrost(c) => {
                 c.check_network(self.network)?;
                 c.alkanes_bytecode(block, tx)
             }
-            IndexSource::Mock(m) => m.alkanes_bytecode(block, tx),
+            ChainSource::Mock(m) => m.alkanes_bytecode(block, tx),
+            ChainSource::Esplora(_) => Err(self.no_alkanes()),
         }
     }
 
     /// Simulate a contract call; the result is the endpoint's verbatim
     /// JSON. Advisory only — a simulation never authorizes anything.
+    #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_simulate(
         &self,
         block: u128,
         tx: u128,
         inputs: &[u128],
     ) -> Result<serde_json::Value, ProviderError> {
-        match self.index()? {
-            IndexSource::Subfrost(c) => {
+        match &self.sync {
+            ChainSource::Subfrost(c) => {
                 c.check_network(self.network)?;
                 c.alkanes_simulate(block, tx, inputs)
             }
-            IndexSource::Mock(m) => m.alkanes_simulate(),
+            ChainSource::Mock(m) => m.alkanes_simulate(),
+            ChainSource::Esplora(_) => Err(self.no_alkanes()),
         }
     }
 }
@@ -606,10 +568,9 @@ mod tests {
     fn defaults_need_no_configuration() {
         let config = Config::default();
         let signet = overview(&config, None, Network::Signet).unwrap();
-        assert_eq!(signet.chain.provider, "mempool");
-        assert_eq!(signet.chain.url, "https://mempool.space");
-        assert_eq!(signet.chain.source, Source::Default);
-        assert_eq!(signet.alkanes, None);
+        assert_eq!(signet.provider, "mempool");
+        assert_eq!(signet.url, "https://mempool.space");
+        assert_eq!(signet.source, Source::Default);
         let services = resolve(&config, None, Network::Signet).unwrap();
         assert_eq!(services.fee_target_blocks, 2);
         // The display shows the origin; the transport gets the full path.
@@ -620,8 +581,8 @@ mod tests {
 
         // mempool.space serves no regtest: the default is a local Esplora.
         let regtest = overview(&config, None, Network::Regtest).unwrap();
-        assert_eq!(regtest.chain.provider, "esplora");
-        assert_eq!(regtest.chain.url, "http://localhost:3002");
+        assert_eq!(regtest.provider, "esplora");
+        assert_eq!(regtest.url, "http://localhost:3002");
     }
 
     #[test]
@@ -652,32 +613,26 @@ mod tests {
         let mut config = with_key("APIKEYSECRET");
         config.signet.chain = Some(ChainChoice::Subfrost);
         let signet = overview(&config, None, Network::Signet).unwrap();
-        assert_eq!(signet.chain.provider, "subfrost");
-        assert_eq!(signet.chain.url, "https://signet.subfrost.io");
-        assert_eq!(signet.chain.auth, AuthKind::ApiKey);
-        assert_eq!(signet.alkanes.as_ref().unwrap().provider, "subfrost");
+        assert_eq!(signet.provider, "subfrost");
+        assert_eq!(signet.url, "https://signet.subfrost.io");
+        assert_eq!(signet.auth, AuthKind::ApiKey);
         assert!(!format!("{signet:?}").contains("APIKEYSECRET"));
         assert!(matches!(
             resolve(&config, None, Network::Signet).unwrap().sync,
             ChainSource::Subfrost(_)
         ));
 
-        // The key alone changes no network's chain source.
+        // The key alone changes no network's provider.
         let mainnet = overview(&config, None, Network::Bitcoin).unwrap();
-        assert_eq!(mainnet.chain.provider, "mempool");
-        assert_eq!(mainnet.alkanes.unwrap().url, "https://mainnet.subfrost.io");
+        assert_eq!(mainnet.provider, "mempool");
 
         // Subfrost publishes no regtest endpoint: not set up there.
-        assert_eq!(
-            overview(&config, None, Network::Regtest).unwrap().alkanes,
-            None
-        );
         config.regtest.chain = Some(ChainChoice::Subfrost);
         let reason = setup_reason(resolve(&config, None, Network::Regtest).unwrap_err());
         assert!(reason.contains("sats providers add subfrost"), "{reason}");
         config.regtest.subfrost_url = Some(RedactedUrl("http://localhost:18888/KEY".into()));
         let regtest = overview(&config, None, Network::Regtest).unwrap();
-        assert_eq!(regtest.chain.url, "http://localhost:18888");
+        assert_eq!(regtest.url, "http://localhost:18888");
     }
 
     #[test]
@@ -699,15 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_key_changes_no_chain_source() {
-        let config = with_key("k");
-        let view = overview(&config, None, Network::Signet).unwrap();
-        assert_eq!(view.chain.provider, "mempool");
-        assert_eq!(view.alkanes.unwrap().provider, "subfrost");
-    }
-
-    #[test]
-    fn an_override_replaces_only_the_chain_source() {
+    fn an_override_replaces_the_provider_for_one_run() {
         let mut config = with_key("SAVEDKEY");
         config.signet.esplora = Some(EsploraConfig {
             url: RedactedUrl("https://bitcoin.example/api".into()),
@@ -720,17 +667,12 @@ mod tests {
         }
         let cli = parse_cli_provider("subfrost=https://other.example/v4/jsonrpc").unwrap();
         let view = overview(&config, Some(&cli), Network::Signet).unwrap();
-        assert_eq!(view.chain.source, Source::Override);
-        assert_eq!(view.chain.url, "https://other.example");
+        assert_eq!(view.source, Source::Override);
+        assert_eq!(view.url, "https://other.example");
         assert_eq!(
-            view.chain.auth,
+            view.auth,
             AuthKind::None,
             "the saved key never follows an override"
-        );
-        assert_eq!(
-            view.alkanes.unwrap().auth,
-            AuthKind::ApiKey,
-            "views stay on the configured Subfrost"
         );
     }
 
@@ -741,13 +683,11 @@ mod tests {
         let mut config = Config::default();
         config.signet.chain = Some(ChainChoice::Esplora);
         config.signet.esplora = Some(EsploraConfig {
-            url: RedactedUrl(url.clone()),
+            url: RedactedUrl(url),
             bearer: None,
         });
-        config.signet.subfrost_url = Some(RedactedUrl(url));
         let services = resolve(&config, None, Network::Signet).unwrap();
         assert!(matches!(services.sync, ChainSource::Mock(_)));
-        assert!(matches!(services.index, Some(IndexSource::Mock(_))));
 
         std::fs::write(dir.path().join("broadcast-via"), "http://127.0.0.1:9").unwrap();
         let services = resolve(&config, None, Network::Signet).unwrap();
@@ -756,13 +696,18 @@ mod tests {
     }
 
     #[test]
-    fn missing_alkanes_view_names_the_fix() {
-        let services = resolve(&Config::default(), None, Network::Signet).unwrap();
-        let err = services.alkanes_bytecode(2, 1).unwrap_err();
-        assert!(
-            err.to_string().contains("sats providers add subfrost"),
-            "{err}"
-        );
+    #[cfg(feature = "experimental-alkanes")]
+    fn alkanes_need_subfrost_as_the_provider() {
+        // A saved key alone serves nothing: Subfrost must be the network's
+        // provider, so no call reaches it here.
+        for config in [Config::default(), with_key("k")] {
+            let services = resolve(&config, None, Network::Signet).unwrap();
+            let err = services.alkanes_bytecode(2, 1).unwrap_err();
+            assert!(
+                err.to_string().contains("sats providers add subfrost"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
