@@ -3,7 +3,11 @@
 Notable changes to sats, newest first. Versions follow
 `workspace.package.version` in `Cargo.toml`.
 
-## 0.0.2 (unreleased)
+## 0.0.2 (2026-10-07)
+
+Provider setup is new, and a 0.0.1 provider config is refused with
+instructions: remove its `[providers.<name>]`, `[esplora]`, and
+`[fee_targets]` sections and run `sats providers add` again.
 
 ### Agents
 
@@ -16,14 +20,34 @@ Notable changes to sats, newest first. Versions follow
 
 ### Providers
 
-- Each network has one provider, and `sats providers` shows it on one line,
-  such as `signet  mempool.space (default)`. `--json` prints one flat
-  object with `network`, `provider`, `url`, `auth`, and `source`; the
-  `chain` and `alkanes_views` fields are gone.
+- Each network has one provider for sync, fees, and broadcast: mempool.space
+  (the default), Subfrost, or your own Esplora server. Capability filters
+  and split providers are gone.
+- `sats providers` shows the network's provider on one line, such as
+  `signet  mempool.space (default)`; `--json` prints one object with
+  `network`, `provider`, `url`, `auth`, and `source`.
+  `sats providers add subfrost`, `add esplora --url URL`, `use`, and
+  `remove` set it up. Adding or switching checks the endpoint's network
+  before anything is saved, and an API key or token is read from a hidden
+  prompt or stdin, never from an argument.
+- The config file chooses with `chain` and `fee_target` under
+  `[<network>]`, and keeps one Subfrost key under `[subfrost]`. sats writes
+  it owner-only (`0600`).
+- `--provider KIND=URL` can be given once and replaces the network's
+  provider for one command. The saved Subfrost key is never sent to an
+  override URL.
+- Asset guards are removed: Subfrost's ord and Alkanes guards and
+  `sats send --no-guards`. The local 546/330-sat postage check is
+  unchanged.
+
+### Alkanes
+
 - `sats alkanes` is no longer in default builds. Build with
   `--features experimental-alkanes` to get `inspect` and `simulate`. They
-  now need Subfrost as the network's provider; a saved Subfrost key alone
-  no longer serves them.
+  need Subfrost as the network's provider.
+- `sats alkanes inspect` fetches bytecode through the indexer's
+  `getbytecode` view. Subfrost's `alkanes_getbytecode` failed for every
+  alkane id.
 
 ## 0.0.1 (2026-10-01)
 
