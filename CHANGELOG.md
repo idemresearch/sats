@@ -3,6 +3,16 @@
 Notable changes to sats, newest first. Versions follow
 `workspace.package.version` in `Cargo.toml`.
 
+## Unreleased
+
+### Security
+
+- The wallet password and mnemonic are read only from a terminal.
+  `SATS_PASSWORD` is gone: every program you start, agents included,
+  inherits your environment, so an agent with a shell could have run
+  `sats agent approve --yes` and signed without you. Restore no longer
+  reads a piped phrase.
+
 ## 0.0.2 (2026-10-07)
 
 Provider setup is new, and a 0.0.1 provider config is refused with

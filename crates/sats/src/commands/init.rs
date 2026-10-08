@@ -187,11 +187,14 @@ fn confirm_mainnet_restore() -> Result<()> {
     Ok(())
 }
 
-/// Hidden entry on a terminal; a plain line otherwise (scripted restores
-/// pipe the phrase in). Never a CLI argument: argv and shell history leak.
+/// Hidden entry on a terminal. Never a CLI argument (argv and shell history
+/// leak), and in release builds never a pipe; debug builds read a piped
+/// line so the tests can restore (see `password::TEST_SEAM`).
 fn read_mnemonic() -> Result<Zeroizing<String>> {
     if std::io::stdin().is_terminal() {
         Ok(Zeroizing::new(rpassword::prompt_password("mnemonic: ")?))
+    } else if !password::TEST_SEAM {
+        bail!("no mnemonic: run sats on a terminal to enter it");
     } else {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;

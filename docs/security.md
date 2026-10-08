@@ -20,6 +20,10 @@ XChaCha20-Poly1305. The format is versioned and authenticated, and its
 associated data binds the blob to its purpose. The SQLite wallet holds public
 descriptors and chain state, never private keys.
 
+The password and mnemonic are entered only at a terminal, never through
+arguments, environment variables, or pipes, which other programs, agents
+included, can read or inherit.
+
 Sealed keys, grants, agent requests, the event log, and finalized
 transactions are written atomically and owner-only (0600). The directories
 that hold them are owner-only (0700), and existing installs are re-hardened
