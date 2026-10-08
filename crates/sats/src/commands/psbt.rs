@@ -16,7 +16,8 @@ use crate::{keys, ui, walletd};
 
 /// Decode a PSBT file without touching the wallet, the store, or the chain.
 pub fn inspect(network: Network, file: &Path, json: bool) -> Result<()> {
-    let bytes = fs::read(file).with_context(|| format!("cannot read {}", file.display()))?;
+    let bytes = crate::vault::as_caller(|| fs::read(file))
+        .with_context(|| format!("cannot read {}", file.display()))?;
     let psbt = parse_psbt(&bytes)?;
 
     let txid = psbt.unsigned_tx.compute_txid().to_string();
@@ -108,7 +109,8 @@ pub fn sign(
     out: Option<&Path>,
     json: bool,
 ) -> Result<()> {
-    let bytes = fs::read(file).with_context(|| format!("cannot read {}", file.display()))?;
+    let bytes = crate::vault::as_caller(|| fs::read(file))
+        .with_context(|| format!("cannot read {}", file.display()))?;
     let mut psbt = parse_psbt(&bytes)?;
 
     let mut signer = LocalSigner::new(keys::unlock(store)?, network);

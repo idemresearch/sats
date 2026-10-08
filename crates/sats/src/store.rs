@@ -67,6 +67,18 @@ pub struct Store {
 
 impl Store {
     pub fn open(dir_override: Option<&Path>) -> Result<Store> {
+        if let Some(dir) = crate::vault::caller_dir() {
+            // The vault decides where the caller's wallet lives; a caller-chosen
+            // directory could point the vault account at another user's.
+            if dir_override.is_some() {
+                bail!("--dir is not available with the protected vault");
+            }
+            return Ok(Store {
+                config_dir: dir.to_path_buf(),
+                data_dir: dir.to_path_buf(),
+                override_dir: None,
+            });
+        }
         let (config_dir, data_dir) = match dir_override {
             Some(dir) => (dir.to_path_buf(), dir.to_path_buf()),
             None => {
@@ -779,8 +791,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8], secret: bool) -> Result<()> {
 /// Write a file the human named (a PSBT artifact) atomically and
 /// owner-only. Unlike `write_atomic`, the destination directory belongs to
 /// the user: it must already exist and its permissions are never changed.
-/// A bare file name lands in the working directory.
+/// A bare file name lands in the working directory. In the protected vault
+/// it is written as the caller, never as the vault account.
 pub fn write_artifact(path: &Path, bytes: &[u8]) -> Result<()> {
+    crate::vault::as_caller(|| write_artifact_inner(path, bytes))
+}
+
+fn write_artifact_inner(path: &Path, bytes: &[u8]) -> Result<()> {
     let name = path
         .file_name()
         .with_context(|| format!("{} does not name a file", path.display()))?;

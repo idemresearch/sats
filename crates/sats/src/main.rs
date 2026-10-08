@@ -11,6 +11,7 @@ mod request;
 mod spend;
 mod store;
 mod ui;
+mod vault;
 mod walletd;
 
 use crate::cli::{Cli, Command};
@@ -18,6 +19,9 @@ use crate::config::{Config, parse_network};
 use crate::store::Store;
 
 fn main() {
+    // First: decide protected mode and sanitize the environment before
+    // clap (SATS_DIR) or anything else reads it.
+    vault::enter();
     let cli = Cli::parse_with_safe_errors();
     if let Err(err) = run(cli) {
         eprintln!("✗ {err:#}");

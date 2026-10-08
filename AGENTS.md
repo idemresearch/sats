@@ -92,6 +92,7 @@ advice for exactly that file.
 | `crates/sats/src/provider/` | Native chain providers and per-network resolution |
 | `crates/sats/src/store.rs` | Paths, atomic files, permissions, finalized transactions, grants, requests, and the event log |
 | `crates/sats/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
+| `crates/sats/src/vault.rs` | Protected mode: environment allowlist, per-caller vault directory, caller-identity file access |
 | `crates/sats/src/request/` | The native request workflow: create, dismiss, reconcile, and the human-authorized executor |
 | `crates/sats/src/spend.rs` | The shared signing and broadcast tail: persist before broadcast |
 | `crates/sats/src/mcp/` | MCP transport and schemas — reads the wallet and files requests |
@@ -181,6 +182,11 @@ and rendering belong to callers.
 - A bearer token is emitted once, at creation, and never persisted.
 - Write finalized transaction records and agent requests with restrictive
   permissions; both expose wallet and payment metadata.
+- In the protected vault (setuid to a dedicated account), sats runs as
+  the vault account. Open every caller-named path through
+  `vault::as_caller`, and never add a caller-controlled directory, path,
+  environment variable, or `file://` endpoint that the vault account
+  would open itself.
 
 ### Agent authorization
 

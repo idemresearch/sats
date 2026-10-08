@@ -27,6 +27,12 @@ jobs:
       # compiling and tested.
       - run: cargo clippy -p sats --all-targets --features experimental-alkanes-execute -- -D warnings
       - run: cargo test -p sats --locked --features experimental-alkanes-execute --bins --test alkanes
+      # The protected vault needs root to create accounts and a setuid
+      # binary: build as the runner, run the test binary with sudo.
+      - name: Protected vault (setuid, as root)
+        run: |
+          cargo test -p sats --locked --test vault --no-run
+          sudo "$(ls -t target/debug/deps/vault-* | grep -v '\.d$' | head -1)" --ignored
 
   # Guards the portable-core boundary documented in docs/architecture.md.
   wasm-check:

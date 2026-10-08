@@ -22,9 +22,10 @@ pub fn broadcast(
 ) -> Result<()> {
     let net_name = crate::config::network_name(network);
     let path = Path::new(target);
-    if path.exists() {
-        let text =
-            fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    // A caller-named file: checked and read as the caller (protected vault).
+    let file = crate::vault::as_caller(|| path.exists().then(|| fs::read_to_string(path)));
+    if let Some(text) = file {
+        let text = text.with_context(|| format!("cannot read {}", path.display()))?;
         let bytes = hex::decode(text.trim()).map_err(|e| anyhow!("not valid tx hex: {e}"))?;
         let tx: Transaction = consensus::encode::deserialize(&bytes)
             .map_err(|e| anyhow!("not a valid transaction: {e}"))?;

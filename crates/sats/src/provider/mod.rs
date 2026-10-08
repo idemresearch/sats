@@ -276,9 +276,13 @@ fn subfrost_endpoint(
 }
 
 /// The undocumented file-driven test driver answers any `file://`
-/// endpoint; see [`mock`].
+/// endpoint; see [`mock`]. Refused in the protected vault: it reads and
+/// writes files at a caller-chosen path as the vault account.
 fn mock_chain(url: &str, source: Source) -> Option<Result<(ChainSource, Endpoint), String>> {
     url.starts_with("file://").then(|| {
+        if crate::vault::is_protected() {
+            return Err("file:// providers are not available with the protected vault".into());
+        }
         let mock = MockProvider::new(url)?;
         let endpoint = Endpoint {
             provider: "mock",
