@@ -57,6 +57,7 @@ runtime. Callers pass in time and own the BDK wallet.
 | `commands` | Human CLI workflows and their text and JSON output |
 | `config` | TOML configuration and network names |
 | `store` | Paths, atomic files, permissions, transactions, grants, requests, the event log |
+| `vault` | Protected mode: environment allowlist, per-caller vault directory, caller-identity file access |
 | `walletd` | The SQLite-backed watch-only BDK wallet |
 | `provider` | Per-network provider, driver resolution, chain access, experimental Alkanes views |
 | `keys`, `password` | Unsealing the seed; verifying the password without keeping anything |

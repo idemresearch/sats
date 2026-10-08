@@ -46,6 +46,8 @@ hex = { workspace = true }
 zeroize = { workspace = true }
 # Random grant-instance ids and capability tokens.
 getrandom = { workspace = true }
+# Protected vault: switch between the caller and the vault account.
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

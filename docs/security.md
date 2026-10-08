@@ -30,12 +30,33 @@ that hold them are owner-only (0700), and existing installs are re-hardened
 as those directories are touched. This guards against partial writes and
 other OS users, not against a process running as your user.
 
+### Protected vault
+
+When the `sats` binary is installed setuid to a dedicated, unprivileged
+account that alone owns the vault directory (`/var/lib/sats` on Linux,
+`/var/db/sats` on macOS), sats runs as that account on your behalf:
+
+- Your wallet lives in `<vault>/users/<your uid>/`, chosen from your real
+  user id. `--dir` and `SATS_DIR` don't apply.
+- The environment is cleared to a short allowlist before anything reads it,
+  and everything sats creates is owner-only.
+- Files you name (PSBT input and output, raw transactions) are opened as
+  you, so a path can't reach into the vault. `file://` providers are
+  refused.
+- The kernel marks setuid processes non-dumpable, so a process running as
+  you can't read sats' memory, including the unsealed seed during signing.
+
+A process running as you can still run `sats` commands, and anything that
+widens authority still needs your password.
+
 ## Limits
 
 - **Same-user processes.** MCP limits the tools an agent is given. It does
   not isolate a hostile process running as your OS user with shell access,
   which can tamper with wallet files or executables, read permitted memory,
-  or intercept your input. sats has no independent signing hardware and
+  or intercept your input. The [protected vault](#protected-vault) takes
+  wallet files and sats' memory out of its reach; it can still intercept
+  your input or imitate a prompt. sats has no independent signing hardware and
   cannot protect a compromised operating system.
 - **Memory.** No long-running process keeps an unsealed seed, but `init`,
   restore, password checks, and signing briefly hold plaintext key

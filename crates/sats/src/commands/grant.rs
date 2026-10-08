@@ -198,7 +198,22 @@ pub fn run(
 /// resolver's roots and removes a future client's SATS_DIR in the launched
 /// process itself.
 fn mcp_launch_command(store: &Store, network: &str, agent: &str) -> Result<String> {
-    let mut args = Vec::new();
+    let mut args: Vec<String> = Vec::new();
+    // The protected vault picks the wallet from the caller's uid and ignores
+    // the environment, so nothing needs pinning.
+    if crate::vault::is_protected() {
+        args.extend(["sats".into(), "--network".into(), network.into()]);
+        args.extend(["agent".into(), "serve".into()]);
+        if agent.starts_with('-') {
+            args.push("--".into());
+        }
+        args.push(agent.into());
+        return Ok(args
+            .iter()
+            .map(|arg| shell_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" "));
+    }
     let config_path = store.config_path();
     let seed_path = store.seed_path();
     let shared_default_dir = match (config_path.parent(), seed_path.parent()) {
