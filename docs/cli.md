@@ -43,7 +43,11 @@ exact options in your installed version.
 | Variable | Meaning |
 |---|---|
 | `SATS_DIR` | Put all configuration and data under one directory. Useful for test wallets. |
-| `SATS_PASSWORD` | Supply the wallet password non-interactively. Keep it out of shell history. |
+
+sats reads the wallet password and the mnemonic only from a terminal, never
+from arguments, environment variables, or pipes. Other programs, agents
+included, can read those. Commands that need the password fail without a
+terminal.
 
 **Amounts** are whole satoshis. `25000`, `25k`, and `1.5m` (1,500,000) all
 work. Suffixes are case-insensitive, and shorthand must resolve to a whole
@@ -79,7 +83,7 @@ chain on first sync.
   online machine.
 - Grants, saved transactions, and agent requests are local records. They
   don't come back with the seed; on-chain history does.
-- Without a terminal, restore reads the phrase from stdin.
+- Restore needs a terminal for both the phrase and the new password.
 
 ## Sending
 
