@@ -196,7 +196,7 @@ assert cli_json("receive")["address"].startswith("tb1p")
 mcp = MCP(grant())
 try:
     # Empty, refresh, bounded wait, and cancellation remain provider-free even
-    # when the provider setup can't be resolved (Bitcoin data set to Esplora
+    # when the provider setup can't be resolved (the provider set to Esplora
     # with no URL). Explicit ID required for pipes.
     config = ROOT / "config.toml"
     original_config = config.read_text()

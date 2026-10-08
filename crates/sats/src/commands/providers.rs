@@ -1,4 +1,4 @@
-//! `sats providers`: where a network's Bitcoin data comes from.
+//! `sats providers`: each network's one provider.
 //!
 //! Every change is a human trust decision written to the config file. A
 //! change that points at an endpoint is resolved and checked against the
@@ -15,7 +15,7 @@ use crate::cli::{AddArgs, ChainArg, ProviderArg};
 use crate::config::{
     ChainChoice, Config, EsploraConfig, RedactedUrl, SubfrostConfig, network_name,
 };
-use crate::provider::{self, CliProvider, Endpoint, Overview, Source};
+use crate::provider::{self, CliProvider, Endpoint, Source};
 use crate::store::Store;
 use crate::ui;
 
@@ -105,7 +105,7 @@ pub fn use_chain(
     check_and_save(store, &config, network, false)?;
     if !json {
         ui::ok(&format!(
-            "{} now gets Bitcoin data from {}",
+            "{} now uses {}",
             network_name(network),
             display_name(choice.as_str())
         ));
@@ -166,7 +166,7 @@ pub fn remove(
         });
         for net in reverted {
             ui::warn(&format!(
-                "{} Bitcoin data is back to the default: {}",
+                "{} is back to the default provider: {}",
                 network_name(net),
                 display_name(ChainChoice::default_for(net).as_str())
             ));
@@ -225,7 +225,7 @@ fn read_credential(label: &str, current: Option<String>, required: bool) -> Resu
     }
 }
 
-/// Print what the network uses. When it can't be resolved, show the
+/// Print the network's provider. When it can't be resolved, show the
 /// settings as written and fail with the resolution error, so the list is
 /// where a broken setup gets diagnosed.
 fn show(
@@ -249,32 +249,9 @@ fn show(
     };
     if json {
         println!("{}", overview_json(net_name, &view));
-        return Ok(());
+    } else {
+        println!("{net_name}  {}", describe(&view));
     }
-
-    println!("{net_name}");
-    println!();
-    let alkanes = match &view.alkanes {
-        // Same endpoint as the row above: its details are already shown.
-        Some(endpoint)
-            if endpoint.provider == view.chain.provider && endpoint.url == view.chain.url =>
-        {
-            display_name(endpoint.provider).to_string()
-        }
-        Some(endpoint) => describe(endpoint),
-        None => {
-            let url = if provider::subfrost::default_url(network).is_some() {
-                ""
-            } else {
-                " --url URL"
-            };
-            format!("not set up — sats providers add subfrost{url}")
-        }
-    };
-    table(&[
-        ["Bitcoin".to_string(), describe(&view.chain)],
-        ["Alkanes".to_string(), alkanes],
-    ]);
     Ok(())
 }
 
@@ -311,20 +288,13 @@ fn describe(endpoint: &Endpoint) -> String {
     format!("{}{note}", parts.join(" · "))
 }
 
-fn endpoint_json(endpoint: &Endpoint) -> serde_json::Value {
+fn overview_json(net_name: &str, endpoint: &Endpoint) -> serde_json::Value {
     serde_json::json!({
+        "network": net_name,
         "provider": endpoint.provider,
         "url": endpoint.url,
         "auth": endpoint.auth.as_str(),
         "source": endpoint.source.as_str(),
-    })
-}
-
-fn overview_json(net_name: &str, view: &Overview) -> serde_json::Value {
-    serde_json::json!({
-        "network": net_name,
-        "chain": endpoint_json(&view.chain),
-        "alkanes_views": view.alkanes.as_ref().map(endpoint_json),
     })
 }
 
@@ -341,7 +311,7 @@ fn configured(config: &Config, network: Network) {
     };
     let redact = crate::provider::error::redact_url;
     let rows = [
-        ["Bitcoin".to_string(), chain, String::new()],
+        ["Provider".to_string(), chain, String::new()],
         [
             "Subfrost".into(),
             if config.subfrost.is_some() {

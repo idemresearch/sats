@@ -6,8 +6,8 @@ Learn the wallet on signet first. Mainnet is always an explicit choice.
 
 - [CLI reference](cli.md): commands, flags, configuration, and JSON output.
 - [MCP and agent grants](mcp.md): connect an agent and understand its tools.
-- [Providers](providers.md): where Bitcoin data comes from, and how to set up
-  Subfrost.
+- [Providers](providers.md): supported providers, where Bitcoin data comes
+  from, and how to set up Subfrost.
 - [Security and trust model](security.md): keys, grants, signing, and failure
   behavior.
 

@@ -58,7 +58,7 @@ runtime. Callers pass in time and own the BDK wallet.
 | `config` | TOML configuration and network names |
 | `store` | Paths, atomic files, permissions, transactions, grants, requests, the event log |
 | `walletd` | The SQLite-backed watch-only BDK wallet |
-| `provider` | Per-network chain source, driver resolution, chain access, Alkanes views |
+| `provider` | Per-network provider, driver resolution, chain access, experimental Alkanes views |
 | `keys`, `password` | Unsealing the seed; verifying the password without keeping anything |
 | `request` | Request create, dismiss, reconcile, and the executor (`stage`, `commit`) |
 | `spend` | The shared tail: sign, persist, then broadcast |
@@ -70,9 +70,10 @@ runtime. Callers pass in time and own the BDK wallet.
 Pure Alkanes encoding: alkane ids, LEB128 varints, cellpacks, the
 protostone/runestone envelope, bytecode hashing, and tolerant simulation
 views. Encodings follow the published alkanes-rs reference, frozen by unit
-vectors. Like `sats-core`, it does no I/O. Default builds expose inspection
-and simulation only; execution sits behind a non-default development
-feature.
+vectors. Like `sats-core`, it does no I/O. Default builds don't include it:
+the `experimental-alkanes` feature adds `sats alkanes inspect` and
+`simulate`, and execution sits behind the development-only
+`experimental-alkanes-execute` feature.
 
 ### `sats-web`
 
@@ -172,9 +173,10 @@ reconciled, is specified in [Security](security.md#approving-a-request).
 
 ## Providers
 
-Each network has exactly one chain source (mempool.space, Subfrost, or an
-Esplora server) for sync, fees, and broadcast. Alkanes views come from
-Subfrost when it is set up. Drivers are audited enums.
+Each network has exactly one provider (mempool.space, Subfrost, or an
+Esplora server) for sync, fees, and broadcast. In experimental builds,
+Alkanes views come from the same provider, which must be Subfrost. Drivers
+are audited enums.
 Resolution is pure configuration work with no network I/O. Operations check
 the network when they run. See [Providers](providers.md).
 

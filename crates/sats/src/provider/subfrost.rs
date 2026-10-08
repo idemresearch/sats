@@ -1,5 +1,5 @@
 //! Subfrost driver: one aggregate JSON-RPC endpoint multiplexing
-//! esplora-style chain queries with ord and alkanes indexer queries
+//! esplora-style chain queries with alkanes indexer queries
 //! (sandshrew-compatible namespacing).
 //!
 //! API keys travel in `x-subfrost-api-key`. Legacy URLs may still carry a
@@ -47,10 +47,12 @@ mod dialect {
     /// protobuf request, "latest"]`. Result: hex string. The gateway's
     /// `alkanes_getbytecode` shortcut drops the alkane id (the indexer
     /// panics unwrapping it), so bytecode is fetched through this view.
+    #[cfg(feature = "experimental-alkanes")]
     pub const METASHREW_VIEW: &str = "metashrew_view";
     /// Simulate a contract call. Params: one
     /// `{target: {block, tx}, inputs: [...]}` object, decimal strings.
     /// Result: opaque JSON, displayed rather than trusted.
+    #[cfg(feature = "experimental-alkanes")]
     pub const ALKANES_SIMULATE: &str = "alkanes_simulate";
     /// `GET /blocks` — recent block summaries. Params: `[]`.
     pub const BLOCKS: &str = "esplora_blocks";
@@ -189,6 +191,7 @@ impl SubfrostClient {
         Ok(txid)
     }
 
+    #[cfg(feature = "experimental-alkanes")]
     fn view_err(&self, message: String) -> ProviderError {
         ProviderError::View {
             url: self.display_url.clone(),
@@ -198,6 +201,7 @@ impl SubfrostClient {
 
     /// Contract bytecode for an alkane id, decoded from the endpoint's
     /// hex result.
+    #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_bytecode(&self, block: u128, tx: u128) -> Result<Vec<u8>, ProviderError> {
         let request = sats_alkanes::view::bytecode_request(block, tx);
         let value: serde_json::Value = self
@@ -214,6 +218,7 @@ impl SubfrostClient {
     }
 
     /// Simulate a contract call; the result is returned verbatim.
+    #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_simulate(
         &self,
         block: u128,
@@ -672,6 +677,7 @@ fn parse_jsonrpc<T: DeserializeOwned>(body: &str) -> Result<T, String> {
 
 /// A bytecode result is a hex string, with or without a 0x prefix. An
 /// empty result means nothing is deployed at that id.
+#[cfg(feature = "experimental-alkanes")]
 fn parse_bytecode_result(value: &serde_json::Value) -> Result<Vec<u8>, String> {
     let hex_str = value
         .as_str()
@@ -1146,6 +1152,7 @@ mod tests {
         ] {
             let message = parse_jsonrpc::<HashMap<u16, f64>>(&body.to_string()).unwrap_err();
             super::super::error::assert_safe_error(client.sync_err(message.clone()), &secrets);
+            #[cfg(feature = "experimental-alkanes")]
             super::super::error::assert_safe_error(client.view_err(message), &secrets);
         }
     }
@@ -1161,13 +1168,15 @@ mod tests {
             })
             .to_string(),
         );
-        let (origin, requests) = local_server(vec![
+        let mut responses = vec![
             rpc_response(serde_json::json!({"2": 3.0})),
             bad.clone(),
             bad.clone(),
-            bad,
-            rpc_response(serde_json::json!(echo)),
-        ]);
+        ];
+        #[cfg(feature = "experimental-alkanes")]
+        responses.push(bad);
+        responses.push(rpc_response(serde_json::json!(echo)));
+        let (origin, requests) = local_server(responses);
         let client = SubfrostClient::new(
             format!("{origin}/arbitrary/PATHSECRET?unfamiliar=QUERYSECRET"),
             Some("HEADERSECRET".into()),
@@ -1179,12 +1188,14 @@ mod tests {
             input: vec![],
             output: vec![],
         };
-        for error in [
+        let mut errors = vec![
             client.check_network(Network::Signet).unwrap_err(),
             client.fee_estimates().unwrap_err(),
-            client.alkanes_bytecode(2, 0).unwrap_err(),
-            client.broadcast(&tx).unwrap_err(),
-        ] {
+        ];
+        #[cfg(feature = "experimental-alkanes")]
+        errors.push(client.alkanes_bytecode(2, 0).unwrap_err());
+        errors.push(client.broadcast(&tx).unwrap_err());
+        for error in errors {
             super::super::error::assert_safe_error(
                 error,
                 &echo.split_whitespace().collect::<Vec<_>>(),
@@ -1205,6 +1216,7 @@ mod tests {
     /// The gateway's `alkanes_getbytecode` shortcut drops the id; the view
     /// takes the protobuf request that a live signet indexer answered.
     #[test]
+    #[cfg(feature = "experimental-alkanes")]
     fn bytecode_is_fetched_through_the_indexer_view() {
         let (url, requests) = local_server(vec![rpc_response(serde_json::json!("0x0061736d"))]);
         let client = SubfrostClient::new(url, None);
@@ -1220,6 +1232,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "experimental-alkanes")]
     fn bytecode_results_decode_or_fail_typed() {
         let with_prefix = serde_json::json!("0x0061736d");
         assert_eq!(parse_bytecode_result(&with_prefix).unwrap(), b"\0asm");

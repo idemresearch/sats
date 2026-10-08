@@ -121,6 +121,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 commands::providers::remove(&store, config, network, kind, json)
             }
         },
+        #[cfg(feature = "experimental-alkanes")]
         Command::Alkanes { command } => match command {
             cli::AlkanesCommand::Inspect { id } => {
                 commands::alkanes::inspect(&services(&config)?, &id, json)

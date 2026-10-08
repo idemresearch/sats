@@ -1,11 +1,12 @@
 //! Alkanes contract tools: inspect, simulate, execute.
 //!
-//! Views go through the resolved `alkanes.view` provider; the wire
-//! dialect is the Subfrost driver's (unverified against a live endpoint —
-//! see the in-source dialect note), so results are interpreted tolerantly
-//! and always displayed verbatim. Execution is human-only: simulate,
-//! show, confirm, password-sign — and refuses mainnet. Execution is excluded
-//! from default v0.0.1 builds; its source is retained for explicit development builds.
+//! Views go through the network's provider, which must be Subfrost;
+//! `simulate`'s wire format is unverified against a live endpoint, so
+//! results are interpreted tolerantly and always displayed verbatim.
+//! Execution is human-only: simulate, show, confirm, password-sign — and
+//! refuses mainnet. The whole module is experimental
+//! (`experimental-alkanes`) and excluded from default builds; execution
+//! needs `experimental-alkanes-execute` on top.
 
 #[cfg(feature = "experimental-alkanes-execute")]
 use std::collections::BTreeSet;

@@ -12,7 +12,7 @@ installs from the latest release, or from the tag named in `SATS_VERSION`.
 
 The package version, `sats --version`, the MCP implementation version, and
 the playground version all come from `workspace.package.version` in
-`Cargo.toml`. Default binaries include MCP and exclude Alkanes execution.
+`Cargo.toml`. Default binaries include MCP and exclude every Alkanes command.
 
 1. Run the full [verification gate](development.md#verification-gate).
 2. Regenerate the playground if `sats-core` or `sats-web` changed.

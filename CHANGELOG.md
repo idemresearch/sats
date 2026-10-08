@@ -14,6 +14,17 @@ Notable changes to sats, newest first. Versions follow
   calls carry `error_code` `no_grant` or `unauthorized`, and `get_grant`
   reports `active: false` without the grant's limits.
 
+### Providers
+
+- Each network has one provider, and `sats providers` shows it on one line,
+  such as `signet  mempool.space (default)`. `--json` prints one flat
+  object with `network`, `provider`, `url`, `auth`, and `source`; the
+  `chain` and `alkanes_views` fields are gone.
+- `sats alkanes` is no longer in default builds. Build with
+  `--features experimental-alkanes` to get `inspect` and `simulate`. They
+  now need Subfrost as the network's provider; a saved Subfrost key alone
+  no longer serves them.
+
 ## 0.0.1 (2026-10-01)
 
 The first release. Experimental; signet by default.
