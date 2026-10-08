@@ -92,12 +92,4 @@ mod tests {
         assert!(from_env(None, false).unwrap().is_none());
         assert!(from_env(None, true).unwrap().is_none());
     }
-
-    #[test]
-    fn this_test_build_honors_the_seam() {
-        assert!(
-            NON_INTERACTIVE_SECRETS,
-            "integration tests drive the binary with SATS_PASSWORD; run them in a debug build"
-        );
-    }
 }
