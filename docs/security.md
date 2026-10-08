@@ -20,11 +20,9 @@ XChaCha20-Poly1305. The format is versioned and authenticated, and its
 associated data binds the blob to its purpose. The SQLite wallet holds public
 descriptors and chain state, never private keys.
 
-The password and mnemonic are entered only at a terminal. sats never reads
-them from arguments, environment variables, or pipes: argument lists and
-shell history leak, and every program you start, agents included, inherits
-your environment. With an environment password, an agent with a shell could
-run `sats agent approve --yes` and sign with no one at the keyboard.
+The password and mnemonic are entered only at a terminal, never through
+arguments, environment variables, or pipes, which other programs, agents
+included, can read or inherit.
 
 Sealed keys, grants, agent requests, the event log, and finalized
 transactions are written atomically and owner-only (0600). The directories

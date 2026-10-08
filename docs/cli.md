@@ -44,11 +44,6 @@ exact options in your installed version.
 |---|---|
 | `SATS_DIR` | Put all configuration and data under one directory. Useful for test wallets. |
 
-sats reads the wallet password and the mnemonic only from a terminal, never
-from arguments, environment variables, or pipes. Other programs, agents
-included, can read those. Commands that need the password fail without a
-terminal.
-
 **Amounts** are whole satoshis. `25000`, `25k`, and `1.5m` (1,500,000) all
 work. Suffixes are case-insensitive, and shorthand must resolve to a whole
 sat.
