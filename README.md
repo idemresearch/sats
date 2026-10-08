@@ -7,7 +7,7 @@ curl -fsSL https://sats.sh/setup.sh | sh
 ```
 
 > [!WARNING]
-> sats 0.0.1 is experimental. It defaults to signet, where coins have no
+> sats 0.0.2 is experimental. It defaults to signet, where coins have no
 > value. Read the [security model](docs/security.md) before using mainnet, and
 > keep amounts and agent budgets small.
 
