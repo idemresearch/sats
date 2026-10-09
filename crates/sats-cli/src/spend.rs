@@ -49,7 +49,7 @@ pub fn broadcast_record(
     let txid = services.broadcast(ctx, &tx)?;
     record.mark_broadcast();
     if let Err(err) = store.save_transaction(ctx.net_name, record) {
-        eprintln!("⚠ broadcast succeeded but the local record was not updated: {err:#}");
+        log::warn!("broadcast succeeded but the local record was not updated: {err:#}");
     }
     Ok(txid)
 }

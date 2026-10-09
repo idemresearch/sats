@@ -526,10 +526,10 @@ fn settle(
     match store.lock_grants(net_name) {
         Ok(_lock) => {
             if let Err(err) = store.save_agent_request(net_name, request) {
-                eprintln!("⚠ request record not updated: {err:#}");
+                log::warn!("request record not updated: {err:#}");
             }
         }
-        Err(err) => eprintln!("⚠ request record not updated: {err:#}"),
+        Err(err) => log::warn!("request record not updated: {err:#}"),
     }
     journal_soft(store, net_name, request, kind);
 }

@@ -18,6 +18,7 @@ use crate::config::{Config, parse_network};
 use crate::store::Store;
 
 fn main() {
+    ui::install_warnings();
     let cli = Cli::parse_with_safe_errors();
     if let Err(err) = run(cli) {
         eprintln!("✗ {err:#}");
@@ -37,7 +38,10 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 
     // Workflows with local branches resolve only when they reach chain work.
     let overrides = cli.provider;
-    let services = |config: &Config| provider::resolve(config, overrides.as_ref(), network);
+    let services = |config: &Config| {
+        provider::resolve(config, overrides.as_ref(), network)
+            .map(|services| services.with_progress(ui::sync_progress()))
+    };
 
     match cli.command {
         Command::Init { words, restore } => {

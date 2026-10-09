@@ -1,9 +1,12 @@
 //! Output styling: quiet, aligned, minimal color.
 
 use std::io::{BufRead, IsTerminal, Write};
+use std::sync::{Arc, Mutex};
 
 use owo_colors::OwoColorize;
 use sats_core::fmt::format_sats;
+
+use crate::provider::Progress;
 
 pub fn use_color() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
@@ -87,6 +90,56 @@ pub fn human_duration(secs: u64) -> String {
         format!("{minutes}m")
     } else {
         format!("{secs}s")
+    }
+}
+
+/// Print the workflow's warnings on stderr. Only sats' own records: a
+/// dependency's log output could carry endpoint details, and was never
+/// shown before.
+pub fn install_warnings() {
+    static WARNINGS: Warnings = Warnings;
+    if log::set_logger(&WARNINGS).is_ok() {
+        log::set_max_level(log::LevelFilter::Warn);
+    }
+}
+
+struct Warnings;
+
+impl log::Log for Warnings {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        // The target starts with the emitting crate: `sats` (this binary)
+        // or a `sats_*` library.
+        let krate = metadata.target().split("::").next().unwrap_or_default();
+        metadata.level() <= log::Level::Warn && (krate == "sats" || krate.starts_with("sats_"))
+    }
+
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            eprintln!("⚠ {}", record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// The "syncing…" status line, for chain services.
+pub fn sync_progress() -> Arc<dyn Progress> {
+    Arc::new(SyncStatus(Mutex::new(None)))
+}
+
+struct SyncStatus(Mutex<Option<StatusLine>>);
+
+impl Progress for SyncStatus {
+    fn sync_started(&self) {
+        if let Ok(mut line) = self.0.lock() {
+            *line = Some(StatusLine::start("syncing…"));
+        }
+    }
+
+    fn sync_finished(&self) {
+        if let Some(line) = self.0.lock().ok().and_then(|mut line| line.take()) {
+            line.finish();
+        }
     }
 }
 
@@ -195,6 +248,19 @@ pub fn review_choice(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use log::Log;
+
+    #[test]
+    fn only_sats_warnings_are_printed() {
+        let shown = |target: &str, level| {
+            Warnings.enabled(&log::Metadata::builder().target(target).level(level).build())
+        };
+        assert!(shown("sats::store", log::Level::Warn));
+        assert!(shown("sats_wallet::request", log::Level::Error));
+        assert!(!shown("sats::store", log::Level::Info));
+        assert!(!shown("rustls::client", log::Level::Warn));
+        assert!(!shown("satsuma", log::Level::Warn));
+    }
 
     #[test]
     fn review_requires_a_displayed_number_and_never_defaults_to_one() {

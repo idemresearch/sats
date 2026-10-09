@@ -207,10 +207,7 @@ impl Store {
             match read_transaction(&path, network) {
                 Ok(record) => records.push(record),
                 Err(_) => {
-                    eprintln!(
-                        "⚠ skipping unreadable transaction record {}",
-                        path.display()
-                    );
+                    log::warn!("skipping unreadable transaction record {}", path.display());
                 }
             }
         }
@@ -383,7 +380,7 @@ impl Store {
                     grant
                 }
                 _ => {
-                    eprintln!("⚠ skipping unreadable grant {}", path.display());
+                    log::warn!("skipping unreadable grant {}", path.display());
                     continue;
                 }
             };
@@ -569,7 +566,7 @@ impl Store {
                     .and_then(|bytes| serde_json::from_slice::<AgentRequest>(&bytes).ok());
                 match readable {
                     Some(request) if request.version_supported() => requests.push(request),
-                    _ => eprintln!("⚠ skipping unreadable agent request {}", path.display()),
+                    _ => log::warn!("skipping unreadable agent request {}", path.display()),
                 }
             }
         }
@@ -626,7 +623,7 @@ impl Store {
                 continue;
             }
             let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-                eprintln!("⚠ skipping an event log line that is not JSON");
+                log::warn!("skipping an event log line that is not JSON");
                 continue;
             };
             match serde_json::from_value::<AgentEvent>(value.clone()) {

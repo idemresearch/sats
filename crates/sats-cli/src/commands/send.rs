@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use sats_core::bitcoin::Network;
+use sats_core::plan::PreparedSpend;
 
 use crate::cli::SendArgs;
 use crate::commands::prepare;
@@ -39,7 +40,7 @@ pub fn run(
                 })
             );
         } else {
-            prepare::print_block(&prepared);
+            print_block(&prepared);
             ui::dim("dry run — nothing signed or saved");
         }
         return Ok(());
@@ -62,7 +63,7 @@ pub fn run(
                 })
             );
         } else {
-            prepare::print_block(&prepared);
+            print_block(&prepared);
             println!();
             ui::ok(&format!("unsigned PSBT written  {}", file.display()));
             ui::dim(&format!("next: sats psbt sign {}", file.display()));
@@ -71,7 +72,7 @@ pub fn run(
     }
 
     if !json {
-        prepare::print_block(&prepared);
+        print_block(&prepared);
     }
     if !args.yes && !ui::confirm("Sign?", true)? {
         ui::dim("aborted");
@@ -118,4 +119,12 @@ pub fn run(
             );
         }
     }
+}
+
+fn print_block(plan: &PreparedSpend) {
+    ui::sat_rows(&[
+        ("Send", plan.amount_sat),
+        ("Fee", plan.fee_sat),
+        ("Total", plan.total_sat()),
+    ]);
 }

@@ -227,7 +227,7 @@ fn first_sync(
         return Ok(());
     }
     let services = match crate::provider::resolve(config, overrides, network) {
-        Ok(s) => s,
+        Ok(s) => s.with_progress(ui::sync_progress()),
         Err(err) => {
             eprintln!("✗ provider unavailable ({err:#})");
             println!("{manual}");

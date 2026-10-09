@@ -16,6 +16,8 @@ pub mod mock;
 pub mod subfrost;
 
 use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
 
 use sats_core::bitcoin::{FeeRate, Network, Transaction, Txid};
 
@@ -140,6 +142,28 @@ pub struct Services {
     sync: ChainSource,
     fees: ChainSource,
     broadcast: ChainSource,
+    progress: Indicator,
+}
+
+/// What a surface shows while the wallet syncs. The library draws
+/// nothing itself; a surface passes its own indicator.
+pub trait Progress: Send + Sync {
+    fn sync_started(&self);
+    /// Called once the sync ends, whether or not it succeeded.
+    fn sync_finished(&self);
+}
+
+#[derive(Default)]
+struct Indicator(Option<Arc<dyn Progress>>);
+
+impl fmt::Debug for Indicator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Indicator"
+        } else {
+            "None"
+        })
+    }
 }
 
 /// The resolved choices before they become services.
@@ -175,6 +199,7 @@ pub fn resolve(
         sync,
         fees,
         broadcast,
+        progress: Indicator::default(),
     })
 }
 
@@ -342,6 +367,12 @@ fn subfrost_chain(
 }
 
 impl Services {
+    /// Report sync progress to `progress`.
+    pub fn with_progress(mut self, progress: Arc<dyn Progress>) -> Services {
+        self.progress = Indicator(Some(progress));
+        self
+    }
+
     /// Confirm the chain source answers and serves this network, before a
     /// human relies on it.
     pub fn check_chain(&self) -> Result<(), ProviderError> {
@@ -355,9 +386,14 @@ impl Services {
     /// Sync the wallet: a full scan on first touch, incremental after.
     /// Validates the provider serves the wallet's network first.
     pub fn sync_wallet(&self, ctx: &mut WalletCtx) -> Result<(), ProviderError> {
-        let status = crate::ui::StatusLine::start("syncing…");
+        let progress = self.progress.0.as_deref();
+        if let Some(p) = progress {
+            p.sync_started();
+        }
         let result = self.sync_inner(ctx);
-        status.finish();
+        if let Some(p) = progress {
+            p.sync_finished();
+        }
         result
     }
 

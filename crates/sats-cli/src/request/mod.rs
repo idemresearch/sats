@@ -723,7 +723,7 @@ pub(crate) fn journal(
 /// Post-write appends must not fail the operation: warn.
 pub(crate) fn journal_soft(store: &Store, net_name: &str, request: &AgentRequest, kind: EventKind) {
     if let Err(err) = journal(store, net_name, request, kind) {
-        eprintln!("⚠ event log append failed: {err:#}");
+        log::warn!("event log append failed: {err:#}");
     }
 }
 

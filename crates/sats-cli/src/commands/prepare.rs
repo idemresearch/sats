@@ -8,7 +8,6 @@ use sats_core::plan::PreparedSpend;
 
 use crate::provider::Services;
 use crate::store::unix_now;
-use crate::ui;
 use crate::walletd::WalletCtx;
 
 /// One preparation request. Human-approved agent requests always use the
@@ -67,8 +66,8 @@ pub fn build(
     if !req.allow_dust {
         let dust = engine::dust_suspects(utxos.iter().copied());
         if !dust.is_empty() {
-            eprintln!(
-                "⚠ {} utxo{} excluded (dust heuristic: possible inscriptions)",
+            log::warn!(
+                "{} utxo{} excluded (dust heuristic: possible inscriptions)",
                 dust.len(),
                 if dust.len() == 1 { "" } else { "s" },
             );
@@ -103,12 +102,4 @@ pub fn build(
         ctx.net_name,
         unix_now(),
     )?)
-}
-
-pub fn print_block(plan: &PreparedSpend) {
-    ui::sat_rows(&[
-        ("Send", plan.amount_sat),
-        ("Fee", plan.fee_sat),
-        ("Total", plan.total_sat()),
-    ]);
 }
