@@ -1,5 +1,5 @@
 [package]
-name = "sats"
+name = "sats-cli"
 description = "A self-custodial Bitcoin wallet for humans and agents, with maker-checker for agent payments"
 version.workspace = true
 edition.workspace = true

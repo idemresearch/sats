@@ -23,7 +23,7 @@ server files a request, and `sats agent approve` executes it in the human's
 process, for exactly that request. Both paths share preparation, the dust
 exclusion, fee estimation, and the sign-then-persist-then-broadcast tail.
 
-`sats-core` owns deterministic wallet and authorization behavior. `sats` owns
+`sats-core` owns deterministic wallet and authorization behavior. `sats-cli` owns
 everything with side effects: argument parsing, terminal output, files,
 SQLite, network clients, provider selection, passwords, and MCP stdio.
 
@@ -49,7 +49,9 @@ runtime. Callers pass in time and own the BDK wallet.
 | `signer` | The `Signer` trait and the local mnemonic signer |
 | `error`, `fmt`, `amount` | Typed errors, sat formatting, amount shorthand |
 
-### `sats`
+### `sats-cli`
+
+The `sats` binary.
 
 | Module | Owns |
 |---|---|
@@ -75,7 +77,7 @@ the `experimental-alkanes` feature adds `sats alkanes inspect` and
 `simulate`, and execution sits behind the development-only
 `experimental-alkanes-execute` feature.
 
-### `sats-web`
+### `sats-playground`
 
 `sats-core` compiled to WebAssembly for the website playground. Only the
 chain is simulated. Planning, UTXO exclusion, signing, sealing, and grant

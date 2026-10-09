@@ -2,9 +2,9 @@
 resolver = "3"
 members = [
     "crates/sats-core",
-    "crates/sats",
+    "crates/sats-cli",
     "crates/sats-alkanes",
-    "crates/sats-web",
+    "crates/sats-playground",
 ]
 exclude = ["vendor/minreq"]
 

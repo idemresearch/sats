@@ -1,5 +1,5 @@
 [package]
-name = "sats-web"
+name = "sats-playground"
 description = "Browser playground: the sats-core wallet engine compiled to WebAssembly against a simulated signet chain"
 version.workspace = true
 edition.workspace = true

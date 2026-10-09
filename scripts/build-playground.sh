@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build the website playground: sats-web compiled to WebAssembly plus the
+# Build the website playground: sats-playground compiled to WebAssembly plus the
 # wasm-bindgen JS glue, written to website/public/playground/. The output
 # is committed so the website deploys without a Rust toolchain.
 #
@@ -16,11 +16,11 @@ if ! wasm-bindgen --version 2>/dev/null | grep -q "$WBG_VERSION"; then
     exit 1
 fi
 
-cargo build -p sats-web --release --locked --target wasm32-unknown-unknown
+cargo build -p sats-playground --release --locked --target wasm32-unknown-unknown
 
 OUT="website/public/playground"
 rm -rf "$OUT"
-wasm-bindgen target/wasm32-unknown-unknown/release/sats_web.wasm \
+wasm-bindgen target/wasm32-unknown-unknown/release/sats_playground.wasm \
     --target web --no-typescript --out-dir "$OUT"
 
 ls -lh "$OUT"

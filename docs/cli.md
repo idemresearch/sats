@@ -277,7 +277,7 @@ spending budget again.
 
 `sats alkanes` is an experimental, signet-first client for Alkanes contracts.
 Default builds don't include it. Build it with
-`cargo install --locked --path crates/sats --features experimental-alkanes`.
+`cargo install --locked --path crates/sats-cli --features experimental-alkanes`.
 It needs Subfrost as the network's provider (`sats providers add subfrost`),
 and there is no fallback.
 

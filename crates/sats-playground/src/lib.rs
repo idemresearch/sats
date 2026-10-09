@@ -1,4 +1,4 @@
-//! sats-web — the sats wallet engine running in the browser.
+//! sats-playground — the sats wallet engine running in the browser.
 //!
 //! Compiles `sats-core` to WebAssembly behind a small JSON API for the
 //! website playground. Only the chain is simulated: an in-memory faucet

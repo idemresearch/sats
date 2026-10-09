@@ -246,8 +246,8 @@ export default function Playground() {
         Playground: new () => WasmWallet;
       }>;
       loadingRef.current = (async () => {
-        const mod = await importUrl("/playground/sats_web.js");
-        await mod.default("/playground/sats_web_bg.wasm");
+        const mod = await importUrl("/playground/sats_playground.js");
+        await mod.default("/playground/sats_playground_bg.wasm");
         walletRef.current = new mod.Playground();
       })();
     }

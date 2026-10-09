@@ -74,7 +74,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Build release binary
-        run: cargo build -p sats --release --locked --target "${{ matrix.target }}"
+        run: cargo build -p sats-cli --release --locked --target "${{ matrix.target }}"
       - name: Package release archive
         shell: bash
         env:
