@@ -1,0 +1,33 @@
+[package]
+name = "sats-wallet"
+description = "The sats wallet as a working system: storage, chain providers, and the request workflow every front end shares"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# Experimental Alkanes contract views, served by Subfrost.
+experimental-alkanes = ["dep:sats-alkanes"]
+
+[dependencies]
+sats-core = { workspace = true }
+sats-alkanes = { workspace = true, optional = true }
+bdk_wallet = { workspace = true, features = ["rusqlite"] }
+bdk_esplora = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+directories = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+minreq = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# test-utils seeds wallets with deterministic confirmed UTXOs.
+bdk_wallet = { workspace = true, features = ["rusqlite", "test-utils"] }

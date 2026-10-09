@@ -1,0 +1,402 @@
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(
+    name = "sats",
+    version,
+    about = "A self-custodial Bitcoin wallet for humans and agents",
+    disable_help_subcommand = true
+)]
+pub struct Cli {
+    /// Network: mainnet, signet, testnet4, regtest (overrides config)
+    #[arg(long, global = true, value_name = "NET")]
+    pub network: Option<String>,
+
+    /// Provider for this run only: --provider esplora=URL or
+    /// --provider subfrost=URL
+    #[arg(long, global = true, value_name = "KIND=URL",
+          value_parser = sats_wallet::provider::parse_cli_provider)]
+    pub provider: Option<sats_wallet::provider::CliProvider>,
+
+    /// Machine-readable JSON output
+    #[arg(long, global = true)]
+    pub json: bool,
+
+    /// Data directory override
+    #[arg(long, global = true, env = "SATS_DIR", hide = true, value_name = "DIR")]
+    pub dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+impl Cli {
+    pub fn parse_with_safe_errors() -> Self {
+        Self::try_parse().unwrap_or_else(|mut error| {
+            use clap::error::{ContextKind, ContextValue};
+            // Clap otherwise repeats the complete credential-bearing value
+            // even though our provider parser returns a display-safe reason.
+            if matches!(error.get(ContextKind::InvalidArg),
+                Some(ContextValue::String(arg)) if arg.starts_with("--provider"))
+            {
+                error.insert(
+                    ContextKind::InvalidValue,
+                    ContextValue::String("[redacted provider endpoint]".into()),
+                );
+            }
+            error.exit()
+        })
+    }
+}
+
+#[derive(Subcommand)]
+pub enum Command {
+    /// Set up the wallet: create a new one, or restore from a mnemonic backup
+    Init {
+        /// Mnemonic length for a new wallet (12 or 24 words; implies create)
+        #[arg(long, value_parser = clap::value_parser!(u8).range(12..=24),
+              conflicts_with = "restore")]
+        words: Option<u8>,
+        /// Restore an existing wallet from its mnemonic backup
+        #[arg(long)]
+        restore: bool,
+    },
+    /// Show the wallet balance
+    Balance {
+        /// Skip chain sync, show the cached balance
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Show a fresh receive address
+    Receive,
+    /// Send bitcoin: prepare, confirm, sign, persist, broadcast
+    Send(SendArgs),
+    /// List the wallet's transactions, newest first
+    History {
+        /// Skip chain sync; history may be stale
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Show pending and broadcast transactions, or one by txid
+    Status {
+        /// Transaction id or unique prefix
+        #[arg(value_name = "TXID")]
+        txid: Option<String>,
+        /// Skip chain sync; confirmation state may be stale
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Inspect and sign PSBT files (advanced, multi-signer workflows)
+    Psbt {
+        #[command(subcommand)]
+        command: PsbtCommand,
+    },
+    /// Work with signed transactions (advanced)
+    Tx {
+        #[command(subcommand)]
+        command: TxCommand,
+    },
+    /// Manage agent grants, review requests, and serve the MCP tools
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+    /// Show and choose each network's provider
+    Providers {
+        #[command(subcommand)]
+        command: Option<ProvidersCommand>,
+    },
+    /// Alkanes contract tools (experimental, signet-first)
+    #[cfg(feature = "experimental-alkanes")]
+    Alkanes {
+        #[command(subcommand)]
+        command: AlkanesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ProvidersCommand {
+    /// Show the active network's provider (the default)
+    List,
+    /// Add a provider and make it the active network's provider: asks for
+    /// its key (hidden, or one line on stdin) and checks the endpoint
+    /// before saving
+    Add(AddArgs),
+    /// Choose the active network's provider
+    Use {
+        #[arg(value_enum, value_name = "SOURCE")]
+        source: ChainArg,
+    },
+    /// Remove a provider and its stored credential
+    Remove {
+        #[arg(value_enum, value_name = "PROVIDER")]
+        kind: ProviderArg,
+    },
+}
+
+#[derive(clap::Args)]
+pub struct AddArgs {
+    /// Provider to add
+    #[arg(value_enum, value_name = "PROVIDER")]
+    pub kind: ProviderArg,
+    /// Endpoint URL (default: Subfrost's endpoint for mainnet and signet;
+    /// required for esplora)
+    #[arg(long, value_name = "URL")]
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ProviderArg {
+    /// Subfrost (API key)
+    Subfrost,
+    /// Your own Esplora server (URL, optional bearer token)
+    Esplora,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ChainArg {
+    /// The public mempool.space API (the default)
+    Mempool,
+    /// Subfrost, with the saved key
+    Subfrost,
+    /// The Esplora server added for this network
+    Esplora,
+}
+
+#[cfg(feature = "experimental-alkanes")]
+#[derive(Subcommand)]
+pub enum AlkanesCommand {
+    /// Fetch a contract's bytecode and show its code hash
+    Inspect {
+        /// Alkane id (e.g. 2:1)
+        #[arg(value_name = "BLOCK:TX")]
+        id: String,
+    },
+    /// Simulate a contract call and show the interpreted result
+    Simulate {
+        /// Alkane id (e.g. 2:1)
+        #[arg(value_name = "BLOCK:TX")]
+        id: String,
+        /// Calldata words (the first is conventionally the opcode)
+        #[arg(value_name = "INPUTS")]
+        inputs: Vec<u128>,
+    },
+    /// Execute a contract call: simulate, confirm, sign, broadcast.
+    /// Refuses mainnet in this release
+    #[cfg(feature = "experimental-alkanes-execute")]
+    Execute {
+        /// Alkane id (e.g. 2:1)
+        #[arg(value_name = "BLOCK:TX")]
+        id: String,
+        /// Calldata words (the first is conventionally the opcode)
+        #[arg(value_name = "INPUTS")]
+        inputs: Vec<u128>,
+        /// Fee rate in sat/vB (default: estimated for configured target)
+        #[arg(long, value_name = "SAT_VB")]
+        fee_rate: Option<u64>,
+        /// Sats carried by the pointer output the call's assets land on
+        #[arg(long, value_name = "SATS", default_value_t = 546)]
+        postage: u64,
+        /// Skip the confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum TxCommand {
+    /// Broadcast a raw transaction hex file, or a saved transaction by
+    /// txid or unique prefix
+    Broadcast {
+        /// Raw transaction hex file, or a txid/prefix (`sats status` lists them)
+        #[arg(value_name = "FILE|TXID")]
+        target: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PsbtCommand {
+    /// Decode a PSBT file: outputs, fee, and signing state
+    Inspect {
+        /// PSBT file (base64 text or binary)
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+    },
+    /// Sign a PSBT file with the wallet seed
+    Sign {
+        /// PSBT file (base64 text or binary)
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Write the signed PSBT here instead of staging a broadcast
+        #[arg(long, value_name = "FILE")]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(clap::Args)]
+pub struct SendArgs {
+    /// Recipient address
+    pub address: String,
+    /// Amount in sats (shorthand ok: 10k, 1.5m)
+    #[arg(value_parser = crate::amount::parse)]
+    pub amount: u64,
+    /// Fee rate in sat/vB (default: estimated for configured target)
+    #[arg(long, value_name = "SAT_VB")]
+    pub fee_rate: Option<u64>,
+    /// Spend UTXOs at inscription postage values (546/330 sats)
+    #[arg(long)]
+    pub allow_dust: bool,
+    /// Skip the confirmation prompt
+    #[arg(short, long, conflicts_with_all = ["dry_run", "export_psbt"])]
+    pub yes: bool,
+    /// Preview only: prepare and price the send, persist nothing
+    #[arg(long, conflicts_with = "export_psbt")]
+    pub dry_run: bool,
+    /// Write the unsigned PSBT to FILE instead of signing
+    #[arg(long, value_name = "FILE")]
+    pub export_psbt: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub struct GrantArgs {
+    /// Agent name (e.g. claude)
+    pub name: String,
+    /// Total budget in sats (amounts + fees draw it down; shorthand ok: 50k)
+    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+    pub budget: u64,
+    /// Grant lifetime (e.g. 24h, 7d)
+    #[arg(
+        long = "for",
+        alias = "expires",
+        default_value = "24h",
+        value_name = "DURATION"
+    )]
+    pub duration: String,
+    /// Hard per-transaction amount cap in sats: amounts above it are
+    /// refused outright — the only escalation is changing the grant
+    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+    pub max_tx: Option<u64>,
+    /// Hard per-transaction fee cap in sats
+    /// (default: 2% of the budget, at least 1000, never above the budget)
+    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+    pub max_fee: Option<u64>,
+    /// Authority mode: ask (every request waits for your approval) or
+    /// observe (read-only)
+    #[arg(long, default_value = "ask", value_name = "ask|observe")]
+    pub mode: String,
+    /// Restrict proposals to these recipients (repeatable). At least one
+    /// --to makes the allowlist finite: any other recipient is refused.
+    /// Without --to, every recipient may be proposed
+    #[arg(long = "to", value_name = "ADDRESS")]
+    pub to: Vec<String>,
+}
+
+#[derive(Subcommand)]
+pub enum AgentCommand {
+    /// Grant an agent a spending budget
+    Grant(GrantArgs),
+    /// Revoke an agent's grant
+    Revoke {
+        /// Agent name
+        name: String,
+    },
+    /// Set an agent's authority mode (widening requires the password)
+    Mode {
+        /// Agent name
+        name: String,
+        /// ask or observe
+        #[arg(value_name = "ask|observe")]
+        mode: String,
+    },
+    /// Add a recipient to a grant's allowlist (password required)
+    Allow {
+        /// Agent name
+        name: String,
+        /// Recipient address
+        address: String,
+    },
+    /// Remove a recipient from a grant's allowlist (no password)
+    Disallow {
+        /// Agent name
+        name: String,
+        /// Recipient address
+        address: String,
+    },
+    /// List active grants
+    List,
+    /// Authorize and execute one pending request: prepare, review the
+    /// real fee, enter the password, sign, broadcast
+    Approve {
+        /// Request id or unique prefix; omit to select one on a terminal
+        id: Option<String>,
+        /// Skip confirmation for an explicit id (the password is still required)
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// Dismiss a pending request without executing it
+    Dismiss {
+        /// Request id or unique prefix
+        id: String,
+    },
+    /// Review agent requests awaiting approval or recovery
+    Requests {
+        /// Include settled and dismissed requests, not only those needing attention
+        #[arg(long, conflicts_with = "watch")]
+        all: bool,
+        /// Stay running and print each request as it newly awaits a
+        /// decision — a trusted channel that does not rely on the agent
+        /// relaying its own status. With --json, a JSONL stream
+        #[arg(long)]
+        watch: bool,
+    },
+    /// Show the causal log of agent activity, oldest first
+    Log {
+        /// Maximum events to show (the newest N)
+        #[arg(long, default_value_t = 50, value_name = "N")]
+        limit: usize,
+        /// Only events for one request, by id or unique prefix
+        #[arg(long, value_name = "ID")]
+        request: Option<String>,
+    },
+    /// Serve the agent's wallet tools over MCP stdio as this agent
+    #[cfg(feature = "mcp")]
+    Serve {
+        /// Agent name the server acts as (must hold an active grant)
+        name: String,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn command_definitions_are_consistent() {
+        super::Cli::command().debug_assert();
+    }
+
+    /// A subcommand field named like a global flag (`provider`) only fails
+    /// when clap downcasts the parsed value, so parse each one.
+    #[test]
+    fn provider_subcommands_parse_beside_the_global_override() {
+        for args in [
+            &["sats", "providers"][..],
+            &["sats", "providers", "list"],
+            &["sats", "providers", "add", "subfrost", "--url", "http://x"],
+            &["sats", "providers", "use", "mempool"],
+            &["sats", "providers", "remove", "esplora"],
+            &[
+                "sats",
+                "--provider",
+                "esplora=http://x",
+                "providers",
+                "remove",
+                "subfrost",
+            ],
+        ] {
+            assert!(super::Cli::try_parse_from(args).is_ok(), "{args:?}");
+        }
+    }
+}

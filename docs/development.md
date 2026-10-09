@@ -30,9 +30,9 @@ screenshot.
 
 | Build | Command |
 |---|---|
-| Without MCP | `cargo install --locked --path crates/sats --no-default-features` |
-| With Alkanes views (experimental) | `cargo install --locked --path crates/sats --features experimental-alkanes` |
-| With Alkanes execution (development only, never released) | `cargo test -p sats --locked --features experimental-alkanes-execute --test alkanes` |
+| Without MCP | `cargo install --locked --path crates/sats-cli --no-default-features` |
+| With Alkanes views (experimental) | `cargo install --locked --path crates/sats-cli --features experimental-alkanes` |
+| With Alkanes execution (development only, never released) | `cargo test -p sats-cli --locked --features experimental-alkanes-execute --test alkanes` |
 
 ## Verification gate
 
@@ -46,10 +46,10 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
 cargo build --release --locked
-cargo clippy -p sats --all-targets --features experimental-alkanes-execute -- -D warnings
-cargo test -p sats --locked --features experimental-alkanes-execute --bins --test alkanes
+cargo clippy -p sats-cli --all-targets --features experimental-alkanes-execute -- -D warnings
+cargo test -p sats-cli --locked --features experimental-alkanes-execute --bins --test alkanes
 cargo check -p sats-core --target wasm32-unknown-unknown
-cargo check -p sats-web --target wasm32-unknown-unknown
+cargo check -p sats-playground --target wasm32-unknown-unknown
 ```
 
 Terminal tests open a controlling TTY for hidden password entry, and provider
@@ -68,12 +68,13 @@ couldn't be run, say so rather than calling the change complete.
 | Layer | Location | Covers |
 |---|---|---|
 | Core unit | `crates/sats-core/src/` | Preparation, authorization, sealing, seeds, signing, amounts |
-| Native unit | `crates/sats/src/` | Config, providers, storage, the executor with a signer probe |
-| Playground unit | `crates/sats-web/src/` | Simulated wallet loop, grant lifecycle, denials |
-| CLI integration | `crates/sats/tests/` | Wallet flows, failures, providers, grants, request review, Alkanes |
-| MCP integration | `crates/sats/tests/mcp.rs` | Tool schemas, filing, idempotency, the approval loop, startup refusal, revocation |
+| Wallet unit | `crates/sats-wallet/src/` | Config, providers, storage, the executor with a signer probe |
+| CLI unit | `crates/sats-cli/src/` | Flag parsing, review menus, the warning filter, MCP receipts |
+| Playground unit | `crates/sats-playground/src/` | Simulated wallet loop, grant lifecycle, denials |
+| CLI integration | `crates/sats-cli/tests/` | Wallet flows, failures, providers, grants, request review, Alkanes |
+| MCP integration | `crates/sats-cli/tests/mcp.rs` | Tool schemas, filing, idempotency, the approval loop, startup refusal, revocation |
 | Installer | `scripts/test-setup.sh` | Targets, checksums, version pinning, PATH edits, atomic replacement |
-| WASM | CI `wasm-check` | `sats-core` and `sats-web` build for `wasm32-unknown-unknown` |
+| WASM | CI `wasm-check` | `sats-core` and `sats-playground` build for `wasm32-unknown-unknown` |
 
 Tests must not need public services, credentials, or real funds. Cover network
 behavior with deterministic providers and temporary state.
@@ -91,9 +92,9 @@ broadcast-timeout tests when updating the dependency. Provenance is in
 
 ## Website playground
 
-The site's terminal runs `sats-web` against a simulated chain. The generated
+The site's terminal runs `sats-playground` against a simulated chain. The generated
 module in `website/public/playground/` is committed, so the site deploys
-without Rust. After changing `sats-core` or `sats-web`, regenerate it:
+without Rust. After changing `sats-core` or `sats-playground`, regenerate it:
 
 ```sh
 cargo install wasm-bindgen-cli --version <pinned in Cargo.toml>

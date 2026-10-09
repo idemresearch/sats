@@ -1342,37 +1342,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
-name = "sats"
-version = "0.0.2"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "bdk_esplora",
- "bdk_wallet",
- "clap",
- "directories",
- "getrandom 0.3.4",
- "hex",
- "humantime",
- "minreq",
- "owo-colors",
- "predicates",
- "rmcp",
- "rpassword",
- "rusqlite",
- "sats-alkanes",
- "sats-core",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
- "zeroize",
-]
-
-[[package]]
 name = "sats-alkanes"
 version = "0.0.2"
 dependencies = [
@@ -1381,6 +1350,35 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "sats-cli"
+version = "0.0.2"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "bdk_wallet",
+ "clap",
+ "directories",
+ "hex",
+ "humantime",
+ "log",
+ "owo-colors",
+ "predicates",
+ "rmcp",
+ "rpassword",
+ "rusqlite",
+ "sats-alkanes",
+ "sats-core",
+ "sats-wallet",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "zeroize",
 ]
 
 [[package]]
@@ -1403,7 +1401,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sats-web"
+name = "sats-playground"
 version = "0.0.2"
 dependencies = [
  "bdk_wallet",
@@ -1412,6 +1410,27 @@ dependencies = [
  "sats-core",
  "serde_json",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "sats-wallet"
+version = "0.0.2"
+dependencies = [
+ "anyhow",
+ "bdk_esplora",
+ "bdk_wallet",
+ "directories",
+ "hex",
+ "log",
+ "minreq",
+ "rusqlite",
+ "sats-alkanes",
+ "sats-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]

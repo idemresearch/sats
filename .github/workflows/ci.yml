@@ -25,8 +25,8 @@ jobs:
       - run: cargo build --release --locked
       # Experimental Alkanes code is excluded from default builds; keep it
       # compiling and tested.
-      - run: cargo clippy -p sats --all-targets --features experimental-alkanes-execute -- -D warnings
-      - run: cargo test -p sats --locked --features experimental-alkanes-execute --bins --test alkanes
+      - run: cargo clippy -p sats-cli --all-targets --features experimental-alkanes-execute -- -D warnings
+      - run: cargo test -p sats-cli --locked --features experimental-alkanes-execute --bins --test alkanes
 
   # Guards the portable-core boundary documented in docs/architecture.md.
   wasm-check:
@@ -38,4 +38,4 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p sats-core --target wasm32-unknown-unknown
-      - run: cargo check -p sats-web --target wasm32-unknown-unknown
+      - run: cargo check -p sats-playground --target wasm32-unknown-unknown

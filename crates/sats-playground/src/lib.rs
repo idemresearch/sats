@@ -1,0 +1,1147 @@
+//! sats-playground — the sats wallet engine running in the browser.
+//!
+//! Compiles `sats-core` to WebAssembly behind a small JSON API for the
+//! website playground. Only the chain is simulated: an in-memory faucet
+//! mints fake confirmed outputs and "broadcast" confirms into the next
+//! simulated block. Descriptors, planning, conservative UTXO exclusion,
+//! signing, seed sealing, and grant authorization are the same `sats-core`
+//! code the native CLI and MCP server run.
+//!
+//! The API is stringly typed on purpose: methods return JSON documents the
+//! terminal UI renders, and errors are plain messages. Nothing here is a
+//! compatibility surface; the native CLI and MCP schemas remain the stable
+//! contracts.
+
+use std::collections::HashMap;
+use std::str::FromStr;
+use std::sync::Arc;
+
+use bdk_wallet::bitcoin::absolute::LockTime;
+use bdk_wallet::bitcoin::hashes::Hash;
+use bdk_wallet::bitcoin::transaction::Version;
+use bdk_wallet::bitcoin::{
+    Address, Amount, BlockHash, FeeRate, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn,
+    TxOut, Txid, Witness,
+};
+use bdk_wallet::chain::{BlockId, ConfirmationBlockTime, TxUpdate};
+use bdk_wallet::{KeychainKind, Update, Wallet};
+use bip39::Mnemonic;
+use sats_core::authz::{
+    Decision, GRANT_FORMAT_VERSION, Grant, ReserveError, SpendRequest, evaluate_send, new_grant_id,
+};
+use sats_core::fmt::format_sats;
+use sats_core::intent::SendIntent;
+use sats_core::plan::{PreparedSpend, TransactionRecord};
+use sats_core::request::{AgentRequest, REQUEST_FORMAT_VERSION, RequestState};
+use sats_core::signer::{LocalSigner, Signer};
+use sats_core::{amount, engine, seed, token};
+use serde_json::json;
+use wasm_bindgen::prelude::*;
+
+const NETWORK: Network = Network::Signet;
+const NETWORK_NAME: &str = "signet";
+
+/// The whole playground state: a real watch-only wallet plus the simulated
+/// chain tip and grant/plan/history stores that the native shell would keep
+/// on disk.
+struct Sim {
+    mnemonic: Mnemonic,
+    wallet: Wallet,
+    height: u32,
+    grants: HashMap<String, Grant>,
+    prepared: HashMap<String, PreparedSpend>,
+    /// Agent requests, exactly the native record type: the agent files
+    /// one, the human approves or dismisses it, and approval executes.
+    requests: HashMap<String, AgentRequest>,
+    history: Vec<TransactionRecord>,
+}
+
+fn random_bytes32() -> Result<[u8; 32], String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|_| "no entropy source available".to_string())?;
+    Ok(bytes)
+}
+
+fn apply(wallet: &mut Wallet, update: Update) -> Result<(), String> {
+    wallet
+        .apply_update(update)
+        .map_err(|e| format!("simulated chain update failed: {e}"))
+}
+
+/// Extend the simulated chain with one block (clock-free equivalent of
+/// bdk's test-utils `insert_checkpoint`, which reads the system time and
+/// would trap on wasm).
+fn apply_checkpoint(wallet: &mut Wallet, block: BlockId) -> Result<(), String> {
+    let cp = wallet.latest_checkpoint().insert(block);
+    apply(
+        wallet,
+        Update {
+            chain: Some(cp),
+            ..Default::default()
+        },
+    )
+}
+
+fn apply_tx(wallet: &mut Wallet, tx: Transaction, seen_at: u64) -> Result<(), String> {
+    let txid = tx.compute_txid();
+    let mut tx_update = TxUpdate::default();
+    tx_update.txs = vec![Arc::new(tx)];
+    tx_update.seen_ats = [(txid, seen_at)].into();
+    apply(
+        wallet,
+        Update {
+            tx_update,
+            ..Default::default()
+        },
+    )
+}
+
+fn apply_anchor(
+    wallet: &mut Wallet,
+    txid: Txid,
+    anchor: ConfirmationBlockTime,
+) -> Result<(), String> {
+    let mut tx_update = TxUpdate::default();
+    tx_update.anchors = [(anchor, txid)].into();
+    apply(
+        wallet,
+        Update {
+            tx_update,
+            ..Default::default()
+        },
+    )
+}
+
+/// What the agent sees of a request: the same shape as the native
+/// `request_send` and `check_request` tools.
+fn request_view(record: &AgentRequest) -> String {
+    let (reason, message) = match &record.state {
+        RequestState::PendingApproval => (
+            None,
+            format!(
+                "filed for human review — the agent is blocked here; as the human, run: \
+                 sats agent approve {}",
+                record.id
+            ),
+        ),
+        RequestState::Denied { deny, .. } => {
+            // The CLI's detail lines are column-aligned; joined onto one
+            // line the padding is noise, so collapse spaces.
+            let detail = deny
+                .human()
+                .lines()
+                .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+                .collect::<Vec<_>>()
+                .join("; ");
+            (
+                Some(deny.code()),
+                format!("outside the grant: {detail} — only changing the grant lifts it"),
+            )
+        }
+        other => (None, format!("request is {}", other.status())),
+    };
+    json!({
+        "status": record.status(),
+        "request_id": record.id,
+        "reason": reason,
+        "recipient": record.recipient,
+        "amount_sat": record.amount_sat,
+        "txid": record.state.txid(),
+        "message": message,
+    })
+    .to_string()
+}
+
+fn parse_recipient(s: &str) -> Result<Address, String> {
+    Address::from_str(s)
+        .map_err(|_| format!("invalid address {s:?}"))?
+        .require_network(NETWORK)
+        .map_err(|_| format!("address {s:?} is not a {NETWORK_NAME} address"))
+}
+
+/// Same rule as the native CLI (`sats agent grant`).
+fn validate_agent_name(agent: &str) -> Result<(), String> {
+    let ok = !agent.is_empty()
+        && agent.len() <= 32
+        && agent
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if ok {
+        Ok(())
+    } else {
+        Err("agent name must be 1-32 chars of a-z, 0-9, - or _".to_string())
+    }
+}
+
+impl Sim {
+    fn create(now: u64) -> Result<(Sim, String), String> {
+        let mnemonic = seed::generate_mnemonic(12).map_err(|e| e.to_string())?;
+        let (ext, int) = seed::public_descriptors(&mnemonic, NETWORK).map_err(|e| e.to_string())?;
+        let descriptor = ext.clone();
+        let wallet = Wallet::create(ext, int)
+            .network(NETWORK)
+            .create_wallet_no_persist()
+            .map_err(|e| e.to_string())?;
+        let mut sim = Sim {
+            mnemonic,
+            wallet,
+            height: 0,
+            grants: HashMap::new(),
+            prepared: HashMap::new(),
+            requests: HashMap::new(),
+            history: Vec::new(),
+        };
+        // A little simulated history so the tip looks like a live chain.
+        sim.mine_block()?;
+        let out = json!({
+            "network": NETWORK_NAME,
+            "mnemonic": sim.mnemonic.to_string(),
+            "descriptor": descriptor,
+            "height": sim.height,
+            "created_at": now,
+        })
+        .to_string();
+        Ok((sim, out))
+    }
+
+    fn mine_block(&mut self) -> Result<BlockId, String> {
+        let block = BlockId {
+            height: self.height + 1,
+            hash: BlockHash::from_byte_array(random_bytes32()?),
+        };
+        apply_checkpoint(&mut self.wallet, block)?;
+        self.height = block.height;
+        Ok(block)
+    }
+
+    /// Mine `tx` into the next simulated block.
+    fn confirm_tx(&mut self, tx: Transaction, now: u64) -> Result<u32, String> {
+        let txid = tx.compute_txid();
+        apply_tx(&mut self.wallet, tx, now)?;
+        let block = self.mine_block()?;
+        apply_anchor(
+            &mut self.wallet,
+            txid,
+            ConfirmationBlockTime {
+                block_id: block,
+                confirmation_time: now,
+            },
+        )?;
+        Ok(block.height)
+    }
+
+    fn receive(&mut self) -> Result<String, String> {
+        let info = self.wallet.reveal_next_address(KeychainKind::External);
+        Ok(json!({
+            "address": info.address.to_string(),
+            "index": info.index,
+        })
+        .to_string())
+    }
+
+    fn balance(&self) -> Result<String, String> {
+        let b = self.wallet.balance();
+        let pending = b.trusted_pending + b.untrusted_pending + b.immature;
+        Ok(json!({
+            "confirmed_sat": b.confirmed.to_sat(),
+            "pending_sat": pending.to_sat(),
+            "total_sat": b.total().to_sat(),
+            "height": self.height,
+        })
+        .to_string())
+    }
+
+    /// The playground-only faucet: mint a fake confirmed output to the
+    /// wallet's next unused address.
+    fn faucet(&mut self, amount_str: &str, now: u64) -> Result<String, String> {
+        let amount_sat = amount::parse(amount_str)?;
+        if amount_sat == 0 {
+            return Err("faucet amount must be greater than 0".to_string());
+        }
+        let address = self
+            .wallet
+            .next_unused_address(KeychainKind::External)
+            .address;
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint {
+                    txid: Txid::from_byte_array(random_bytes32()?),
+                    vout: 0,
+                },
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(amount_sat),
+                script_pubkey: address.script_pubkey(),
+            }],
+        };
+        let txid = tx.compute_txid();
+        let height = self.confirm_tx(tx, now)?;
+        Ok(json!({
+            "txid": txid.to_string(),
+            "amount_sat": amount_sat,
+            "height": height,
+        })
+        .to_string())
+    }
+
+    /// Shared preparation path: parse, exclude dust suspects, plan.
+    fn plan(
+        &mut self,
+        recipient: &str,
+        amount_str: &str,
+        fee_rate: u32,
+        now: u64,
+    ) -> Result<PreparedSpend, String> {
+        let recipient = parse_recipient(recipient)?;
+        let amount_sat = amount::parse(amount_str)?;
+        if fee_rate == 0 {
+            return Err("fee rate must be at least 1 sat/vB".to_string());
+        }
+        let unspendable = engine::dust_suspects(
+            self.wallet
+                .list_unspent()
+                .map(|u| (u.outpoint, u.txout.value)),
+        );
+        engine::build_plan(
+            &mut self.wallet,
+            &recipient,
+            Amount::from_sat(amount_sat),
+            FeeRate::from_sat_per_vb_u32(fee_rate),
+            &unspendable,
+            NETWORK_NAME,
+            now,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    fn prepare(
+        &mut self,
+        recipient: &str,
+        amount_str: &str,
+        fee_rate: u32,
+        now: u64,
+    ) -> Result<String, String> {
+        let plan = self.plan(recipient, amount_str, fee_rate, now)?;
+        let out = json!({
+            "id": plan.id,
+            "recipient": plan.recipient,
+            "amount_sat": plan.amount_sat,
+            "fee_sat": plan.fee_sat,
+            "total_sat": plan.total_sat(),
+            "excluded_utxos": plan.excluded_utxos,
+        })
+        .to_string();
+        self.prepared.insert(plan.id.clone(), plan);
+        Ok(out)
+    }
+
+    /// Sign a prepared spend and "broadcast" it into the simulated chain.
+    fn sign_and_broadcast(
+        &mut self,
+        plan: PreparedSpend,
+        now: u64,
+    ) -> Result<TransactionRecord, String> {
+        let mut psbt = plan.psbt().clone();
+        let mut signer = LocalSigner::new(self.mnemonic.clone(), NETWORK);
+        let finalized = signer.sign(&mut psbt).map_err(|e| e.to_string())?;
+        if !finalized {
+            return Err("signing did not finalize the transaction".to_string());
+        }
+        let mut record = plan.into_transaction(psbt).map_err(|e| e.to_string())?;
+        let tx = record.tx().map_err(|e| e.to_string())?;
+        record.mark_broadcast();
+        self.confirm_tx(tx, now)?;
+        self.history.push(record.clone());
+        Ok(record)
+    }
+
+    fn confirm(&mut self, id: &str, now: u64) -> Result<String, String> {
+        let plan = self
+            .prepared
+            .remove(id)
+            .ok_or_else(|| format!("no prepared spend {id:?}"))?;
+        let record = self.sign_and_broadcast(plan, now)?;
+        Ok(json!({
+            "txid": record.txid,
+            "amount_sat": record.amount_sat,
+            "fee_sat": record.fee_sat,
+            "total_sat": record.total_sat(),
+            "height": self.height,
+        })
+        .to_string())
+    }
+
+    fn cancel(&mut self, id: &str) -> Result<String, String> {
+        match self.prepared.remove(id) {
+            Some(_) => Ok(json!({ "cancelled": id }).to_string()),
+            None => Err(format!("no prepared spend {id:?}")),
+        }
+    }
+
+    fn grant(
+        &mut self,
+        agent: &str,
+        budget_str: &str,
+        max_tx_str: Option<String>,
+        max_fee_str: Option<String>,
+        lifetime_secs: u64,
+        now: u64,
+    ) -> Result<String, String> {
+        validate_agent_name(agent)?;
+        let budget_sat = amount::parse(budget_str)?;
+        if budget_sat == 0 {
+            return Err("budget must be greater than 0".to_string());
+        }
+        if lifetime_secs == 0 {
+            return Err("--for must be a positive duration".to_string());
+        }
+        let max_tx_sat = max_tx_str.as_deref().map(amount::parse).transpose()?;
+        // Every grant carries a hard fee cap, exactly like the native
+        // grant command: chosen, or defaulted from the budget.
+        let max_fee_sat = max_fee_str
+            .as_deref()
+            .map(amount::parse)
+            .transpose()?
+            .unwrap_or_else(|| sats_core::authz::default_max_fee_sat(budget_sat));
+
+        // Same shape as the native grant: a capability token, never key
+        // material. The playground has no daemon to hold a seed behind a
+        // process boundary — it is one page — so the token is only
+        // demonstrating the model, not enforcing it.
+        let issued = token::generate().map_err(|e| e.to_string())?;
+
+        let replaced = self.grants.contains_key(agent);
+        let grant = Grant {
+            format_version: GRANT_FORMAT_VERSION,
+            agent: agent.to_string(),
+            network: NETWORK_NAME.to_string(),
+            budget_sat,
+            spent_sat: 0,
+            max_tx_sat,
+            max_fee_sat,
+            created_at: now,
+            expires_at: now.saturating_add(lifetime_secs),
+            tx_count: 0,
+            token_id: issued.token_id.clone(),
+            token_hash: issued.token_hash.clone(),
+            mode: Default::default(),
+            allowed_recipients: None,
+            grant_id: new_grant_id()?,
+            reservations: Vec::new(),
+        };
+        let out = json!({
+            "agent": grant.agent,
+            "grant_id": grant.grant_id,
+            "token_id": grant.token_id,
+            "budget_sat": grant.budget_sat,
+            "max_tx_sat": grant.max_tx_sat,
+            "max_fee_sat": grant.max_fee_sat,
+            "expires_at": grant.expires_at,
+            "replaced": replaced,
+        })
+        .to_string();
+        self.grants.insert(agent.to_string(), grant);
+        Ok(out)
+    }
+
+    fn grants(&self, now: u64) -> Result<String, String> {
+        let mut list: Vec<_> = self.grants.values().collect();
+        list.sort_by(|a, b| a.agent.cmp(&b.agent));
+        let rows: Vec<_> = list
+            .into_iter()
+            .map(|g| {
+                json!({
+                    "agent": g.agent,
+                    "mode": g.mode.as_str(),
+                    "budget_sat": g.budget_sat,
+                    "spent_sat": g.spent_sat,
+                    "remaining_sat": g.remaining_sat(),
+                    "max_tx_sat": g.max_tx_sat,
+                    "max_fee_sat": g.max_fee_sat,
+                    "tx_count": g.tx_count,
+                    "expires_at": g.expires_at,
+                    "expired": g.is_expired(now),
+                })
+            })
+            .collect();
+        Ok(json!(rows).to_string())
+    }
+
+    fn revoke(&mut self, agent: &str) -> Result<String, String> {
+        match self.grants.remove(agent) {
+            Some(_) => Ok(json!({ "revoked": agent }).to_string()),
+            None => Err(format!("no grant named {agent:?}")),
+        }
+    }
+
+    /// The agent files a request, exactly like the native `request_send`
+    /// tool: the grant's ladder runs with the fee unknown, and the record
+    /// is `pending_approval` or `denied`. Nothing is planned or signed.
+    fn request_send(
+        &mut self,
+        agent: &str,
+        recipient: &str,
+        amount_str: &str,
+        now: u64,
+    ) -> Result<String, String> {
+        let grant = self.grants.get(agent).ok_or_else(|| {
+            format!("no grant named {agent:?} — create one with `sats agent grant`")
+        })?;
+        // The digest hashes the normalized recipient spelling, exactly
+        // like the native shim.
+        let normalized = parse_recipient(recipient)?.to_string();
+        let amount_sat = amount::parse(amount_str)?;
+        let digest = SendIntent {
+            network: NETWORK_NAME.into(),
+            agent: agent.into(),
+            recipient: normalized.clone(),
+            amount_sat,
+        }
+        .digest();
+        // One pending record per intent, so repeated identical filings
+        // never spam the queue — the same idempotency a client key buys.
+        if let Some(existing) = self
+            .requests
+            .values()
+            .find(|record| record.agent == agent && record.intent_digest == digest)
+            .filter(|record| record.is_pending_approval())
+        {
+            return Ok(request_view(existing));
+        }
+        let verdict = evaluate_send(
+            grant,
+            &normalized,
+            &SpendRequest {
+                amount_sat,
+                fee_sat: 0,
+            },
+            now,
+        );
+        let state = match verdict {
+            Decision::Ask => RequestState::PendingApproval,
+            Decision::Deny(reason) => RequestState::Denied {
+                deny: reason,
+                at: now,
+            },
+        };
+        // The native shape: `r-` plus 32 hex characters, global.
+        let bytes = random_bytes32()?;
+        let id = format!(
+            "r-{}",
+            bytes[..16]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        let record = AgentRequest {
+            format_version: REQUEST_FORMAT_VERSION,
+            id: id.clone(),
+            network: NETWORK_NAME.into(),
+            agent: agent.into(),
+            grant_id: grant.grant_id.clone(),
+            idempotency_key: None,
+            recipient: normalized,
+            amount_sat,
+            intent_digest: digest,
+            created_at: now,
+            updated_at: now,
+            state,
+        };
+        let out = request_view(&record);
+        self.requests.insert(id, record);
+        Ok(out)
+    }
+
+    /// The human review queue: requests awaiting a decision.
+    fn requests_view(&self) -> Result<String, String> {
+        let mut rows: Vec<_> = self
+            .requests
+            .values()
+            .filter(|record| record.is_pending_approval())
+            .collect();
+        rows.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        let out: Vec<_> = rows
+            .into_iter()
+            .map(|record| {
+                json!({
+                    "id": record.id,
+                    "agent": record.agent,
+                    "recipient": record.recipient,
+                    "amount_sat": record.amount_sat,
+                    "status": record.status(),
+                })
+            })
+            .collect();
+        Ok(json!(out).to_string())
+    }
+
+    /// The human authorizes one pending request, and that authorization
+    /// executes it: plan on the current chain, re-run the ladder with the
+    /// real fee, reserve before signing, sign, broadcast. The agent takes
+    /// no part. Native sats does the same in `sats agent approve`.
+    fn approve(&mut self, id: &str, fee_rate: u32, now: u64) -> Result<String, String> {
+        let record = self
+            .requests
+            .get(id)
+            .ok_or_else(|| format!("no request {id:?} — see: sats agent requests"))?;
+        if !record.is_approvable() {
+            return Err(format!(
+                "request {id} is {} — nothing to approve",
+                record.status()
+            ));
+        }
+        let (agent, recipient, amount_sat) = (
+            record.agent.clone(),
+            record.recipient.clone(),
+            record.amount_sat,
+        );
+        let grant = self
+            .grants
+            .get(&agent)
+            .filter(|grant| grant.grant_id == record.grant_id)
+            .ok_or_else(|| format!("no active grant for {agent:?}"))?;
+        // Precheck against the current grant before planning.
+        if let Decision::Deny(reason) = evaluate_send(
+            grant,
+            &recipient,
+            &SpendRequest {
+                amount_sat,
+                fee_sat: 0,
+            },
+            now,
+        ) {
+            self.record_denied(id, reason.clone(), now);
+            return Err(format!(
+                "denied {id} — {} (outside the grant; only changing the grant lifts it)",
+                reason.code()
+            ));
+        }
+        let plan = self.plan(&recipient, &amount_sat.to_string(), fee_rate, now)?;
+        let spend = SpendRequest {
+            amount_sat: plan.amount_sat,
+            fee_sat: plan.fee_sat,
+        };
+        // Reserve with the real fee before signing; a refusal here is a
+        // grant boundary the fee crossed.
+        let grant = self.grants.get_mut(&agent).expect("checked above");
+        // A request that never reached the signer holds no draw here:
+        // an in-memory playground has no crash window to recover.
+        grant.refund(id);
+        match grant.reserve_send(id, &recipient, &spend, now) {
+            Ok(_) => {}
+            Err(ReserveError::Denied(reason)) => {
+                self.record_denied(id, reason.clone(), now);
+                return Err(format!(
+                    "denied {id} — {} (outside the grant; only changing the grant lifts it)",
+                    reason.code()
+                ));
+            }
+            Err(ReserveError::Mismatch { .. }) => {
+                return Err(format!(
+                    "request {id} already holds a different reservation"
+                ));
+            }
+        }
+        if let Some(record) = self.requests.get_mut(id) {
+            record.state = RequestState::Signing {
+                approved_at: now,
+                fee_sat: spend.fee_sat,
+            };
+            record.updated_at = now;
+        }
+        match self.sign_and_broadcast(plan, now) {
+            Ok(tx) => {
+                if let Some(record) = self.requests.get_mut(id) {
+                    record.state = RequestState::Sent {
+                        txid: tx.txid.clone(),
+                        fee_sat: tx.fee_sat,
+                        at: now,
+                    };
+                    record.updated_at = now;
+                }
+                let grant = self.grants.get(&agent).expect("still present");
+                Ok(json!({
+                    "approved": id,
+                    "status": "sent",
+                    "txid": tx.txid,
+                    "recipient": recipient,
+                    "amount_sat": tx.amount_sat,
+                    "fee_sat": tx.fee_sat,
+                    "total_sat": tx.total_sat(),
+                    "grant_remaining_sat": grant.remaining_sat(),
+                    "grant_tx_count": grant.tx_count,
+                })
+                .to_string())
+            }
+            Err(e) => {
+                // The signer was invoked: its word is not trusted to mean
+                // "no signature". The draw stands and the request is never
+                // signed again — the native rule, in miniature.
+                if let Some(record) = self.requests.get_mut(id) {
+                    record.state = RequestState::Unresolved {
+                        at: now,
+                        message: e.clone(),
+                        txid: None,
+                    };
+                    record.updated_at = now;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn record_denied(&mut self, id: &str, reason: sats_core::authz::DenyReason, now: u64) {
+        if let Some(record) = self.requests.get_mut(id) {
+            record.state = RequestState::Denied {
+                deny: reason,
+                at: now,
+            };
+            record.updated_at = now;
+        }
+    }
+
+    /// The human declines a pending request.
+    fn dismiss(&mut self, id: &str, now: u64) -> Result<String, String> {
+        let record = self
+            .requests
+            .get_mut(id)
+            .ok_or_else(|| format!("no request {id:?} — see: sats agent requests"))?;
+        if !record.is_dismissable() {
+            return Err(format!(
+                "request {id} is {} — nothing to dismiss",
+                record.status()
+            ));
+        }
+        record.state = RequestState::Dismissed { at: now };
+        record.updated_at = now;
+        Ok(json!({ "dismissed": id, "status": "dismissed" }).to_string())
+    }
+
+    fn history(&self) -> Result<String, String> {
+        let rows: Vec<_> = self
+            .history
+            .iter()
+            .rev()
+            .map(|r| {
+                json!({
+                    "txid": r.txid,
+                    "recipient": r.recipient,
+                    "amount_sat": r.amount_sat,
+                    "fee_sat": r.fee_sat,
+                    "status": format!("{:?}", r.status).to_lowercase(),
+                    "created_at": r.created_at,
+                })
+            })
+            .collect();
+        Ok(json!(rows).to_string())
+    }
+}
+
+/// The wasm-facing handle. Every method returns a JSON string on success
+/// and throws a plain message on failure; `now` parameters are unix
+/// seconds supplied by the page, keeping the engine clock-free.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct Playground {
+    sim: Option<Sim>,
+}
+
+fn js<T>(result: Result<T, String>) -> Result<T, JsError> {
+    result.map_err(|e| JsError::new(&e))
+}
+
+#[wasm_bindgen]
+impl Playground {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Playground {
+        Playground::default()
+    }
+
+    /// Crate version, so the page can show what it is running.
+    pub fn version(&self) -> String {
+        env!("CARGO_PKG_VERSION").to_string()
+    }
+
+    pub fn has_wallet(&self) -> bool {
+        self.sim.is_some()
+    }
+
+    pub fn init(&mut self, now: f64) -> Result<String, JsError> {
+        let (sim, out) = js(Sim::create(now as u64))?;
+        self.sim = Some(sim);
+        Ok(out)
+    }
+
+    pub fn reset(&mut self) {
+        self.sim = None;
+    }
+
+    pub fn format_sats(&self, sats: f64) -> String {
+        format_sats(sats as u64)
+    }
+
+    pub fn receive(&mut self) -> Result<String, JsError> {
+        js(self.sim_mut()?.receive())
+    }
+
+    pub fn balance(&self) -> Result<String, JsError> {
+        js(self.sim_ref()?.balance())
+    }
+
+    pub fn faucet(&mut self, amount: &str, now: f64) -> Result<String, JsError> {
+        js(self.sim_mut()?.faucet(amount, now as u64))
+    }
+
+    pub fn prepare(
+        &mut self,
+        recipient: &str,
+        amount: &str,
+        fee_rate: u32,
+        now: f64,
+    ) -> Result<String, JsError> {
+        js(self
+            .sim_mut()?
+            .prepare(recipient, amount, fee_rate, now as u64))
+    }
+
+    pub fn confirm(&mut self, id: &str, now: f64) -> Result<String, JsError> {
+        js(self.sim_mut()?.confirm(id, now as u64))
+    }
+
+    pub fn cancel(&mut self, id: &str) -> Result<String, JsError> {
+        js(self.sim_mut()?.cancel(id))
+    }
+
+    pub fn grant(
+        &mut self,
+        agent: &str,
+        budget: &str,
+        max_tx: Option<String>,
+        max_fee: Option<String>,
+        lifetime_secs: f64,
+        now: f64,
+    ) -> Result<String, JsError> {
+        js(self.sim_mut()?.grant(
+            agent,
+            budget,
+            max_tx,
+            max_fee,
+            lifetime_secs as u64,
+            now as u64,
+        ))
+    }
+
+    pub fn grants(&self, now: f64) -> Result<String, JsError> {
+        js(self.sim_ref()?.grants(now as u64))
+    }
+
+    pub fn revoke(&mut self, agent: &str) -> Result<String, JsError> {
+        js(self.sim_mut()?.revoke(agent))
+    }
+
+    /// The agent surface: file a request. Nothing is planned or signed.
+    pub fn request_send(
+        &mut self,
+        agent: &str,
+        recipient: &str,
+        amount: &str,
+        now: f64,
+    ) -> Result<String, JsError> {
+        js(self
+            .sim_mut()?
+            .request_send(agent, recipient, amount, now as u64))
+    }
+
+    /// The human review queue of pending requests.
+    pub fn requests(&self) -> Result<String, JsError> {
+        js(self.sim_ref()?.requests_view())
+    }
+
+    /// The human control plane: authorize one pending request, which
+    /// executes it.
+    pub fn approve(&mut self, id: &str, fee_rate: u32, now: f64) -> Result<String, JsError> {
+        js(self.sim_mut()?.approve(id, fee_rate, now as u64))
+    }
+
+    /// The human control plane: dismiss a pending request.
+    pub fn dismiss(&mut self, id: &str, now: f64) -> Result<String, JsError> {
+        js(self.sim_mut()?.dismiss(id, now as u64))
+    }
+
+    pub fn history(&self) -> Result<String, JsError> {
+        js(self.sim_ref()?.history())
+    }
+}
+
+impl Playground {
+    fn sim_mut(&mut self) -> Result<&mut Sim, JsError> {
+        js(self
+            .sim
+            .as_mut()
+            .ok_or_else(|| "no wallet — run `sats init` first".to_string()))
+    }
+
+    fn sim_ref(&self) -> Result<&Sim, JsError> {
+        js(self
+            .sim
+            .as_ref()
+            .ok_or_else(|| "no wallet — run `sats init` first".to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: u64 = 1_700_000_000;
+
+    fn value(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).unwrap()
+    }
+
+    fn funded_sim() -> Sim {
+        let (mut sim, out) = Sim::create(NOW).unwrap();
+        let init = value(&out);
+        assert_eq!(init["network"], "signet");
+        assert_eq!(
+            init["mnemonic"]
+                .as_str()
+                .unwrap()
+                .split_whitespace()
+                .count(),
+            12
+        );
+        sim.faucet("100k", NOW).unwrap();
+        sim
+    }
+
+    fn own_address(sim: &mut Sim) -> String {
+        value(&sim.receive().unwrap())["address"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn faucet_funds_confirmed_balance() {
+        let sim = funded_sim();
+        let balance = value(&sim.balance().unwrap());
+        assert_eq!(balance["confirmed_sat"], 100_000);
+        assert_eq!(balance["pending_sat"], 0);
+        assert_eq!(balance["total_sat"], 100_000);
+    }
+
+    #[test]
+    fn prepare_confirm_send_updates_balance_and_history() {
+        let mut sim = funded_sim();
+        let addr = own_address(&mut sim);
+        let plan = value(&sim.prepare(&addr, "25k", 2, NOW).unwrap());
+        assert_eq!(plan["amount_sat"], 25_000);
+        let fee = plan["fee_sat"].as_u64().unwrap();
+        assert!(fee > 0);
+
+        let id = plan["id"].as_str().unwrap();
+        let sent = value(&sim.confirm(id, NOW).unwrap());
+        assert_eq!(sent["amount_sat"], 25_000);
+
+        // Self-send: only the fee leaves the wallet.
+        let balance = value(&sim.balance().unwrap());
+        assert_eq!(balance["total_sat"], 100_000 - fee);
+
+        let history = value(&sim.history().unwrap());
+        assert_eq!(history.as_array().unwrap().len(), 1);
+        assert_eq!(history[0]["status"], "broadcast");
+
+        // The prepared spend is consumed.
+        assert!(sim.confirm(id, NOW).is_err());
+    }
+
+    #[test]
+    fn cancel_drops_prepared_spend() {
+        let mut sim = funded_sim();
+        let addr = own_address(&mut sim);
+        let plan = value(&sim.prepare(&addr, "10k", 2, NOW).unwrap());
+        let id = plan["id"].as_str().unwrap();
+        sim.cancel(id).unwrap();
+        assert!(sim.confirm(id, NOW).is_err());
+    }
+
+    #[test]
+    fn overspend_is_a_typed_error() {
+        let mut sim = funded_sim();
+        let addr = own_address(&mut sim);
+        assert!(sim.prepare(&addr, "1m", 2, NOW).is_err());
+    }
+
+    #[test]
+    fn mainnet_address_is_rejected() {
+        let mut sim = funded_sim();
+        let err = sim
+            .prepare(
+                "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
+                "10k",
+                2,
+                NOW,
+            )
+            .unwrap_err();
+        assert!(err.contains("signet"), "{err}");
+    }
+
+    #[test]
+    fn request_files_pending_and_approval_executes_once() {
+        let mut sim = funded_sim();
+        let addr = own_address(&mut sim);
+        sim.grant("claude", "50k", None, None, 86_400, NOW).unwrap();
+        let grants = value(&sim.grants(NOW).unwrap());
+        assert_eq!(grants[0]["mode"], "ask", "every grant asks");
+
+        // Filing records a pending request and signs nothing.
+        let filed = value(&sim.request_send("claude", &addr, "10k", NOW).unwrap());
+        assert_eq!(filed["status"], "pending_approval");
+        let id = filed["request_id"].as_str().unwrap().to_string();
+        assert!(
+            filed["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("sats agent approve {id}")),
+        );
+        let queue = value(&sim.requests_view().unwrap());
+        assert_eq!(queue.as_array().unwrap().len(), 1);
+        assert_eq!(queue[0]["id"], id.as_str());
+
+        // Filing again identically returns the same request, not a
+        // second queue entry — and still draws nothing.
+        let again = value(&sim.request_send("claude", &addr, "10k", NOW).unwrap());
+        assert_eq!(again["request_id"], id.as_str());
+        assert_eq!(
+            value(&sim.requests_view().unwrap())
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let grants = value(&sim.grants(NOW).unwrap());
+        assert_eq!(grants[0]["spent_sat"], 0, "filing draws no budget");
+        assert!(
+            value(&sim.history().unwrap())
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        // The human approves; the approval executes exactly once.
+        let sent = value(&sim.approve(&id, 2, NOW).unwrap());
+        assert_eq!(sent["status"], "sent", "got: {sent}");
+        let fee = sent["fee_sat"].as_u64().unwrap();
+        assert_eq!(
+            sent["grant_remaining_sat"].as_u64().unwrap(),
+            50_000 - 10_000 - fee
+        );
+        let grants = value(&sim.grants(NOW).unwrap());
+        assert_eq!(grants[0]["tx_count"], 1);
+        assert!(
+            value(&sim.requests_view().unwrap())
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "a sent request leaves the queue"
+        );
+
+        // Settled: approving again never produces a second signature.
+        let err = sim.approve(&id, 2, NOW).unwrap_err();
+        assert!(err.contains("is sent"), "{err}");
+        let grants = value(&sim.grants(NOW).unwrap());
+        assert_eq!(grants[0]["tx_count"], 1, "no second signature");
+    }
+
+    #[test]
+    fn dismiss_declines_and_hard_refusals_cannot_be_approved() {
+        let mut sim = funded_sim();
+        let addr = own_address(&mut sim);
+        sim.grant("claude", "50k", None, None, 86_400, NOW).unwrap();
+        let filed = value(&sim.request_send("claude", &addr, "5k", NOW).unwrap());
+        let id = filed["request_id"].as_str().unwrap().to_string();
+        let dismissed = value(&sim.dismiss(&id, NOW).unwrap());
+        assert_eq!(dismissed["status"], "dismissed");
+        assert!(
+            value(&sim.requests_view().unwrap())
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "dismissed requests leave the queue"
+        );
+        assert!(sim.approve(&id, 2, NOW).is_err(), "dismissed is terminal");
+
+        // An expired grant is a hard refusal: denied at filing, and
+        // approve refuses it.
+        let late = NOW + 86_400;
+        let expired = value(&sim.request_send("claude", &addr, "5k", late).unwrap());
+        assert_eq!(expired["status"], "denied");
+        assert_eq!(expired["reason"], "expired");
+        let id = expired["request_id"].as_str().unwrap().to_string();
+        let err = sim.approve(&id, 2, late).unwrap_err();
+        assert!(err.contains("is denied"), "{err}");
+    }
+
+    #[test]
+    fn request_over_cap_is_denied_not_error() {
+        let mut sim = funded_sim();
+        let addr = own_address(&mut sim);
+        sim.grant("claude", "50k", Some("10k".to_string()), None, 86_400, NOW)
+            .unwrap();
+        let denied = value(&sim.request_send("claude", &addr, "20k", NOW).unwrap());
+        assert_eq!(denied["status"], "denied");
+        assert_eq!(denied["reason"], "over_max_tx");
+        assert!(
+            denied["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("outside the grant"),
+        );
+        // A denial reserves nothing.
+        let grants = value(&sim.grants(NOW).unwrap());
+        assert_eq!(grants[0]["spent_sat"], 0);
+        assert_eq!(grants[0]["tx_count"], 0);
+    }
+
+    #[test]
+    fn expired_grant_denies_and_revocation_removes_authority() {
+        let mut sim = funded_sim();
+        let addr = own_address(&mut sim);
+        sim.grant("claude", "50k", None, None, 3_600, NOW).unwrap();
+        let denied = value(
+            &sim.request_send("claude", &addr, "10k", NOW + 3_600)
+                .unwrap(),
+        );
+        assert_eq!(denied["reason"], "expired");
+
+        sim.revoke("claude").unwrap();
+        assert!(sim.request_send("claude", &addr, "10k", NOW).is_err());
+        assert!(sim.revoke("claude").is_err());
+    }
+
+    #[test]
+    fn dust_suspect_outputs_are_excluded_from_selection() {
+        let mut sim = funded_sim();
+        // A classic inscription postage output.
+        sim.faucet("546", NOW).unwrap();
+        let addr = own_address(&mut sim);
+        let plan = value(&sim.prepare(&addr, "99k", 2, NOW).unwrap());
+        assert_eq!(plan["excluded_utxos"], 1);
+    }
+
+    #[test]
+    fn grant_names_are_validated() {
+        let mut sim = funded_sim();
+        assert!(
+            sim.grant("Bad Name", "50k", None, None, 3_600, NOW)
+                .is_err()
+        );
+        assert!(sim.grant("claude", "0", None, None, 3_600, NOW).is_err());
+    }
+}

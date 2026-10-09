@@ -15,7 +15,7 @@ the playground version all come from `workspace.package.version` in
 `Cargo.toml`. Default binaries include MCP and exclude every Alkanes command.
 
 1. Run the full [verification gate](development.md#verification-gate).
-2. Regenerate the playground if `sats-core` or `sats-web` changed.
+2. Regenerate the playground if `sats-core` or `sats-playground` changed.
 3. Exercise the request and recovery flows with a local build.
 4. Optionally run the workflow manually. It builds each archive and checksum
    without publishing, so you can download and check them first.

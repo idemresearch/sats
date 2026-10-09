@@ -119,7 +119,7 @@ Visit [sats.sh/docs](https://sats.sh/docs) for the manual: the
 ## Build from source
 
 ```sh
-cargo install --locked --path crates/sats
+cargo install --locked --path crates/sats-cli
 ```
 
 ## Contributing

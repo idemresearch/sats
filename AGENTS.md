@@ -36,7 +36,7 @@ requests under the grant its bearer token names; it holds no key
 material and never prepares, signs, or broadcasts. A request is the
 first-class workflow object (`sats-core::request`): `pending_approval`,
 `denied`, `dismissed`, `signing`, `sent`, `broadcast_pending`,
-`unresolved`, or `failed`, bound to the grant instance that created it. The human-authorized execution path (`crates/sats/src/request/`)
+`unresolved`, or `failed`, bound to the grant instance that created it. The human-authorized execution path (`crates/sats-wallet/src/request/`)
 prepares, re-verifies, reserves budget, signs, persists, and broadcasts;
 in v0.0.1 that path is `sats agent approve`, which unseals the seed with
 the human's password for exactly one execution. The agent observes the
@@ -86,18 +86,19 @@ advice for exactly that file.
 | `crates/sats-core/src/seed.rs` | BIP-39 seed handling and BIP-86 descriptors |
 | `crates/sats-core/src/seal.rs` | Versioned authenticated secret sealing |
 | `crates/sats-core/src/signer.rs` | Signer trait and local in-memory signer |
-| `crates/sats/src/main.rs` | Composition and command dispatch only |
-| `crates/sats/src/cli.rs` | Clap command and flag definitions |
-| `crates/sats/src/commands/` | Human CLI workflows and rendering |
-| `crates/sats/src/provider/` | Native chain providers and per-network resolution |
-| `crates/sats/src/store.rs` | Paths, atomic files, permissions, finalized transactions, grants, requests, and the event log |
-| `crates/sats/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
-| `crates/sats/src/request/` | The native request workflow: create, dismiss, reconcile, and the human-authorized executor |
-| `crates/sats/src/spend.rs` | The shared signing and broadcast tail: persist before broadcast |
-| `crates/sats/src/mcp/` | MCP transport and schemas — reads the wallet and files requests |
-| `crates/sats/tests/` | Native CLI and MCP integration tests |
+| `crates/sats-wallet/src/provider/` | Native chain providers and per-network resolution |
+| `crates/sats-wallet/src/store.rs` | Paths, atomic files, permissions, finalized transactions, grants, requests, and the event log |
+| `crates/sats-wallet/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
+| `crates/sats-wallet/src/prepare.rs` | The shared preparation pipeline: validate, sync, exclude dust, estimate, build |
+| `crates/sats-wallet/src/request/` | The native request workflow: create, dismiss, reconcile, and the human-authorized executor |
+| `crates/sats-wallet/src/spend.rs` | The shared signing and broadcast tail: persist before broadcast, rebroadcast |
+| `crates/sats-cli/src/main.rs` | Composition and command dispatch only |
+| `crates/sats-cli/src/cli.rs` | Clap command and flag definitions |
+| `crates/sats-cli/src/commands/` | Human CLI workflows and rendering |
+| `crates/sats-cli/src/mcp/` | MCP transport and schemas — reads the wallet and files requests |
+| `crates/sats-cli/tests/` | Native CLI and MCP integration tests |
 | `crates/sats-alkanes/src/` | Pure Alkanes protocol composition: ids, cellpacks, protostones, inspection, simulation views |
-| `crates/sats-web/src/lib.rs` | Browser playground: wasm bindings over sats-core and the simulated chain |
+| `crates/sats-playground/src/lib.rs` | Browser playground: wasm bindings over sats-core and the simulated chain |
 | `website/` | Project website, including the interactive playground terminal |
 
 `main.rs` is a composition root. Do not put feature logic there.
@@ -135,6 +136,20 @@ These come first; everything else serves them:
 
 Pass facts and time into the core as typed inputs. Persistence, chain access,
 and rendering belong to callers.
+
+### Wallet library
+
+`sats-wallet` is the native workflow every front end shares: the CLI and
+MCP server today, other surfaces later. It owns files, chain access, and
+the request workflow, but never the human:
+
+- no terminal output: warnings go through the `log` facade, sync progress
+  through `provider::Progress`, and results are typed values;
+- no prompts and no password or mnemonic reading: a surface obtains the
+  human's authorization and hands the executor a signer factory;
+- no CLI, MCP, or other surface types.
+
+A workflow two surfaces could need belongs here, not in a command.
 
 ### Keys and signing
 
@@ -264,31 +279,32 @@ If ownership or the contract is unclear, define those first.
 ### New domain rule
 
 Put deterministic behavior in `sats-core` and unit-test edge cases there.
-Call it from the shared native workflow so CLI and MCP cannot diverge.
+Call it from the shared workflow in `sats-wallet` so CLI and MCP cannot
+diverge.
 
 ### New CLI command or flag
 
-1. Define parsing and help text in `crates/sats/src/cli.rs`.
-2. Implement the workflow in `crates/sats/src/commands/`.
-3. Wire dispatch in `crates/sats/src/main.rs` without adding leaf logic.
+1. Define parsing and help text in `crates/sats-cli/src/cli.rs`.
+2. Implement the workflow in `crates/sats-cli/src/commands/`.
+3. Wire dispatch in `crates/sats-cli/src/main.rs` without adding leaf logic.
 4. Provide machine-readable output when the command is useful to scripts.
-5. Add integration coverage in `crates/sats/tests/cli.rs`.
+5. Add integration coverage in `crates/sats-cli/tests/cli.rs`.
 6. Update `docs/cli.md` and the README only when it changes the primary
    quickstart or product promise.
 
 ### New MCP tool
 
-1. Define typed parameters and results in `crates/sats/src/mcp/server.rs`.
+1. Define typed parameters and results in `crates/sats-cli/src/mcp/server.rs`.
 2. Keep the tool description explicit: the agent files and observes; it
    never approves, unlocks, signs, executes, or broadcasts.
 3. Run blocking wallet work through the existing blocking boundary.
 4. Reuse `crate::request` for anything that touches a request.
-5. Add or extend `crates/sats/tests/mcp.rs`.
+5. Add or extend `crates/sats-cli/tests/mcp.rs`.
 6. Update `docs/mcp.md`.
 
 ### New provider
 
-1. Implement the driver under `crates/sats/src/provider/` as an audited
+1. Implement the driver under `crates/sats-wallet/src/provider/` as an audited
    enum variant, not a plugin surface.
 2. Add it as a per-network choice in `config.rs` and the `sats providers`
    commands; do not reintroduce user-facing capability routing.
@@ -341,18 +357,18 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
 cargo build --release --locked
-cargo clippy -p sats --all-targets --features experimental-alkanes-execute -- -D warnings
-cargo test -p sats --locked --features experimental-alkanes-execute --bins --test alkanes
+cargo clippy -p sats-cli --all-targets --features experimental-alkanes-execute -- -D warnings
+cargo test -p sats-cli --locked --features experimental-alkanes-execute --bins --test alkanes
 cargo check -p sats-core --target wasm32-unknown-unknown
-cargo check -p sats-web --target wasm32-unknown-unknown
+cargo check -p sats-playground --target wasm32-unknown-unknown
 ```
 
-Agent-path work is covered by `crates/sats/src/request/execute.rs` (unit
+Agent-path work is covered by `crates/sats-wallet/src/request/execute.rs` (unit
 tests with a signer probe and crash reconciliation) and
-`crates/sats/tests/mcp.rs` (the served process, the CLI approval, and the
+`crates/sats-cli/tests/mcp.rs` (the served process, the CLI approval, and the
 observed result, each against its own `SATS_DIR`).
 
-After changing `sats-core` or `sats-web`, regenerate the committed playground
+After changing `sats-core` or `sats-playground`, regenerate the committed playground
 module with `sh scripts/build-playground.sh` (see
 [Development](docs/development.md)).
 

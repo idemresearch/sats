@@ -1,0 +1,53 @@
+[package]
+name = "sats-cli"
+description = "A self-custodial Bitcoin wallet for humans and agents, with maker-checker for agent payments"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sats"
+path = "src/main.rs"
+
+[features]
+default = ["mcp"]
+# The `sats agent serve` MCP server (rmcp + tokio). Disable for a smaller
+# human-only binary: cargo install --no-default-features
+mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
+# Experimental Alkanes contract views (`sats alkanes inspect|simulate`),
+# served by Subfrost. Excluded from default binaries.
+experimental-alkanes = ["dep:sats-alkanes", "sats-wallet/experimental-alkanes"]
+# Development-only execution path; never in released binaries.
+experimental-alkanes-execute = ["experimental-alkanes"]
+
+[dependencies]
+sats-core = { workspace = true }
+sats-wallet = { workspace = true }
+sats-alkanes = { workspace = true, optional = true }
+bdk_wallet = { workspace = true, features = ["rusqlite"] }
+clap = { workspace = true }
+rmcp = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+owo-colors = { workspace = true }
+rpassword = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+directories = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+humantime = { workspace = true }
+hex = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rusqlite = { workspace = true }
+toml = { workspace = true }
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+# test-utils lets integration tests seed the persisted wallet with
+# deterministic confirmed UTXOs; it never ships in the binary.
+bdk_wallet = { workspace = true, features = ["rusqlite", "test-utils"] }

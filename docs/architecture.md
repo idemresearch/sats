@@ -1,13 +1,14 @@
 # Architecture
 
-How sats is built: a portable core, a native crate for the CLI and MCP
-server, and the one spend path that humans and agents share.
+How sats is built: a portable core, a wallet library that every front end
+shares, the CLI and MCP server on top of it, and the one spend path that
+humans and agents share.
 
 ## System shape
 
 ```mermaid
 flowchart TD
-    CLI["Human CLI (send, approve)"] --> Native["Native workflows"]
+    CLI["Human CLI (send, approve)"] --> Native["sats-wallet workflows"]
     MCP["MCP server (token, no keys)"] --> Requests["request::create"]
     Requests --> State["Store + watch-only wallet"]
     Native --> Exec["request::execute"]
@@ -23,9 +24,10 @@ server files a request, and `sats agent approve` executes it in the human's
 process, for exactly that request. Both paths share preparation, the dust
 exclusion, fee estimation, and the sign-then-persist-then-broadcast tail.
 
-`sats-core` owns deterministic wallet and authorization behavior. `sats` owns
-everything with side effects: argument parsing, terminal output, files,
-SQLite, network clients, provider selection, passwords, and MCP stdio.
+`sats-core` owns deterministic wallet and authorization behavior.
+`sats-wallet` performs it against files, SQLite, and the network: storage,
+provider selection, preparation, and the request workflow. `sats-cli` owns
+the human: argument parsing, terminal output, passwords, and MCP stdio.
 
 ## Crates
 
@@ -49,21 +51,34 @@ runtime. Callers pass in time and own the BDK wallet.
 | `signer` | The `Signer` trait and the local mnemonic signer |
 | `error`, `fmt`, `amount` | Typed errors, sat formatting, amount shorthand |
 
-### `sats`
+### `sats-wallet`
+
+The native workflow every front end shares. It never talks to the human:
+no terminal output, prompts, or password reading. Warnings go through the
+`log` facade, sync progress through `provider::Progress`, and the signer
+arrives as a factory from a surface that has the human's authorization.
+
+| Module | Owns |
+|---|---|
+| `config` | TOML configuration and network names |
+| `store` | Paths, atomic files, permissions, transactions, grants, requests, the event log |
+| `walletd` | The SQLite-backed watch-only BDK wallet |
+| `provider` | Per-network provider, driver resolution, chain access, experimental Alkanes views |
+| `prepare` | The preparation pipeline shared by human sends and approved requests |
+| `request` | Request create, dismiss, reconcile, and the executor (`stage`, `commit`) |
+| `spend` | The shared tail: sign, persist, then broadcast; rebroadcast a saved transaction |
+
+### `sats-cli`
+
+The `sats` binary: the human CLI and the MCP server.
 
 | Module | Owns |
 |---|---|
 | `main`, `cli` | Flag parsing, network selection, dispatch. `main.rs` is a composition root only. |
 | `commands` | Human CLI workflows and their text and JSON output |
-| `config` | TOML configuration and network names |
-| `store` | Paths, atomic files, permissions, transactions, grants, requests, the event log |
-| `walletd` | The SQLite-backed watch-only BDK wallet |
-| `provider` | Per-network provider, driver resolution, chain access, experimental Alkanes views |
 | `keys`, `password` | Unsealing the seed; verifying the password without keeping anything |
-| `request` | Request create, dismiss, reconcile, and the executor (`stage`, `commit`) |
-| `spend` | The shared tail: sign, persist, then broadcast |
 | `mcp` | The MCP stdio server and tool schemas |
-| `ui` | Terminal presentation |
+| `ui` | Terminal presentation, the stderr warning sink, and the sync status line |
 
 ### `sats-alkanes`
 
@@ -75,7 +90,7 @@ the `experimental-alkanes` feature adds `sats alkanes inspect` and
 `simulate`, and execution sits behind the development-only
 `experimental-alkanes-execute` feature.
 
-### `sats-web`
+### `sats-playground`
 
 `sats-core` compiled to WebAssembly for the website playground. Only the
 chain is simulated. Planning, UTXO exclusion, signing, sealing, and grant
