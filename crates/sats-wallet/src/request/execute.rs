@@ -42,8 +42,8 @@ use sats_core::request::{AgentRequest, RequestState};
 use sats_core::signer::Signer;
 use sats_core::verify;
 
-use crate::commands::prepare;
 use crate::config::network_name;
+use crate::prepare;
 use crate::provider::Services;
 use crate::request::{
     bound_grant, describe_settled, journal, journal_soft, reconcile, reconcile_grant,
@@ -2341,14 +2341,8 @@ mod tests {
                 .join("claude")
                 .join(format!("{id}.tmp"));
             std::fs::create_dir(&blocker).unwrap();
-            crate::commands::tx::broadcast(
-                &fx.store,
-                Network::Signet,
-                || Ok(fx.services()),
-                &txid,
-                true,
-            )
-            .unwrap();
+            crate::spend::rebroadcast(&fx.store, Network::Signet, || Ok(fx.services()), &txid)
+                .unwrap();
             assert_eq!(fx.request(&id).status(), "broadcast_pending");
             let saved = fx.store.load_transaction("signet", &txid).unwrap();
             assert_eq!(saved.status, TransactionStatus::Broadcast);
@@ -2358,12 +2352,11 @@ mod tests {
                 if via_listing {
                     list_reconciled(&fx.store, Network::Signet).unwrap();
                 } else {
-                    crate::commands::tx::broadcast(
+                    crate::spend::rebroadcast(
                         &fx.store,
                         Network::Signet,
                         || panic!("receipt repair must not resolve providers"),
                         &txid,
-                        true,
                     )
                     .unwrap();
                 }
@@ -2500,20 +2493,12 @@ mod tests {
         assert_eq!(saved.status, TransactionStatus::Pending);
         let spent = fx.grant_state().spent_sat;
         std::fs::remove_file(&broadcast_via).unwrap();
-        crate::commands::tx::broadcast(
-            &fx.store,
-            Network::Signet,
-            || Ok(fx.services()),
-            &txid,
-            true,
-        )
-        .unwrap();
-        crate::commands::tx::broadcast(
+        crate::spend::rebroadcast(&fx.store, Network::Signet, || Ok(fx.services()), &txid).unwrap();
+        crate::spend::rebroadcast(
             &fx.store,
             Network::Signet,
             || panic!("already broadcast"),
             &txid,
-            true,
         )
         .unwrap();
         assert_eq!(

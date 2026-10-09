@@ -9,7 +9,6 @@ pub mod grants;
 pub mod history;
 pub mod init;
 pub mod mode;
-pub mod prepare;
 pub mod providers;
 pub mod psbt;
 pub mod receive;

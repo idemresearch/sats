@@ -13,12 +13,12 @@ use anyhow::{Context, Result, bail};
 use rmcp::ServiceExt;
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
+use sats_wallet::config::network_name;
+use sats_wallet::store::{Store, now_checked, unix_now};
+use sats_wallet::walletd;
 use zeroize::Zeroizing;
 
-use crate::config::network_name;
-use crate::store::{Store, now_checked, unix_now};
 use crate::ui;
-use crate::walletd;
 
 use self::server::TOKEN_ENV;
 
@@ -26,7 +26,7 @@ pub fn run(
     store: &Store,
     network: Network,
     agent: &str,
-    providers: Option<crate::provider::CliProvider>,
+    providers: Option<sats_wallet::provider::CliProvider>,
 ) -> Result<()> {
     let net_name = network_name(network);
 

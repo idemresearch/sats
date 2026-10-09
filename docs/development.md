@@ -68,7 +68,8 @@ couldn't be run, say so rather than calling the change complete.
 | Layer | Location | Covers |
 |---|---|---|
 | Core unit | `crates/sats-core/src/` | Preparation, authorization, sealing, seeds, signing, amounts |
-| Native unit | `crates/sats-cli/src/` | Config, providers, storage, the executor with a signer probe |
+| Wallet unit | `crates/sats-wallet/src/` | Config, providers, storage, the executor with a signer probe |
+| CLI unit | `crates/sats-cli/src/` | Flag parsing, review menus, the warning filter, MCP receipts |
 | Playground unit | `crates/sats-playground/src/` | Simulated wallet loop, grant lifecycle, denials |
 | CLI integration | `crates/sats-cli/tests/` | Wallet flows, failures, providers, grants, request review, Alkanes |
 | MCP integration | `crates/sats-cli/tests/mcp.rs` | Tool schemas, filing, idempotency, the approval loop, startup refusal, revocation |

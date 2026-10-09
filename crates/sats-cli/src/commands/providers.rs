@@ -9,14 +9,14 @@ use std::io::IsTerminal;
 
 use anyhow::{Context, Result, bail};
 use sats_core::bitcoin::Network;
+use sats_wallet::config::{
+    ChainChoice, Config, EsploraConfig, RedactedUrl, SubfrostConfig, network_name,
+};
+use sats_wallet::provider::{self, CliProvider, Endpoint, Source};
+use sats_wallet::store::Store;
 use zeroize::Zeroizing;
 
 use crate::cli::{AddArgs, ChainArg, ProviderArg};
-use crate::config::{
-    ChainChoice, Config, EsploraConfig, RedactedUrl, SubfrostConfig, network_name,
-};
-use crate::provider::{self, CliProvider, Endpoint, Source};
-use crate::store::Store;
 use crate::ui;
 
 pub fn list(
@@ -309,7 +309,7 @@ fn configured(config: &Config, network: Network) {
             display_name(ChainChoice::default_for(network).as_str())
         ),
     };
-    let redact = crate::provider::error::redact_url;
+    let redact = sats_wallet::provider::error::redact_url;
     let rows = [
         ["Provider".to_string(), chain, String::new()],
         [

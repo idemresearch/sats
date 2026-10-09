@@ -17,8 +17,8 @@ pub struct Cli {
     /// Provider for this run only: --provider esplora=URL or
     /// --provider subfrost=URL
     #[arg(long, global = true, value_name = "KIND=URL",
-          value_parser = crate::provider::parse_cli_provider)]
-    pub provider: Option<crate::provider::CliProvider>,
+          value_parser = sats_wallet::provider::parse_cli_provider)]
+    pub provider: Option<sats_wallet::provider::CliProvider>,
 
     /// Machine-readable JSON output
     #[arg(long, global = true)]

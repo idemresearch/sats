@@ -3,9 +3,9 @@ use sats_core::authz::{GRANT_FORMAT_VERSION, Grant, new_grant_id};
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
 use sats_core::token;
+use sats_wallet::config::network_name;
+use sats_wallet::store::{Store, unix_now};
 
-use crate::config::network_name;
-use crate::store::{Store, unix_now};
 use crate::{keys, ui};
 
 pub fn run(

@@ -18,16 +18,15 @@ default = ["mcp"]
 mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
 # Experimental Alkanes contract views (`sats alkanes inspect|simulate`),
 # served by Subfrost. Excluded from default binaries.
-experimental-alkanes = ["dep:sats-alkanes"]
+experimental-alkanes = ["dep:sats-alkanes", "sats-wallet/experimental-alkanes"]
 # Development-only execution path; never in released binaries.
 experimental-alkanes-execute = ["experimental-alkanes"]
 
 [dependencies]
 sats-core = { workspace = true }
+sats-wallet = { workspace = true }
 sats-alkanes = { workspace = true, optional = true }
 bdk_wallet = { workspace = true, features = ["rusqlite"] }
-bdk_esplora = { workspace = true }
-rusqlite = { workspace = true }
 clap = { workspace = true }
 rmcp = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
@@ -36,20 +35,17 @@ owo-colors = { workspace = true }
 rpassword = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = { workspace = true }
 directories = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
-thiserror = { workspace = true }
-minreq = { workspace = true }
 humantime = { workspace = true }
 hex = { workspace = true }
 zeroize = { workspace = true }
-# Random grant-instance ids and capability tokens.
-getrandom = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+rusqlite = { workspace = true }
+toml = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 # test-utils lets integration tests seed the persisted wallet with

@@ -10,9 +10,10 @@ use anyhow::{Context, Result, anyhow};
 use sats_core::bitcoin::{Address, Network, Psbt, ScriptBuf};
 use sats_core::plan::TransactionRecord;
 use sats_core::signer::{LocalSigner, Signer};
+use sats_wallet::store::{Store, unix_now, write_artifact};
+use sats_wallet::walletd;
 
-use crate::store::{Store, unix_now, write_artifact};
-use crate::{keys, ui, walletd};
+use crate::{keys, ui};
 
 /// Decode a PSBT file without touching the wallet, the store, or the chain.
 pub fn inspect(network: Network, file: &Path, json: bool) -> Result<()> {

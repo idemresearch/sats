@@ -8,9 +8,9 @@
 use anyhow::{Context, Result};
 use bdk_wallet::bip39::Mnemonic;
 use sats_core::{seal, seed};
+use sats_wallet::store::{AAD_SEED, Store};
 
 use crate::password;
-use crate::store::{AAD_SEED, Store};
 
 /// Prompt for (or read) the password and unseal the mnemonic.
 pub fn unlock(store: &Store) -> Result<Mnemonic> {

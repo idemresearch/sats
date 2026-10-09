@@ -5,9 +5,9 @@
 
 use anyhow::Result;
 use sats_core::bitcoin::Network;
+use sats_wallet::request;
+use sats_wallet::store::Store;
 
-use crate::request;
-use crate::store::Store;
 use crate::ui;
 
 pub fn run(store: &Store, network: Network, id_or_prefix: &str, json: bool) -> Result<()> {

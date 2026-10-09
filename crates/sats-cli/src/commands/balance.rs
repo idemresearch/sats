@@ -1,9 +1,10 @@
 use anyhow::Result;
 use sats_core::bitcoin::Network;
+use sats_wallet::provider::Services;
+use sats_wallet::store::Store;
+use sats_wallet::walletd;
 
-use crate::provider::Services;
-use crate::store::Store;
-use crate::{ui, walletd};
+use crate::ui;
 
 pub fn run(
     store: &Store,

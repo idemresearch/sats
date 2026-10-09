@@ -7,11 +7,11 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use sats_core::bitcoin::{Network, Transaction, consensus};
-use sats_core::plan::TransactionStatus;
+use sats_wallet::provider::Services;
+use sats_wallet::store::Store;
+use sats_wallet::walletd;
 
-use crate::provider::Services;
-use crate::store::Store;
-use crate::{ui, walletd};
+use crate::ui;
 
 pub fn broadcast(
     store: &Store,
@@ -20,7 +20,6 @@ pub fn broadcast(
     target: &str,
     json: bool,
 ) -> Result<()> {
-    let net_name = crate::config::network_name(network);
     let path = Path::new(target);
     if path.exists() {
         let text =
@@ -34,29 +33,14 @@ pub fn broadcast(
         return Ok(());
     }
 
-    let mut record = store.load_transaction(net_name, target)?;
-
-    match record.status {
-        TransactionStatus::Pending => {}
-        TransactionStatus::Broadcast => {
-            // Retry the local receipt write even if a previous invocation
-            // broadcast successfully. No provider, replan, or signer is needed.
-            crate::request::settle_broadcast(store, network, &record.txid)?;
-            report(json, &record.txid);
-            return Ok(());
-        }
-    }
-
-    let mut ctx = walletd::open(store, network)?;
-    let services = resolve_services()?;
-    let txid = crate::spend::broadcast_record(store, &mut ctx, &services, &mut record)?;
-    // An agent request signed earlier but never broadcast settles now.
-    if let Err(err) = crate::request::settle_broadcast(store, network, &txid.to_string()) {
+    let done = sats_wallet::spend::rebroadcast(store, network, resolve_services, target)?;
+    if let Some(err) = &done.receipt_error {
         eprintln!(
-            "⚠ broadcast succeeded but the request record was not updated: {err:#}; retry: sats tx broadcast {txid}"
+            "⚠ broadcast succeeded but the request record was not updated: {err:#}; retry: sats tx broadcast {}",
+            done.txid
         );
     }
-    report(json, &txid.to_string());
+    report(json, &done.txid);
     Ok(())
 }
 

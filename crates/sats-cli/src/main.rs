@@ -1,21 +1,17 @@
 use sats_core::amount;
 mod cli;
 mod commands;
-mod config;
 mod keys;
 #[cfg(feature = "mcp")]
 mod mcp;
 mod password;
-mod provider;
-mod request;
-mod spend;
-mod store;
 mod ui;
-mod walletd;
+
+use sats_wallet::config::{Config, parse_network};
+use sats_wallet::provider;
+use sats_wallet::store::Store;
 
 use crate::cli::{Cli, Command};
-use crate::config::{Config, parse_network};
-use crate::store::Store;
 
 fn main() {
     ui::install_warnings();

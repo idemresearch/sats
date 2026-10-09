@@ -2,18 +2,18 @@
 //!
 //! A thin adapter: the request is staged on current chain state so the
 //! human reviews the real fee, the password prompt is the authorization,
-//! and the shared executor in `crate::request::execute` does the rest.
+//! and the shared executor in `sats_wallet::request::execute` does the rest.
 
 use anyhow::Result;
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
 use sats_core::signer::LocalSigner;
+use sats_wallet::config::network_name;
+use sats_wallet::provider::Services;
+use sats_wallet::request::execute::{self, Outcome, Stage};
+use sats_wallet::store::Store;
 
 use crate::commands::requests;
-use crate::config::network_name;
-use crate::provider::Services;
-use crate::request::execute::{self, Outcome, Stage};
-use crate::store::Store;
 use crate::{keys, ui};
 
 pub fn run(

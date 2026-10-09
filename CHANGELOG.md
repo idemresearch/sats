@@ -5,6 +5,13 @@ Notable changes to sats, newest first. Versions follow
 
 ## Unreleased
 
+### Building from source
+
+- The CLI crate is now `crates/sats-cli` (the command is still `sats`):
+  `cargo install --locked --path crates/sats-cli`. Storage, providers, and
+  the request workflow moved into a new `sats-wallet` library that future
+  front ends will share.
+
 ### Security
 
 - The wallet password and mnemonic are read only from a terminal.

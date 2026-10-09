@@ -10,9 +10,9 @@
 use anyhow::{Context, Result, bail};
 use sats_core::bitcoin::{Address, Network};
 use sats_core::event::{AgentEvent, CONTROL_EVENT_ID, EVENT_FORMAT_VERSION, EventKind};
+use sats_wallet::config::network_name;
+use sats_wallet::store::{Store, now_checked, unix_now};
 
-use crate::config::network_name;
-use crate::store::{Store, now_checked, unix_now};
 use crate::{keys, ui};
 
 pub fn allow(

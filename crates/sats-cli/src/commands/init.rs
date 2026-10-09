@@ -4,12 +4,13 @@ use anyhow::{Context, Result, bail};
 use sats_core::bitcoin::Network;
 use sats_core::seed::MnemonicProblem;
 use sats_core::{seal, seed};
+use sats_wallet::config::{Config, network_name};
+use sats_wallet::provider::CliProvider;
+use sats_wallet::store::{AAD_SEED, Store};
+use sats_wallet::walletd;
 use zeroize::Zeroizing;
 
-use crate::config::{Config, network_name};
-use crate::provider::CliProvider;
-use crate::store::{AAD_SEED, Store};
-use crate::{password, ui, walletd};
+use crate::{password, ui};
 
 pub fn run(
     store: &Store,
@@ -226,7 +227,7 @@ fn first_sync(
         println!("{manual}");
         return Ok(());
     }
-    let services = match crate::provider::resolve(config, overrides, network) {
+    let services = match sats_wallet::provider::resolve(config, overrides, network) {
         Ok(s) => s.with_progress(ui::sync_progress()),
         Err(err) => {
             eprintln!("✗ provider unavailable ({err:#})");

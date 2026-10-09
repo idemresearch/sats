@@ -4,9 +4,9 @@ use anyhow::Result;
 use sats_core::bitcoin::Network;
 use sats_core::event::{AgentEvent, EventKind};
 use sats_core::fmt::format_sats;
+use sats_wallet::config::network_name;
+use sats_wallet::store::{EventLine, Store, unix_now};
 
-use crate::config::network_name;
-use crate::store::{EventLine, Store, unix_now};
 use crate::ui;
 
 pub fn run(

@@ -1358,15 +1358,12 @@ version = "0.0.2"
 dependencies = [
  "anyhow",
  "assert_cmd",
- "bdk_esplora",
  "bdk_wallet",
  "clap",
  "directories",
- "getrandom 0.3.4",
  "hex",
  "humantime",
  "log",
- "minreq",
  "owo-colors",
  "predicates",
  "rmcp",
@@ -1374,11 +1371,11 @@ dependencies = [
  "rusqlite",
  "sats-alkanes",
  "sats-core",
+ "sats-wallet",
  "schemars",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror",
  "tokio",
  "toml",
  "zeroize",
@@ -1413,6 +1410,27 @@ dependencies = [
  "sats-core",
  "serde_json",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "sats-wallet"
+version = "0.0.2"
+dependencies = [
+ "anyhow",
+ "bdk_esplora",
+ "bdk_wallet",
+ "directories",
+ "hex",
+ "log",
+ "minreq",
+ "rusqlite",
+ "sats-alkanes",
+ "sats-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]

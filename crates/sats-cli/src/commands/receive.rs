@@ -1,9 +1,10 @@
 use anyhow::Result;
 use bdk_wallet::KeychainKind;
 use sats_core::bitcoin::Network;
+use sats_wallet::store::Store;
+use sats_wallet::walletd;
 
-use crate::store::Store;
-use crate::{ui, walletd};
+use crate::ui;
 
 pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
     let mut ctx = walletd::open(store, network)?;

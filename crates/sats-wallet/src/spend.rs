@@ -6,12 +6,13 @@
 use anyhow::{Result, anyhow};
 use bdk_wallet::bip39::Mnemonic;
 use sats_core::bitcoin::{Network, Psbt, Txid};
-use sats_core::plan::{PreparedSpend, TransactionRecord};
+use sats_core::plan::{PreparedSpend, TransactionRecord, TransactionStatus};
 use sats_core::signer::{LocalSigner, Signer};
 
+use crate::config::network_name;
 use crate::provider::Services;
 use crate::store::Store;
-use crate::walletd::WalletCtx;
+use crate::walletd::{self, WalletCtx};
 
 /// Sign a prepared spend's PSBT to finality. An error here means no
 /// finalized signature exists, so callers holding a budget reservation may
@@ -52,4 +53,47 @@ pub fn broadcast_record(
         log::warn!("broadcast succeeded but the local record was not updated: {err:#}");
     }
     Ok(txid)
+}
+
+/// What [`rebroadcast`] did with a saved transaction.
+#[derive(Debug)]
+pub struct Rebroadcast {
+    pub txid: String,
+    /// The transaction is out, but the agent request it was signed for
+    /// could not be updated. Rebroadcasting the same txid repairs it
+    /// without resolving a provider.
+    pub receipt_error: Option<anyhow::Error>,
+}
+
+/// Broadcast a saved transaction, by txid or unique prefix, and settle the
+/// agent request it was signed for. A transaction already recorded as
+/// broadcast only has that receipt repaired: no provider is resolved, and
+/// nothing is replanned or signed.
+pub fn rebroadcast(
+    store: &Store,
+    network: Network,
+    resolve_services: impl FnOnce() -> Result<Services>,
+    txid_or_prefix: &str,
+) -> Result<Rebroadcast> {
+    let net_name = network_name(network);
+    let mut record = store.load_transaction(net_name, txid_or_prefix)?;
+    match record.status {
+        TransactionStatus::Pending => {}
+        TransactionStatus::Broadcast => {
+            crate::request::settle_broadcast(store, network, &record.txid)?;
+            return Ok(Rebroadcast {
+                txid: record.txid,
+                receipt_error: None,
+            });
+        }
+    }
+    let mut ctx = walletd::open(store, network)?;
+    let services = resolve_services()?;
+    let txid = broadcast_record(store, &mut ctx, &services, &mut record)?.to_string();
+    // An agent request signed earlier but never broadcast settles now.
+    let receipt_error = crate::request::settle_broadcast(store, network, &txid).err();
+    Ok(Rebroadcast {
+        txid,
+        receipt_error,
+    })
 }

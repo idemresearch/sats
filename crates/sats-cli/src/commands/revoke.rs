@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
 use sats_core::bitcoin::Network;
+use sats_wallet::config::network_name;
+use sats_wallet::store::Store;
 
-use crate::config::network_name;
-use crate::store::Store;
 use crate::ui;
 
 pub fn run(store: &Store, network: Network, agent: &str, json: bool) -> Result<()> {

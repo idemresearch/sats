@@ -5,8 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use owo_colors::OwoColorize;
 use sats_core::fmt::format_sats;
-
-use crate::provider::Progress;
+use sats_wallet::provider::Progress;
 
 pub fn use_color() -> bool {
     std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()

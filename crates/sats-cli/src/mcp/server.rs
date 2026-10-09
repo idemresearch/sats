@@ -23,15 +23,14 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use sats_core::authz::Grant;
 use sats_core::bitcoin::Network;
 use sats_core::request::{AgentRequest, RequestState};
+use sats_wallet::config::{Config, network_name};
+use sats_wallet::provider;
+use sats_wallet::request::{self, CreateParams};
+use sats_wallet::store::{Store, now_checked};
+use sats_wallet::walletd;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
-
-use crate::config::{Config, network_name};
-use crate::provider;
-use crate::request::{self, CreateParams};
-use crate::store::{Store, now_checked};
-use crate::walletd;
 
 /// Environment variable carrying the agent's bearer token, as printed
 /// once by `sats agent grant`.
