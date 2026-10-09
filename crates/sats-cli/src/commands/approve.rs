@@ -48,7 +48,7 @@ pub fn run(
         Stage::Denied(request, reason) => return report_denied(&request.id, &reason, json),
     };
     if let Some(selected) = &selected {
-        requests::validate_selection(selected, &staged.request)?;
+        requests::validate_selection(selected, staged.request())?;
     }
     // A menu choice only asks to review. Even --yes cannot turn that
     // choice into authorization without the subsequent confirmation.
@@ -65,17 +65,20 @@ pub fn run(
                 .to_string(),
         ),
         ("Network", network_name(network).to_string()),
-        ("Approve", staged.request.id.clone()),
-        ("Agent", staged.request.agent.clone()),
-        ("Recipient", staged.request.recipient.clone()),
+        ("Approve", staged.request().id.clone()),
+        ("Agent", staged.request().agent.clone()),
+        ("Recipient", staged.request().recipient.clone()),
         (
             "Amount",
-            format!("{} sat", format_sats(staged.spend.amount_sat)),
+            format!("{} sat", format_sats(staged.spend().amount_sat)),
         ),
-        ("Fee", format!("{} sat", format_sats(staged.spend.fee_sat))),
+        (
+            "Fee",
+            format!("{} sat", format_sats(staged.spend().fee_sat)),
+        ),
         (
             "Total",
-            format!("{} sat", format_sats(staged.spend.total_sat())),
+            format!("{} sat", format_sats(staged.spend().total_sat())),
         ),
         (
             "Budget",
@@ -83,9 +86,9 @@ pub fn run(
                 "{} sat remaining after this",
                 format_sats(
                     staged
-                        .grant
+                        .grant()
                         .remaining_sat()
-                        .saturating_sub(staged.spend.total_sat())
+                        .saturating_sub(staged.spend().total_sat())
                 )
             ),
         ),
@@ -100,7 +103,7 @@ pub fn run(
             if selected.is_some() {
                 println!(
                     "{}",
-                    serde_json::json!({"status": "cancelled", "id": staged.request.id})
+                    serde_json::json!({"status": "cancelled", "id": staged.request().id})
                 );
             }
             return Ok(());
@@ -122,7 +125,7 @@ pub fn run(
     // invokes only after the reservation is durable, and zeroized with
     // the signer. The seed and private descriptors are never persisted.
     let mnemonic = keys::unlock(store)?;
-    let request_id = staged.request.id.clone();
+    let request_id = staged.request().id.clone();
     let outcome = execute::commit(store, network, *staged, move || {
         Ok(Box::new(LocalSigner::new(mnemonic, network)))
     })?;

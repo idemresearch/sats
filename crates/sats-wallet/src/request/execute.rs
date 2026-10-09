@@ -54,19 +54,50 @@ use crate::walletd::{self, WalletCtx};
 
 /// A request prepared on current chain state and verified against its
 /// recorded intent, awaiting the human's authorization to execute.
+///
+/// Read-only outside this module: [`commit`] reserves budget for exactly
+/// what [`stage`] verified, so a surface can show these values but never
+/// change what gets reserved or which request is executed.
+///
+/// ```
+/// fn review(staged: &sats_wallet::request::execute::Staged) -> u64 {
+///     staged.spend().total_sat()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// fn shrink(staged: &mut sats_wallet::request::execute::Staged) {
+///     staged.spend.amount_sat = 1;
+/// }
+/// ```
 pub struct Staged {
-    pub request: AgentRequest,
-    /// The grant as it stood at staging, for display. The commit re-reads
-    /// it under the lock.
-    pub grant: Grant,
-    /// What the prepared transaction pays and costs, derived from the
-    /// PSBT, not from the caller.
-    pub spend: SpendRequest,
+    request: AgentRequest,
+    grant: Grant,
+    spend: SpendRequest,
     prepared: PreparedSpend,
     ctx: WalletCtx,
     /// Resolved after the local prechecks; the same selection serves broadcast.
     services: Services,
     _claim: RequestClaim,
+}
+
+impl Staged {
+    /// The request being approved, as claimed at staging.
+    pub fn request(&self) -> &AgentRequest {
+        &self.request
+    }
+
+    /// The grant as it stood at staging, for display. The commit re-reads
+    /// it under the lock.
+    pub fn grant(&self) -> &Grant {
+        &self.grant
+    }
+
+    /// What the prepared transaction pays and costs, derived from the
+    /// PSBT, not from the caller.
+    pub fn spend(&self) -> &SpendRequest {
+        &self.spend
+    }
 }
 
 /// What staging resolved to.

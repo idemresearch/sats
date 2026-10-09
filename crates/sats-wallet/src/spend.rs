@@ -14,10 +14,12 @@ use crate::provider::Services;
 use crate::store::Store;
 use crate::walletd::{self, WalletCtx};
 
-/// Sign a prepared spend's PSBT to finality. An error here means no
-/// finalized signature exists, so callers holding a budget reservation may
-/// still refund it.
-pub fn sign_psbt(prepared: &PreparedSpend, mnemonic: Mnemonic, network: Network) -> Result<Psbt> {
+/// Sign a prepared spend's PSBT to finality. An error means this call
+/// returned no finalized transaction, not that no signature exists: the
+/// signer ran. Nothing that holds a budget reservation may refund on it;
+/// agent requests sign only through `request::execute`, which treats any
+/// failure from the signer on as unresolved.
+fn sign_psbt(prepared: &PreparedSpend, mnemonic: Mnemonic, network: Network) -> Result<Psbt> {
     let mut psbt = prepared.psbt().clone();
     let mut signer = LocalSigner::new(mnemonic, network);
     if !signer.sign(&mut psbt)? {
@@ -26,8 +28,9 @@ pub fn sign_psbt(prepared: &PreparedSpend, mnemonic: Mnemonic, network: Network)
     Ok(psbt)
 }
 
-/// Sign a prepared spend and produce the durable transaction record.
-/// The caller must persist the record before any broadcast attempt.
+/// Sign a prepared spend for a human send and produce the durable
+/// transaction record. The caller must persist the record before any
+/// broadcast attempt. Not for agent requests: see [`sign_psbt`].
 pub fn sign_to_record(
     prepared: PreparedSpend,
     mnemonic: Mnemonic,
