@@ -227,11 +227,20 @@ sats agent revoke claude
 - Re-issuing a grant mints a new token. A running server with the old token
   can't file, and the old token can't start a server.
 - Expired grants can't start a server and are removed when listing or
-  startup finds them.
+  startup finds them. A pending request whose grant expired becomes `denied`
+  with reason `expired` when the human tries to approve it, or `revoked` if
+  the expired grant was already removed. It is never signed.
 - After that, `get_grant` reports `active: false` and every other tool fails
   with `no_grant` or `unauthorized`. The agent can no longer observe its
   requests; you still see them in `sats agent requests` and `sats agent log`.
 - A transaction signed before revocation stays valid.
+
+## Demo
+
+`sh scripts/demo-mcp.sh` runs the request loop end to end offline: an agent
+session over stdio and the human's CLI, through approval, denial, expiry,
+revocation, and a failed broadcast. It uses an isolated wallet and a mock
+chain, and asserts every outcome it prints.
 
 ## Transport
 
