@@ -3,7 +3,7 @@ import Playground from "@/components/Playground";
 import CopyButton from "@/components/CopyButton";
 import { satsVersion } from "@/lib/site";
 
-const INSTALL_CMD = "curl -fsSL https://sats.sh/setup.sh | sh";
+const INSTALL_CMD = "curl -fsSL https://sats.sh/setup.sh | sudo sh";
 
 const features = [
   {

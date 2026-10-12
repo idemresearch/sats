@@ -5,20 +5,32 @@ Notable changes to sats, newest first. Versions follow
 
 ## Unreleased
 
+### Building from source
+
+- The CLI crate is now `crates/sats-cli` (the command is still `sats`):
+  build with `cargo build --release --locked -p sats-cli` and install with
+  `sudo sh setup.sh --binary target/release/sats`. Storage, providers, and
+  the request workflow moved into a new `sats-wallet` library that future
+  front ends will share.
+
 ### Security
+
+- Release builds now require a protected vault owned by the dedicated `_sats`
+  account. The root installer creates it and atomically installs the setuid
+  binary. Wallets are separated by real uid; sudo wallet commands are refused.
+- Caller-named PSBT and transaction files are accessed with caller permissions.
+  Saved provider credentials, sealed seeds, grants, and logs live in the vault.
+  A saved Subfrost key no longer follows a changed `providers add --url`.
+- Release builds have no `--dir`, environment-based wallet relocation, or
+  `file://` providers. Debug wallets require an explicit directory. Existing
+  home-directory wallets are detected with recovery and seed-rotation guidance.
+
 
 - The wallet password and mnemonic are read only from a terminal.
   `SATS_PASSWORD` is gone: every program you start, agents included,
   inherits your environment, so an agent with a shell could have run
   `sats agent approve --yes` and signed without you. Restore no longer
   reads a piped phrase.
-- sats can run from a protected vault: installed setuid to a dedicated
-  account that alone owns the wallet directory, so a process running as
-  you, agents included, can't read or edit wallet state, copy the sealed
-  seed, or read sats' memory. Your wallet lives under
-  `<vault>/users/<uid>/`, files you name are opened as you, and `--dir`,
-  `SATS_DIR`, and `file://` providers don't apply. See
-  [Security](docs/security.md#protected-vault).
 
 ## 0.0.2 (2026-10-07)
 

@@ -46,7 +46,7 @@ jobs:
             exit 1
           fi
       - run: sh -n setup.sh scripts/test-setup.sh
-      - run: sh scripts/test-setup.sh
+      - run: sudo sh scripts/test-setup.sh
       - run: cargo test --workspace --locked
 
   build:
@@ -74,7 +74,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Build release binary
-        run: cargo build -p sats --release --locked --target "${{ matrix.target }}"
+        run: cargo build -p sats-cli --release --locked --target "${{ matrix.target }}"
       - name: Package release archive
         shell: bash
         env:

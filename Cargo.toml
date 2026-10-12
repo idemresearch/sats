@@ -2,9 +2,10 @@
 resolver = "3"
 members = [
     "crates/sats-core",
-    "crates/sats",
+    "crates/sats-wallet",
+    "crates/sats-cli",
     "crates/sats-alkanes",
-    "crates/sats-web",
+    "crates/sats-playground",
 ]
 exclude = ["vendor/minreq"]
 
@@ -23,6 +24,7 @@ rust-version = "1.89"
 [workspace.dependencies]
 sats-core = { path = "crates/sats-core" }
 sats-alkanes = { path = "crates/sats-alkanes" }
+sats-wallet = { path = "crates/sats-wallet" }
 
 bdk_wallet = { version = "=3.1.0", features = ["keys-bip39"] }
 bdk_esplora = { version = "0.22.2", default-features = false, features = ["std", "blocking-https-rustls"] }
@@ -35,8 +37,6 @@ getrandom = "0.3"
 subtle = { version = "2.6", default-features = false }
 zeroize = { version = "1.9", features = ["zeroize_derive"] }
 hex = "0.4.3"
-# Protected vault: real/effective uid switching (crates/sats/src/vault.rs).
-libc = "0.2.189"
 base64 = "0.22"
 
 serde = { version = "1.0", features = ["derive"] }
@@ -50,8 +50,9 @@ owo-colors = "4.3"
 rpassword = "7.5"
 schemars = "1.0"
 toml = "1.1"
-directories = "6.0"
 anyhow = "1.0"
+log = "0.4"
+libc = "0.2"
 humantime = "2.4"
 
 minreq = { version = "2.14", features = ["https-rustls", "json-using-serde"] }

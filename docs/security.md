@@ -27,37 +27,60 @@ included, can read or inherit.
 Sealed keys, grants, agent requests, the event log, and finalized
 transactions are written atomically and owner-only (0600). The directories
 that hold them are owner-only (0700), and existing installs are re-hardened
-as those directories are touched. This guards against partial writes and
-other OS users, not against a process running as your user.
+as those directories are touched. In protected mode the owner is the dedicated
+vault account, not your user.
 
-### Protected vault
+## Protected vault
 
-When the `sats` binary is installed setuid to a dedicated, unprivileged
-account that alone owns the vault directory (`/var/lib/sats` on Linux,
-`/var/db/sats` on macOS), sats runs as that account on your behalf:
+Release commands run only from the installed protected vault; there is no
+unprotected fallback. `curl -fsSL https://sats.sh/setup.sh | sudo sh` creates
+the non-login `_sats` account, its `0700` vault, and a `4555` executable.
+The installer requires a root-owned installation directory with no group- or
+world-writable ancestors. The binary is owned by `_sats`, since setuid uses
+its owner's uid; it must not be owned by root. Run wallet commands as yourself.
+Running them with sudo is refused. `--help` and `--version` are exempt.
 
-- Your wallet lives in `<vault>/users/<your uid>/`, chosen from your real
-  user id. `--dir` and `SATS_DIR` don't apply.
-- The environment is cleared to a short allowlist before anything reads it,
-  and everything sats creates is owner-only.
-- Files you name (PSBT input and output, raw transactions) are opened as
-  you, so a path can't reach into the vault. `file://` providers are
-  refused.
-- The kernel marks setuid processes non-dumpable, so a process running as
-  you can't read sats' memory, including the unsealed seed during signing.
+The real uid selects `<vault>/users/<uid>/`, under `/var/lib/sats` on Linux
+or `/var/db/sats` on macOS. The caller cannot forge this identity. The root
+must already be a real directory, owned by the effective uid, with mode
+`0700`; otherwise sats asks you to run the installer. This directory is
+available before wallet initialization, including for provider setup.
 
-A process running as you can still run `sats` commands, and anything that
-widens authority still needs your password.
+Before parsing arguments, sats clears the elevated process's environment to
+terminal/locale settings and the agent's own bearer token, and sets umask
+`077`. Release builds compile out `--dir`, password environment input, and
+the test vault-root override. `file://` providers are refused from both
+configuration and one-off overrides. Debug development runs require an
+explicit directory and are outside this security boundary.
+
+PSBT inputs/outputs and raw transaction paths supplied by the caller are
+opened with the caller's effective uid. The identity guard restores the
+vault uid on scope exit, including unwinding, and aborts if switching fails.
+It changes the whole process's identity, including provider threads: these
+scopes contain only file I/O and must never overlap privileged work. Exported
+artifacts belong to the caller; no caller path may read or overwrite the vault.
+
+The password is still required per action. No login session or resident
+unlocked signer is introduced. `init` detects a previous default-layout
+wallet and gives recovery/rotation guidance; it never silently imports or
+deletes old key material. If shell agents could access the old wallet, treat
+its seed as exposed, move funds to a fresh wallet, and remove the old folder
+only after verifying recovery. Moving a seed cannot undo an earlier disclosure.
 
 ## Limits
 
-- **Same-user processes.** MCP limits the tools an agent is given. It does
-  not isolate a hostile process running as your OS user with shell access,
-  which can tamper with wallet files or executables, read permitted memory,
-  or intercept your input. The [protected vault](#protected-vault) takes
-  wallet files and sats' memory out of its reach; it can still intercept
-  your input or imitate a prompt. sats has no independent signing hardware and
-  cannot protect a compromised operating system.
+- **Input interception and prompt imitation.** The vault blocks direct file
+  access and ordinary same-user debugger attachment to the setuid process.
+  It cannot stop a hostile shell, terminal, or desktop from intercepting input,
+  presenting a fake password prompt, or substituting the command you intended
+  to run. Protect your shell and terminal as part of the approval path.
+- **Trusted executable and vault account.** The installation directory must
+  remain root-controlled, and `_sats` must have no login access. Native code
+  executing as `_sats`, including a compromised MCP process, can access the
+  entire vault and change files the account owns. A trusted executable and OS
+  are required; this is not an independent hardware signing boundary. Root,
+  privileged debuggers, and administrators who weaken OS process protections
+  remain outside the threat model.
 - **Memory.** No long-running process keeps an unsealed seed, but `init`,
   restore, password checks, and signing briefly hold plaintext key
   material. `bip39` zeroizes its mnemonic on drop. Display strings, restore
@@ -328,11 +351,13 @@ not the process. Diagnostics show only a provider's origin, never user-info,
 paths, queries, or response bodies. Credentials still go to the configured
 endpoint. Redaction does not make a provider honest.
 
-Provider credentials live in `config.toml`, which sats writes owner-only.
+Provider credentials live in `config.toml` inside the vault, owned by `_sats`
+and mode `0600`; an agent running as the caller cannot copy them from disk.
 `sats providers add` reads a key from a hidden prompt or stdin, never from
 the command line, and checks the endpoint before saving it. A saved Esplora
 token never follows a new URL, and the Subfrost key is never sent to a
-`--provider` override. Configuring providers is a human CLI task: no MCP
+`--provider` override. Changing Subfrost's configured endpoint also requires
+a newly supplied key; empty input cannot forward the saved one. Configuring providers is a human CLI task: no MCP
 tool configures them, and the MCP server only uses what is configured.
 
 ## PSBTs
@@ -359,13 +384,14 @@ been verified against a live endpoint.
 
 | Threat | Boundary | Remaining risk |
 |---|---|---|
-| Stolen wallet database | No private descriptors in SQLite | Addresses and balances exposed |
-| Stolen sealed seed | Argon2id plus authenticated encryption | Password strength; offline guessing |
-| Read grant file | Budget and token hash only | Reveals amounts and expiry |
+| Wallet file theft by the caller | Vault directory belongs only to `_sats` | Administrators or compromised vault code can still read it; authorized CLI reads expose wallet metadata |
+| Stolen sealed seed | Vault prevents direct caller reads; Argon2id plus authenticated encryption protects a copied blob | Offline guessing if a backup, legacy seed, or administrator-accessible copy is stolen |
+| Grant/log tampering by the caller | Files are inside the protected vault | CLI actions permitted without a password remain available; compromised vault code can bypass file protection |
+| Provider credential theft | Config is vault-owned; saved credentials never follow caller-selected new URLs | Endpoint compromise, input interception, root, or compromised vault code |
 | Stolen agent token | Every request waits for your password; caps and expiry enforced at filing and execution | Can file and read within the grant until it is revoked or expires |
 | Lied-about amount or fee | Recomputed from the PSBT against the wallet's descriptors | An understated input wastes the agent's own budget on an unrelayable transaction |
-| Compromised MCP process | Holds a token, never a key; forged approvals need the password | Same as a stolen token |
-| Debugger on an approving process | Key material lives only for one approval | Seed recoverable in that window where ptrace is allowed |
+| Malicious MCP tool calls | Token, grant policy, and per-request human authorization | A native code exploit in the MCP process crosses into the trusted vault account |
+| Same-user debugger on an approving process | Setuid process identity restricts ordinary caller attachment; key material lives only for one action | Privileged debuggers, weakened OS protections, or compromised vault code can recover plaintext during that window |
 | Pre-daemon wrapped-seed grant | Reported and refused | The file is a seed disclosure until the wallet is rotated |
 | Revoked agent | Grant and token rechecked on every MCP tool call and under the lock at execution | Transactions signed before revocation stay valid |
 | Provider outage | Planning fails closed on a failed sync | Loss of availability |
