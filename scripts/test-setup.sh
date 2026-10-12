@@ -64,8 +64,18 @@ cp "$latest/$asset.sha256" "$version/$asset.sha256"
 printf '#!/bin/sh\nexit 1\n' > "$tmp_dir/broken-sats"
 chmod 0755 "$tmp_dir/broken-sats"
 
+# uid:gid:mode with the mode as Linux's %a prints it (setuid included, no
+# leading zero). BSD stat's %Lp drops the setuid bit, so on macOS take the
+# full octal %p (file type + mode), keep its last four digits, and trim one
+# leading zero: 104555 -> 4555, 40700 -> 700.
 metadata() {
-    if [ "$os" = Darwin ]; then stat -f '%u:%g:%Lp' "$1"; else stat -c '%u:%g:%a' "$1"; fi
+    if [ "$os" = Darwin ]; then
+        meta_mode=$(stat -f '%p' "$1")
+        meta_mode=${meta_mode#"${meta_mode%????}"}
+        printf '%s:%s\n' "$(stat -f '%u:%g' "$1")" "${meta_mode#0}"
+    else
+        stat -c '%u:%g:%a' "$1"
+    fi
 }
 reject() {
     expected=$1
