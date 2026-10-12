@@ -20,6 +20,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use sats_core::bitcoin::{FeeRate, Network, Transaction, Txid};
+use sats_core::network::ensure_test_network;
 
 use crate::config::{ChainChoice, Config, network_name};
 use crate::walletd::WalletCtx;
@@ -218,6 +219,7 @@ fn plan(
     cli: Option<&CliProvider>,
     network: Network,
 ) -> Result<Plan, ProviderError> {
+    ensure_test_network(network)?;
     let net_name = network_name(network);
     let net = config.net(network);
     let setup = |reason: String| ProviderError::Setup {
@@ -622,10 +624,22 @@ mod tests {
     }
 
     #[test]
+    fn mainnet_resolves_no_provider() {
+        let config = Config::default();
+        for result in [
+            resolve(&config, None, Network::Bitcoin).map(|_| ()),
+            overview(&config, None, Network::Bitcoin).map(|_| ()),
+        ] {
+            let err = result.unwrap_err();
+            assert!(matches!(err, ProviderError::Unsupported(_)), "{err}");
+        }
+    }
+
+    #[test]
     fn fee_target_is_human_policy_scoped_to_the_network() {
         let mut config = Config::default();
         config.signet.fee_target = Some(1008);
-        config.mainnet.fee_target = Some(6);
+        config.testnet4.fee_target = Some(6);
         assert_eq!(
             resolve(&config, None, Network::Signet)
                 .unwrap()
@@ -633,7 +647,7 @@ mod tests {
             1008
         );
         assert_eq!(
-            resolve(&config, None, Network::Bitcoin)
+            resolve(&config, None, Network::Testnet4)
                 .unwrap()
                 .fee_target_blocks,
             6
@@ -659,8 +673,8 @@ mod tests {
         ));
 
         // The key alone changes no network's provider.
-        let mainnet = overview(&config, None, Network::Bitcoin).unwrap();
-        assert_eq!(mainnet.provider, "mempool");
+        let testnet4 = overview(&config, None, Network::Testnet4).unwrap();
+        assert_eq!(testnet4.provider, "mempool");
 
         // Subfrost publishes no regtest endpoint: not set up there.
         config.regtest.chain = Some(ChainChoice::Subfrost);

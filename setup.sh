@@ -182,6 +182,7 @@ installed_version=$("$install_candidate" --version 2>/dev/null) || fail "downloa
 mv -f "$install_candidate" "$destination"
 install_candidate=""
 say "Installed $installed_version to $destination"
+say "sats is a test-network release (signet, testnet4, regtest); mainnet is refused."
 
 case ":${PATH:-}:" in
     *":$install_dir:"*) ;;

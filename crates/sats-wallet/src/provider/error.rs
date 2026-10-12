@@ -2,10 +2,15 @@
 //! *redacted* display form — secrets (subfrost path keys, bearer tokens)
 //! must never reach an error string or a log line.
 
+use sats_core::network::MainnetRefused;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
+    /// A network this build never serves.
+    #[error(transparent)]
+    Unsupported(#[from] MainnetRefused),
+
     /// A configured choice that cannot be served: the reason names the fix.
     #[error("{network} providers: {reason}")]
     Setup {

@@ -140,25 +140,56 @@ fn restore_refuses_existing_seed() {
         .stderr(predicate::str::contains("already exists"));
 }
 
+/// The test-network policy holds at every entry point: the flag, the
+/// config, wallet creation, the agent server, and approval. Each refusal
+/// happens before anything is written.
 #[test]
-fn mainnet_restore_requires_typed_confirmation() {
-    let dir = TempDir::new().unwrap();
-    sats(&dir)
-        .args(["init", "--restore", "--network", "mainnet"])
-        .write_stdin("y\n")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("cancelled"));
+fn mainnet_is_refused_everywhere() {
+    let refused = |dir: &TempDir, args: &[&str], expect: &str| {
+        sats(dir)
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("mainnet is not supported"))
+            .stderr(predicate::str::contains(expect));
+        assert!(!dir.path().join("mainnet").exists(), "{args:?}");
+    };
 
-    let confirmed = TempDir::new().unwrap();
-    sats(&confirmed)
-        .args(["init", "--restore", "--network", "mainnet"])
-        .write_stdin(
-            "hot wallet\nabandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about\n",
-        )
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("wallet restored  mainnet"));
+    let fresh = TempDir::new().unwrap();
+    refused(&fresh, &["--network", "mainnet", "init"], "use signet");
+    assert!(!fresh.path().join("seed.sealed").exists());
+    assert!(!fresh.path().join("config.toml").exists());
+
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    for args in [
+        &["--network", "bitcoin", "balance", "--offline"][..],
+        &["--network", "mainnet", "receive"],
+        &[
+            "--network",
+            "mainnet",
+            "agent",
+            "grant",
+            "claude",
+            "--budget",
+            "1000",
+        ],
+        &["--network", "mainnet", "agent", "approve"],
+        &["--network", "mainnet", "agent", "serve", "claude"],
+    ] {
+        refused(&dir, args, "use signet");
+    }
+
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, "network = \"mainnet\"\n").unwrap();
+    refused(&dir, &["receive"], "set network = \"signet\"");
+
+    std::fs::write(
+        &config,
+        "network = \"signet\"\n\n[mainnet]\nchain = \"mempool\"\n",
+    )
+    .unwrap();
+    refused(&dir, &["receive"], "remove [mainnet]");
 }
 
 #[test]
@@ -180,7 +211,7 @@ fn wrong_password_is_rejected() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
-        .args(["init", "--network", "mainnet"])
+        .args(["init", "--network", "regtest"])
         .env("SATS_PASSWORD", "wrong-password")
         .assert()
         .failure()

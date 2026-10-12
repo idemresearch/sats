@@ -12,6 +12,7 @@ pub mod error;
 pub mod event;
 pub mod fmt;
 pub mod intent;
+pub mod network;
 pub mod plan;
 pub mod request;
 pub mod seal;

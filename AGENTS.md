@@ -38,7 +38,7 @@ first-class workflow object (`sats-core::request`): `pending_approval`,
 `denied`, `dismissed`, `signing`, `sent`, `broadcast_pending`,
 `unresolved`, or `failed`, bound to the grant instance that created it. The human-authorized execution path (`crates/sats-wallet/src/request/`)
 prepares, re-verifies, reserves budget, signs, persists, and broadcasts;
-in v0.0.1 that path is `sats agent approve`, which unseals the seed with
+today that path is `sats agent approve`, which unseals the seed with
 the human's password for exactly one execution. The agent observes the
 result and takes no action after filing.
 
@@ -50,7 +50,10 @@ agent requests share validation, sync, the dust exclusion, fee estimation, and
 preparation. There is no autonomous agent spend mode and no resident
 unlocked signer. See `docs/direction.md`.
 
-Signet is the default. Mainnet must remain an explicit choice.
+Signet is the default; testnet4 and regtest are the other choices. Mainnet
+is refused: the rule is `sats_core::network`, checked at parsing, config
+load, wallet open and create, provider resolution, and local-signer
+construction. Never add a mainnet path outside that rule.
 
 ## Pre-release compatibility policy
 
@@ -79,6 +82,7 @@ advice for exactly that file.
 | `crates/sats-core/src/authz.rs` | Pure grant decisions (the verdict ladder), reservation, and refund rules |
 | `crates/sats-core/src/request.rs` | The request record and its state machine |
 | `crates/sats-core/src/intent.rs` | The canonical send intent and its digest |
+| `crates/sats-core/src/network.rs` | The network policy: test networks only, mainnet refused |
 | `crates/sats-core/src/event.rs` | The causal event kinds appended per request transition |
 | `crates/sats-core/src/token.rs` | Agent capability tokens: mint, hash, constant-time verify |
 | `crates/sats-core/src/verify.rs` | Recomputing a PSBT's payments and fee from the wallet's own descriptors |
@@ -113,7 +117,7 @@ These come first; everything else serves them:
 - No agent-originated request may reach the signer without explicit
   human authorization bound to that exact request.
 - Only a human-authorized execution path may invoke the signer for an
-  agent-originated request. In v0.0.1, `sats agent approve` is that path;
+  agent-originated request. Today `sats agent approve` is that path;
   the invariant is about the path's authorization, not the command.
 - A grant defines what an agent is allowed to propose. Human approval
   authorizes one valid proposal inside the grant — it cannot exceed the

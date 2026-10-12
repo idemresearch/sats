@@ -133,12 +133,7 @@ pub fn remove(
                 bail!("Subfrost isn't set up");
             }
             config.subfrost = None;
-            for net in [
-                Network::Bitcoin,
-                Network::Signet,
-                Network::Testnet4,
-                Network::Regtest,
-            ] {
+            for net in [Network::Signet, Network::Testnet4, Network::Regtest] {
                 let settings = config.net_mut(net);
                 settings.subfrost_url = None;
                 if settings.chain == Some(ChainChoice::Subfrost) {

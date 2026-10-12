@@ -954,7 +954,7 @@ mod tests {
                 Ok(Box::new(CountingSigner {
                     signs: probe.signs,
                     fault: probe.fault,
-                    inner: LocalSigner::new(mnemonic, Network::Signet),
+                    inner: LocalSigner::new(mnemonic, Network::Signet).unwrap(),
                 }))
             }
         }

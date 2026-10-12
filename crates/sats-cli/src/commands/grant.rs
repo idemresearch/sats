@@ -103,9 +103,6 @@ pub fn run(
         rows.push(("Max fee", fee_row));
         rows.push(("For", ui::human_duration(lifetime)));
         ui::kv_rows(&rows);
-        if network == Network::Bitcoin {
-            ui::warn("mainnet grant — approvals you issue will spend real bitcoin");
-        }
     }
 
     // The password prompt IS the human authorization. Nothing derived

@@ -41,6 +41,7 @@ runtime. Callers pass in time and own the BDK wallet.
 | `authz` | Grants, the verdict ladder (every proposal is ask or deny), reservations, refunds |
 | `request` | The request record and its state machine |
 | `intent` | The canonical send intent and its digest |
+| `network` | The network policy: test networks only, mainnet refused |
 | `event` | Event kinds appended per request transition |
 | `token` | Agent tokens: mint, hash, constant-time verify |
 | `verify` | Recomputing a PSBT's payments and fee from the wallet's descriptors |

@@ -40,7 +40,6 @@ impl Fixture {
         for dir in [&home, &config, &data, &cwd, &other, &bin] {
             fs::create_dir_all(dir).unwrap();
         }
-        fs::write(other.join("config.toml"), "network = \"mainnet\"\n").unwrap();
         for (name, script) in [
             (
                 "codex",
@@ -283,6 +282,15 @@ fn embedded_token(line: &str) -> &str {
         .unwrap()
 }
 
+/// A test network other than `network`, for configs that must not win.
+fn conflicting_network(network: &str) -> &'static str {
+    if network == "testnet4" {
+        "signet"
+    } else {
+        "testnet4"
+    }
+}
+
 fn check_connection(
     network: &str,
     directory: Option<&str>,
@@ -291,6 +299,14 @@ fn check_connection(
     agent: &str,
 ) {
     let fixture = Fixture::new();
+    // The client's working directory holds a config naming a different
+    // network: the launch command must pin its own.
+    let conflicting = conflicting_network(network);
+    fs::write(
+        fixture.other.join("config.toml"),
+        format!("network = \"{conflicting}\"\n"),
+    )
+    .unwrap();
     let directory = directory.map(|name| {
         if name.starts_with("./") {
             PathBuf::from(name)
@@ -331,7 +347,7 @@ fn check_connection(
         "[{network}]\nchain = \"subfrost\"\n\n[{network}.esplora]\nurl = \"http://127.0.0.1:1/private-provider-secret\"\nbearer = \"private-bearer-secret\"\n"
     );
     let configured_network = if directory.is_some() {
-        "mainnet"
+        conflicting
     } else {
         network
     };
@@ -399,7 +415,7 @@ fn check_connection(
     // The future client's defaults and this wallet's config may both change.
     // An unresolvable provider setup proves startup, filing and observation
     // stay local.
-    fs::write(&config, format!("network = \"mainnet\"\n{providers}")).unwrap();
+    fs::write(&config, format!("network = \"{conflicting}\"\n{providers}")).unwrap();
     let grant_path = data
         .join(network)
         .join("grants")

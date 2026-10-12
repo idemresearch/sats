@@ -6,6 +6,7 @@ use bdk_wallet::bitcoin::{Network, Psbt};
 use bip39::Mnemonic;
 
 use crate::error::SignerError;
+use crate::network::{MainnetRefused, ensure_test_network};
 use crate::seed;
 
 pub trait Signer {
@@ -26,8 +27,12 @@ pub struct LocalSigner {
 }
 
 impl LocalSigner {
-    pub fn new(mnemonic: Mnemonic, network: Network) -> Self {
-        LocalSigner { mnemonic, network }
+    /// Refused off the test networks: local signing never holds a key
+    /// for coins of value. This runs before any signature exists, so a
+    /// caller can treat the refusal as proof that nothing was signed.
+    pub fn new(mnemonic: Mnemonic, network: Network) -> Result<Self, MainnetRefused> {
+        ensure_test_network(network)?;
+        Ok(LocalSigner { mnemonic, network })
     }
 }
 
@@ -113,7 +118,7 @@ mod tests {
 
         // The LocalSigner must.
         let mut psbt = plan.psbt().clone();
-        let mut signer = LocalSigner::new(mnemonic, Network::Signet);
+        let mut signer = LocalSigner::new(mnemonic, Network::Signet).unwrap();
         assert_eq!(signer.name(), "local");
         let finalized = signer.sign(&mut psbt).unwrap();
         assert!(finalized, "signed PSBT must finalize");
@@ -151,5 +156,14 @@ mod tests {
             0,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn local_signer_refuses_mainnet() {
+        let mnemonic = seed::parse_mnemonic(MNEMONIC).unwrap();
+        assert!(matches!(
+            LocalSigner::new(mnemonic, Network::Bitcoin),
+            Err(MainnetRefused)
+        ));
     }
 }

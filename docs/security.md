@@ -5,9 +5,25 @@ request execution, providers, and failure behavior.
 
 The core rule: **no agent-originated spend reaches the signer without explicit
 human authorization bound to that exact request.** An unapproved agent request
-is pending or denied, never signed. In v0.0.1 the only path from an agent
+is pending or denied, never signed. Today the only path from an agent
 request to the signer is `sats agent approve`. [Direction](direction.md)
 explains why.
+
+## Test networks only
+
+sats runs on signet (the default), testnet4, and regtest, and refuses
+mainnet. The refusal is one rule (`sats_core::network`) checked wherever
+mainnet could enter: parsing `--network` or the config's `network`, loading a
+config with a `[mainnet]` section, opening or creating a wallet, resolving a
+chain provider, and constructing the local signer. The agent server takes its
+network from the same flag, so it refuses to start on mainnet. Every refusal
+happens before anything is written.
+
+The reason is the signing boundary described below: the software signer runs
+on the same machine, as the same user, as the agent. That is acceptable for
+coins without value and not for mainnet. Treat any seed sats has held as a
+development key: never send mainnet funds to it or restore it into a mainnet
+wallet.
 
 ## Keys and wallet state
 
@@ -98,8 +114,8 @@ its hash, compared in constant time. Re-issuing a grant mints a new token and
 invalidates the old one, so rotation and revocation are the same act.
 
 A grant is bound to its network. A grant file copied into another network's
-directory is refused on load, so a signet grant can never authorize a mainnet
-signature.
+directory is refused on load, so a signet grant can never authorize a
+signature on another network.
 
 The cost: the MCP client stores the raw token in its configuration, where the
 agent can read it. A stolen token grants the authority to *ask*. Its holder
@@ -329,7 +345,7 @@ reported as partially signed and written back as an artifact.
 Default builds include no Alkanes commands. Inspection and advisory
 simulation are compiled only with the non-default `experimental-alkanes`
 feature, and execution only with the development-only
-`experimental-alkanes-execute` feature, which also refuses mainnet. Views
+`experimental-alkanes-execute` feature. Views
 come from the network's provider, which must be Subfrost. There is no
 Alkanes MCP tool or grant authority. The simulation request format has not
 been verified against a live endpoint.
@@ -355,7 +371,7 @@ been verified against a live endpoint.
 
 ## Operational guidance
 
-- Learn the flow on signet before using mainnet.
+- Use a fresh seed made for sats, and never move it to mainnet.
 - Back up the mnemonic and verify recovery independently.
 - Use a strong, unique wallet password.
 - Run sats only on a machine and user account you trust.

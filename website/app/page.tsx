@@ -57,11 +57,11 @@ const features = [
     ),
   },
   {
-    title: "Signet first",
+    title: "Test networks only",
     body: (
       <>
-        Signet is the default network, where coins have no value. Mainnet is
-        always an explicit <code>--network mainnet</code>.
+        Signet is the default network, where coins have no value; testnet4
+        and regtest are available. This release refuses mainnet.
       </>
     ),
   },

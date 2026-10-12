@@ -72,7 +72,6 @@ mod dialect {
 /// Other networks need an explicit URL.
 pub fn default_url(network: Network) -> Option<&'static str> {
     match network {
-        Network::Bitcoin => Some("https://mainnet.subfrost.io/v4/jsonrpc"),
         Network::Signet => Some("https://signet.subfrost.io/v4/jsonrpc"),
         _ => None,
     }

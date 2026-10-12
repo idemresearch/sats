@@ -21,7 +21,7 @@ use crate::walletd::{self, WalletCtx};
 /// failure from the signer on as unresolved.
 fn sign_psbt(prepared: &PreparedSpend, mnemonic: Mnemonic, network: Network) -> Result<Psbt> {
     let mut psbt = prepared.psbt().clone();
-    let mut signer = LocalSigner::new(mnemonic, network);
+    let mut signer = LocalSigner::new(mnemonic, network)?;
     if !signer.sign(&mut psbt)? {
         return Err(anyhow!("signer produced an unfinalized transaction"));
     }

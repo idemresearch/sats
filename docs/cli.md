@@ -36,7 +36,7 @@ exact options in your installed version.
 
 | Option | Meaning |
 |---|---|
-| `--network <NET>` | `mainnet`, `signet`, `testnet4`, or `regtest`. Overrides the config. |
+| `--network <NET>` | `signet`, `testnet4`, or `regtest`. Overrides the config. Mainnet is refused. |
 | `--provider <KIND=URL>` | Replace the network's provider for this run. See [Providers](providers.md#one-off-overrides). |
 | `--json` | Machine-readable output, where supported |
 
@@ -54,7 +54,7 @@ sat.
 sats init                     # asks: create a new wallet, or restore one
 sats init --words 24          # create, with a 24-word mnemonic
 sats init --restore           # restore from a mnemonic backup
-sats --network mainnet init   # mainnet is always explicit
+sats --network testnet4 init  # add another test network
 ```
 
 `init` shows a new mnemonic once. Write it down before you continue. One seed
@@ -73,9 +73,8 @@ chain on first sync.
 - Restore needs an empty data directory.
 - sats derives BIP-86 Taproot addresses only (`bc1p…`, `tb1p…`). Coins on
   other address types won't appear, but they aren't lost.
-- Mainnet restore puts the backup online as a hot key, so it asks you to type
-  a confirmation phrase. To only watch funds, don't restore the seed on an
-  online machine.
+- Restore only a seed made for testing. sats refuses mainnet, and a seed it
+  has held is a development key that must never hold mainnet funds.
 - Grants, saved transactions, and agent requests are local records. They
   don't come back with the seed; on-chain history does.
 - Restore needs a terminal for both the phrase and the new password.
