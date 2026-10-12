@@ -25,6 +25,7 @@ pub struct Cli {
     pub json: bool,
 
     /// Data directory override
+    #[cfg(debug_assertions)]
     #[arg(long, global = true, env = "SATS_DIR", hide = true, value_name = "DIR")]
     pub dir: Option<PathBuf>,
 
@@ -240,7 +241,7 @@ pub struct SendArgs {
     /// Recipient address
     pub address: String,
     /// Amount in sats (shorthand ok: 10k, 1.5m)
-    #[arg(value_parser = crate::amount::parse)]
+    #[arg(value_parser = sats_core::amount::parse)]
     pub amount: u64,
     /// Fee rate in sat/vB (default: estimated for configured target)
     #[arg(long, value_name = "SAT_VB")]
@@ -264,7 +265,7 @@ pub struct GrantArgs {
     /// Agent name (e.g. claude)
     pub name: String,
     /// Total budget in sats (amounts + fees draw it down; shorthand ok: 50k)
-    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+    #[arg(long, value_name = "SATS", value_parser = sats_core::amount::parse)]
     pub budget: u64,
     /// Grant lifetime (e.g. 24h, 7d)
     #[arg(
@@ -276,11 +277,11 @@ pub struct GrantArgs {
     pub duration: String,
     /// Hard per-transaction amount cap in sats: amounts above it are
     /// refused outright — the only escalation is changing the grant
-    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+    #[arg(long, value_name = "SATS", value_parser = sats_core::amount::parse)]
     pub max_tx: Option<u64>,
     /// Hard per-transaction fee cap in sats
     /// (default: 2% of the budget, at least 1000, never above the budget)
-    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
+    #[arg(long, value_name = "SATS", value_parser = sats_core::amount::parse)]
     pub max_fee: Option<u64>,
     /// Authority mode: ask (every request waits for your approval) or
     /// observe (read-only)

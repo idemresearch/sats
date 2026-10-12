@@ -14,7 +14,7 @@ path = "src/main.rs"
 [features]
 default = ["mcp"]
 # The `sats agent serve` MCP server (rmcp + tokio). Disable for a smaller
-# human-only binary: cargo install --no-default-features
+# human-only binary: cargo build -p sats-cli --no-default-features
 mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
 # Experimental Alkanes contract views (`sats alkanes inspect|simulate`),
 # served by Subfrost. Excluded from default binaries.
@@ -35,7 +35,7 @@ owo-colors = { workspace = true }
 rpassword = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-directories = { workspace = true }
+libc = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 humantime = { workspace = true }

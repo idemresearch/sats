@@ -21,9 +21,15 @@ pub fn broadcast(
     json: bool,
 ) -> Result<()> {
     let path = Path::new(target);
-    if path.exists() {
-        let text =
-            fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let artifact = crate::vault::as_caller(|| {
+        if path.try_exists()? {
+            fs::read_to_string(path).map(Some)
+        } else {
+            Ok(None)
+        }
+    })
+    .with_context(|| format!("cannot read {}", path.display()))?;
+    if let Some(text) = artifact {
         let bytes = hex::decode(text.trim()).map_err(|e| anyhow!("not valid tx hex: {e}"))?;
         let tx: Transaction = consensus::encode::deserialize(&bytes)
             .map_err(|e| anyhow!("not a valid transaction: {e}"))?;

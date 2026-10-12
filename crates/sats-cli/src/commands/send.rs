@@ -50,7 +50,7 @@ pub fn run(
 
     if let Some(file) = &args.export_psbt {
         // The PSBT names the wallet's UTXOs and change: owner-only perms.
-        write_artifact(file, prepared.psbt().to_string().as_bytes())?;
+        crate::vault::as_caller(|| write_artifact(file, prepared.psbt().to_string().as_bytes()))?;
         if json {
             println!(
                 "{}",

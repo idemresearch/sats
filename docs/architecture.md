@@ -101,9 +101,11 @@ and must never gain filesystem, network, or store dependencies.
 
 ## Persistent state
 
-`config.toml` lives in the config directory and everything else in the data
-directory (see [CLI](cli.md#configuration)). `SATS_DIR` puts both in one
-directory.
+`Store::open` takes one explicit directory for configuration and data. The CLI's
+`vault.rs` owns OS identity, protected paths, environment sanitization, and
+caller-file access. It injects the directory and file-provider permission;
+`sats-wallet` has no knowledge of vaults, setuid, or development environment
+variables. See [CLI](cli.md#configuration) for the installed layout.
 
 | State | Path | Contents |
 |---|---|---|

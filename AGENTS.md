@@ -92,6 +92,7 @@ advice for exactly that file.
 | `crates/sats-wallet/src/prepare.rs` | The shared preparation pipeline: validate, sync, exclude dust, estimate, build |
 | `crates/sats-wallet/src/request/` | The native request workflow: create, dismiss, reconcile, and the human-authorized executor |
 | `crates/sats-wallet/src/spend.rs` | The shared signing and broadcast tail: persist before broadcast, rebroadcast |
+| `crates/sats-cli/src/vault.rs` | Process identity, protected wallet paths, environment allowlist, caller-file guard |
 | `crates/sats-cli/src/main.rs` | Composition and command dispatch only |
 | `crates/sats-cli/src/cli.rs` | Clap command and flag definitions |
 | `crates/sats-cli/src/commands/` | Human CLI workflows and rendering |
@@ -122,6 +123,21 @@ These come first; everything else serves them:
   primitive.
 - Pre-release, prefer removing obsolete security models over supporting
   them (see the pre-release compatibility policy above).
+
+### Protected vault
+
+- Release commands run only from the protected installation. No flag,
+  environment variable, or fallback may enable an unprotected release wallet.
+- `vault::enter` runs first in main, before environment readers or threads.
+  Only clap's help/version exit is exempt from the wallet entry policy.
+- Every caller-named file path, including existence checks and artifact
+  writes, goes through `vault::as_caller`. The closure does only that I/O;
+  it never calls providers, signs, or reads/writes vault state.
+- The identity change affects the whole process, including provider threads.
+  Never overlap caller scopes or introduce concurrent caller-path operations.
+- `sats-wallet` receives an explicit directory and file-provider permission.
+  It never discovers a home directory or knows about setuid or CLI policy.
+- Saved provider credentials must never follow a caller-selected new URL.
 
 ### Portable core
 
@@ -352,7 +368,7 @@ Run the focused test first, then the full local gate:
 
 ```sh
 sh -n setup.sh scripts/test-setup.sh
-sh scripts/test-setup.sh
+sudo sh scripts/test-setup.sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
@@ -373,7 +389,9 @@ module with `sh scripts/build-playground.sh` (see
 [Development](docs/development.md)).
 
 For user-facing changes, also run the freshly built binary through at least
-one relevant happy path using an isolated `SATS_DIR`. Never claim a change is
+one relevant happy path using a debug build with an isolated `SATS_DIR`, or an
+installed release in a disposable test system. Vault changes also require the
+root-only integration test in [Development](docs/development.md). Never claim a change is
 complete based only on compilation.
 
 If an environment cannot run a required check, state exactly what was not run

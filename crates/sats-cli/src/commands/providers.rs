@@ -45,8 +45,22 @@ pub fn add(
             {
                 bail!("Subfrost has no default endpoint for {net_name} — pass --url");
             }
-            let current = config.subfrost.as_ref().map(|s| s.api_key.clone());
-            updated = current.is_some();
+            updated = config.subfrost.is_some();
+            let saved_url = config
+                .net(network)
+                .subfrost_url
+                .as_ref()
+                .map(|url| url.0.as_str())
+                .or_else(|| provider::subfrost::default_url(network));
+            // The caller can run this CLI too. A protected credential must
+            // never follow a caller-selected endpoint just because input was
+            // empty; a changed destination requires a newly supplied key.
+            let same_endpoint = args.url.as_deref().is_none_or(|url| Some(url) == saved_url);
+            let current = config
+                .subfrost
+                .as_ref()
+                .filter(|_| same_endpoint)
+                .map(|s| s.api_key.clone());
             let api_key = read_credential("Subfrost API key", current, true)?
                 .context("no Subfrost API key")?;
             config.subfrost = Some(SubfrostConfig { api_key });
@@ -185,7 +199,8 @@ fn check_and_save(
     credential: bool,
 ) -> Result<()> {
     let net_name = network_name(network);
-    let services = provider::resolve(config, None, network).context("nothing was saved")?;
+    let services = provider::resolve(config, None, network, crate::vault::allows_file_providers())
+        .context("nothing was saved")?;
     let status = ui::StatusLine::start(&format!("checking the {net_name} endpoint…"));
     let checked = services.check_chain();
     status.finish();
@@ -235,7 +250,12 @@ fn show(
     json: bool,
 ) -> Result<()> {
     let net_name = network_name(network);
-    let view = match provider::overview(config, overrides, network) {
+    let view = match provider::overview(
+        config,
+        overrides,
+        network,
+        crate::vault::allows_file_providers(),
+    ) {
         Ok(view) => view,
         Err(err) => {
             if !json {

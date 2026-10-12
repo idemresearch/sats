@@ -20,9 +20,6 @@ const AGENT: &str = "connection-agent";
 
 struct Fixture {
     root: TempDir,
-    home: PathBuf,
-    config: PathBuf,
-    data: PathBuf,
     cwd: PathBuf,
     other: PathBuf,
     bin: PathBuf,
@@ -31,13 +28,10 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = TempDir::new().unwrap();
-        let home = root.path().join("home ' $HOME ; & `literal`");
-        let config = root.path().join("config ' $(literal) &");
-        let data = root.path().join("data ' $USER ;");
         let cwd = root.path().join("creation");
         let other = root.path().join("connection");
         let bin = root.path().join("bin");
-        for dir in [&home, &config, &data, &cwd, &other, &bin] {
+        for dir in [&cwd, &other, &bin] {
             fs::create_dir_all(dir).unwrap();
         }
         fs::write(other.join("config.toml"), "network = \"mainnet\"\n").unwrap();
@@ -104,36 +98,26 @@ exec "$SATS_FIXTURE_BINARY" "$@"
         }
         Self {
             root,
-            home,
-            config,
-            data,
             cwd,
             other,
             bin,
         }
     }
 
-    fn sats(&self, dir: Option<&Path>, network: Option<&str>, xdg: bool) -> Command {
+    fn sats(&self, dir: &Path, network: Option<&str>) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_sats"));
         cmd.current_dir(&self.cwd)
             .env_remove("SATS_DIR")
-            .env("HOME", &self.home)
+            .env("HOME", &self.other)
             .env("SATS_PASSWORD", common::PASSWORD)
             .env("NO_COLOR", "1")
             .stdin(Stdio::null());
-        if xdg {
-            cmd.env("XDG_CONFIG_HOME", &self.config)
-                .env("XDG_DATA_HOME", &self.data);
+        cmd.env("XDG_CONFIG_HOME", &self.other)
+            .env("XDG_DATA_HOME", &self.other);
+        if dir.is_relative() {
+            cmd.env("SATS_DIR", dir);
         } else {
-            cmd.env_remove("XDG_CONFIG_HOME")
-                .env_remove("XDG_DATA_HOME");
-        }
-        if let Some(dir) = dir {
-            if dir.is_relative() {
-                cmd.env("SATS_DIR", dir);
-            } else {
-                cmd.arg("--dir").arg(dir);
-            }
+            cmd.arg("--dir").arg(dir);
         }
         if let Some(network) = network {
             cmd.args(["--network", network]);
@@ -260,69 +244,32 @@ impl Drop for Mcp {
     }
 }
 
-fn find_named(root: &Path, name: &str) -> PathBuf {
-    fn walk(dir: &Path, name: &str, results: &mut Vec<PathBuf>) {
-        for entry in fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                walk(&path, name, results);
-            } else if path.file_name().unwrap() == name {
-                results.push(path);
-            }
-        }
-    }
-    let mut found = Vec::new();
-    walk(root, name, &mut found);
-    assert_eq!(found.len(), 1, "{found:?}");
-    found.pop().unwrap()
-}
-
 fn embedded_token(line: &str) -> &str {
     line.split_ascii_whitespace()
         .find_map(|word| word.strip_prefix("SATS_AGENT_TOKEN="))
         .unwrap()
 }
 
-fn check_connection(
-    network: &str,
-    directory: Option<&str>,
-    xdg: bool,
-    auth_errors: bool,
-    agent: &str,
-) {
+fn check_connection(network: &str, directory: &str, auth_errors: bool, agent: &str) {
     let fixture = Fixture::new();
-    let directory = directory.map(|name| {
-        if name.starts_with("./") {
-            PathBuf::from(name)
-        } else {
-            fixture.root.path().join(name)
-        }
-    });
-    let mut init = fixture.sats(directory.as_deref(), Some(network), xdg);
+    let directory = if directory.starts_with("./") {
+        PathBuf::from(directory)
+    } else {
+        fixture.root.path().join(directory)
+    };
+    let mut init = fixture.sats(&directory, Some(network));
     let out = init.args(["init", "--words", "12"]).output().unwrap();
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let seed = find_named(fixture.root.path(), "seed.sealed");
-    let data = seed.parent().unwrap();
-    // Find the actual config through the created wallet, without making test
-    // assumptions about directories' platform-specific default layout.
-    let config = if let Some(dir) = directory.as_deref() {
-        if dir.is_absolute() {
-            dir.join("config.toml")
-        } else {
-            fixture.cwd.join(dir).join("config.toml")
-        }
+    let data = if directory.is_absolute() {
+        directory.clone()
     } else {
-        let base = if xdg && !cfg!(target_os = "macos") {
-            &fixture.config
-        } else {
-            &fixture.home
-        };
-        find_named(base, "config.toml")
+        fixture.cwd.join(&directory)
     };
+    let config = data.join("config.toml");
     // Config-selected network must be pinned just as an explicit override of
     // a conflicting configured network is.
     // Credentialed, and unresolvable: the provider is set to Subfrost, which
@@ -330,22 +277,14 @@ fn check_connection(
     let providers = format!(
         "[{network}]\nchain = \"subfrost\"\n\n[{network}.esplora]\nurl = \"http://127.0.0.1:1/private-provider-secret\"\nbearer = \"private-bearer-secret\"\n"
     );
-    let configured_network = if directory.is_some() {
-        "mainnet"
-    } else {
-        network
-    };
+    let configured_network = "mainnet";
     fs::write(
         &config,
         format!("network = \"{configured_network}\"\n{providers}"),
     )
     .unwrap();
     let out = fixture
-        .sats(
-            directory.as_deref(),
-            directory.as_ref().map(|_| network),
-            xdg,
-        )
+        .sats(&directory, Some(network))
         .args(["agent", "grant", "--budget", "12345", "--", agent])
         .output()
         .unwrap();
@@ -413,22 +352,8 @@ fn check_connection(
     assert!(grant.authorizes(token));
 
     let mut expected = vec!["--network".to_owned(), network.to_owned()];
-    let shared_default = directory.is_none() && config.parent() == Some(data);
-    let pinned_dir = if let Some(dir) = &directory {
-        Some(if dir.is_absolute() {
-            dir.clone()
-        } else {
-            fixture.cwd.canonicalize().unwrap().join(dir)
-        })
-    } else if shared_default {
-        Some(data.to_path_buf())
-    } else {
-        None
-    };
-    if let Some(dir) = pinned_dir {
-        let absolute = std::path::absolute(dir).unwrap();
-        expected.extend(["--dir".into(), absolute.to_str().unwrap().into()]);
-    }
+    let absolute = std::path::absolute(&data).unwrap();
+    expected.extend(["--dir".into(), absolute.to_str().unwrap().into()]);
     expected.extend(["agent".into(), "serve".into()]);
     if agent.starts_with('-') {
         expected.push("--".into());
@@ -468,22 +393,7 @@ fn check_connection(
         }
         let env = fixture.captured("sats-env");
         assert_eq!(env[4], token);
-        if directory.is_none() && !shared_default {
-            assert_eq!(env[0], "unset");
-            assert_eq!(env[1], fixture.home.to_str().unwrap());
-            assert!(Path::new(&env[2]).is_absolute());
-            assert!(Path::new(&env[3]).is_absolute());
-            #[cfg(not(target_os = "macos"))]
-            {
-                assert_eq!(
-                    env[2],
-                    config.parent().unwrap().parent().unwrap().to_str().unwrap()
-                );
-                assert_eq!(env[3], data.parent().unwrap().to_str().unwrap());
-            }
-        } else {
-            assert_eq!(env[0], fixture.other.to_str().unwrap());
-        }
+        assert_eq!(env[0], fixture.other.to_str().unwrap());
         let view = mcp.tool(2, "get_grant", json!({}));
         assert_eq!(view["active"], true);
         assert_eq!(view["remaining_sat"], 12345);
@@ -537,21 +447,15 @@ fn check_connection(
 }
 
 #[test]
-fn generated_connection_preserves_nondefault_network_and_default_layout() {
-    check_connection("regtest", None, false, true, AGENT);
-}
-
-#[test]
 fn generated_connection_preserves_custom_directory() {
-    check_connection("signet", Some("wallet"), false, false, AGENT);
+    check_connection("signet", "wallet", true, AGENT);
 }
 
 #[test]
 fn generated_connection_preserves_network_and_quoted_directory() {
     check_connection(
         "regtest",
-        Some("wallet ' $HOME $(touch injected) ; & `literal`"),
-        false,
+        "wallet ' $HOME $(touch injected) ; & `literal`",
         false,
         AGENT,
     );
@@ -561,21 +465,15 @@ fn generated_connection_preserves_network_and_quoted_directory() {
 fn generated_connection_resolves_relative_directory_before_cwd_changes() {
     check_connection(
         "regtest",
-        Some("./wallet ' $HOME $(touch injected) ; & `literal`"),
-        false,
+        "./wallet ' $HOME $(touch injected) ; & `literal`",
         false,
         AGENT,
     );
 }
 
 #[test]
-fn generated_connection_preserves_xdg_default_layout() {
-    check_connection("testnet4", None, true, false, AGENT);
-}
-
-#[test]
 fn generated_connection_preserves_agent_names_starting_with_a_hyphen() {
-    check_connection("regtest", Some("wallet"), false, false, "-agent");
+    check_connection("regtest", "wallet", false, "-agent");
 }
 
 #[test]
@@ -583,7 +481,7 @@ fn observe_grant_omits_the_approval_hint() {
     let fixture = Fixture::new();
     let wallet = fixture.root.path().join("observe-wallet");
     let out = fixture
-        .sats(Some(&wallet), Some("signet"), false)
+        .sats(&wallet, Some("signet"))
         .args(["init", "--words", "12"])
         .output()
         .unwrap();
@@ -594,7 +492,7 @@ fn observe_grant_omits_the_approval_hint() {
     );
 
     let out = fixture
-        .sats(Some(&wallet), Some("signet"), false)
+        .sats(&wallet, Some("signet"))
         .args([
             "agent", "grant", "observer", "--budget", "12345", "--mode", "observe",
         ])

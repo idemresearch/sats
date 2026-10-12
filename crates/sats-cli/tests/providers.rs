@@ -372,3 +372,22 @@ fn the_previous_provider_format_is_refused() {
         .stderr(predicate::str::contains("unsupported"))
         .stderr(predicate::str::contains("sats providers add"));
 }
+
+#[test]
+fn a_saved_subfrost_key_never_follows_a_changed_endpoint() {
+    let dir = TempDir::new().unwrap();
+    let receiver = common::HttpServer::start(|_| Some((500, "must not receive a key".into())));
+    let original = format!(
+        "network = \"signet\"\n[subfrost]\napi_key = \"{KEY}\"\n[signet]\nchain = \"subfrost\"\nsubfrost_url = \"https://old.example/rpc\"\n"
+    );
+    std::fs::write(dir.path().join("config.toml"), &original).unwrap();
+    sats(&dir)
+        .args(["providers", "add", "subfrost", "--url", &receiver.url])
+        .write_stdin("\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no Subfrost API key"))
+        .stderr(predicate::str::contains(KEY).not());
+    common::assert_no_provider_calls(&receiver);
+    assert_eq!(config_text(&dir), original);
+}

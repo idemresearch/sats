@@ -72,7 +72,8 @@ a terminal it reads one line from stdin, so
 `printf '%s\n' "$KEY" | sats providers add subfrost` works in scripts. A
 credential is never a command-line argument. One saved key serves every
 network: on another network, run `sats --network mainnet providers add subfrost`
-and press enter to keep it.
+and press enter to keep it. Supplying a different `--url` requires you to
+provide the key again; an empty input never forwards a saved key to a new endpoint.
 
 `sats providers add esplora --url URL` asks for an optional bearer token;
 press enter for none. A saved token is kept on enter only for the same URL:
@@ -95,8 +96,8 @@ it was using it.
 
 ## Configuration
 
-The commands above write the [config file](cli.md#configuration). You can
-also edit it by hand:
+The commands above write the [config file](cli.md#configuration) inside the
+protected vault. This example shows its format:
 
 ```toml
 network = "signet"
@@ -122,8 +123,9 @@ subfrost_url = "http://localhost:18888/v4/jsonrpc"
 `subfrost_url` replaces the built-in Subfrost endpoint for one network. It is
 how Subfrost is set up where it has no public endpoint.
 
-sats writes `config.toml` owner-only (`0600`, in an owner-only directory). If
-you edit it yourself, keep its permissions restrictive. Every change made
+sats writes `config.toml` as `_sats`, owner-only (`0600`) inside the private
+vault. Your shell and agents cannot read it directly. Administrative edits
+must preserve that ownership and mode. Every change made
 with `sats providers` rewrites the file, so comments are not kept.
 Diagnostics, debug output, and `sats providers` show only an endpoint's
 origin. User-info, paths, queries, fragments, and response bodies are
@@ -155,7 +157,10 @@ sats --provider subfrost=https://signet.subfrost.io/v4/jsonrpc balance
 ```
 
 `--provider KIND=URL` replaces the network's provider for one command, and can
-be given once. The saved Subfrost key is never sent to an override URL.
+be given once. Saved credentials never follow an override URL.
+
+`file://` providers are a debug development fixture only. Protected mode and
+release builds refuse them, including endpoints loaded from configuration.
 
 ## Failure behavior
 

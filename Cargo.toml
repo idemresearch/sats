@@ -50,9 +50,9 @@ owo-colors = "4.3"
 rpassword = "7.5"
 schemars = "1.0"
 toml = "1.1"
-directories = "6.0"
 anyhow = "1.0"
 log = "0.4"
+libc = "0.2"
 humantime = "2.4"
 
 minreq = { version = "2.14", features = ["https-rustls", "json-using-serde"] }

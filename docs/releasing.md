@@ -47,8 +47,16 @@ existing assets, which recovers a partially failed upload.
 1. All four target jobs succeeded.
 2. Every archive has its `.sha256` file.
 3. `SHA256SUMS` lists every archive.
-4. `setup.sh` installs the tagged release on at least one target.
-5. The installed binary reports the tagged version.
+4. On Linux and macOS, `sudo sh scripts/test-setup.sh` passes, including the
+   platform account backend and preservation of an existing binary on failure.
+5. An unpacked release refuses `balance` while allowing `--help` and `--version`.
+6. `sudo sh setup.sh --binary <unpacked sats>` installs the tagged binary;
+   it is owned by `_sats` with mode `4555`, and the vault has mode `0700`.
+7. As yourself, `sats providers list` works before `init`; initialize a disposable
+   signet wallet, then exercise `receive`, `balance`, and a grant/MCP handshake.
+8. The printed launch command uses the absolute installed path. Listing the
+   vault as yourself fails, as do `--dir` and `file://` provider requests.
+9. `sudo sats balance` is refused. The installed binary reports the tagged version.
 
 The installer at `https://sats.sh/setup.sh` is the committed
 `website/public/setup.sh`, and it must stay byte-for-byte identical to the

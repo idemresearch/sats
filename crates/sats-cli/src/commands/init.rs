@@ -20,6 +20,17 @@ pub fn run(
     restore: bool,
     overrides: Option<&CliProvider>,
 ) -> Result<()> {
+    if let Some(dir) = crate::vault::legacy_wallet()? {
+        ui::warn(&format!(
+            "a legacy wallet exists outside the protected vault: {}\n\n\
+             Restore from its mnemonic backup with `sats init --restore`. Treat that seed \
+             as exposed if an agent with shell access ran while the old wallet existed; \
+             move the funds to a fresh wallet. After verifying recovery and moving funds, \
+             delete the old wallet folder and rotate its provider credentials. \
+             Moving the old seed into the vault cannot undo a prior disclosure.",
+            dir.display()
+        ));
+    }
     let net_name = network_name(network);
 
     if store.seed_exists() {
@@ -49,7 +60,7 @@ fn extend_network(store: &Store, network: Network) -> Result<()> {
         bail!(
             "wallet already exists ({})\n\
              Use `sats balance` or `sats receive` to use this wallet.\n\
-             For a separate test wallet, set SATS_DIR to an empty directory and run `sats init`.",
+             To add another network, run `sats --network <network> init`.",
             store.seed_path().display()
         );
     }
@@ -227,7 +238,12 @@ fn first_sync(
         println!("{manual}");
         return Ok(());
     }
-    let services = match sats_wallet::provider::resolve(config, overrides, network) {
+    let services = match sats_wallet::provider::resolve(
+        config,
+        overrides,
+        network,
+        crate::vault::allows_file_providers(),
+    ) {
         Ok(s) => s.with_progress(ui::sync_progress()),
         Err(err) => {
             eprintln!("✗ provider unavailable ({err:#})");

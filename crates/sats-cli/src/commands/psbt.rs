@@ -17,7 +17,8 @@ use crate::{keys, ui};
 
 /// Decode a PSBT file without touching the wallet, the store, or the chain.
 pub fn inspect(network: Network, file: &Path, json: bool) -> Result<()> {
-    let bytes = fs::read(file).with_context(|| format!("cannot read {}", file.display()))?;
+    let bytes = crate::vault::as_caller(|| fs::read(file))
+        .with_context(|| format!("cannot read {}", file.display()))?;
     let psbt = parse_psbt(&bytes)?;
 
     let txid = psbt.unsigned_tx.compute_txid().to_string();
@@ -109,14 +110,15 @@ pub fn sign(
     out: Option<&Path>,
     json: bool,
 ) -> Result<()> {
-    let bytes = fs::read(file).with_context(|| format!("cannot read {}", file.display()))?;
+    let bytes = crate::vault::as_caller(|| fs::read(file))
+        .with_context(|| format!("cannot read {}", file.display()))?;
     let mut psbt = parse_psbt(&bytes)?;
 
     let mut signer = LocalSigner::new(keys::unlock(store)?, network);
     let finalized = signer.sign(&mut psbt)?;
 
     if let Some(out_path) = out {
-        write_artifact(out_path, psbt.to_string().as_bytes())?;
+        crate::vault::as_caller(|| write_artifact(out_path, psbt.to_string().as_bytes()))?;
         if json {
             println!(
                 "{}",
@@ -138,7 +140,7 @@ pub fn sign(
     if !finalized {
         // Interop path: hand the partially signed PSBT back as a file.
         let out_path = file.with_extension("signed.psbt");
-        write_artifact(&out_path, psbt.to_string().as_bytes())?;
+        crate::vault::as_caller(|| write_artifact(&out_path, psbt.to_string().as_bytes()))?;
         if json {
             println!(
                 "{}",

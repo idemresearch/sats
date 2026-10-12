@@ -3,7 +3,7 @@
 Self-custodial Bitcoin wallet for humans and agents.
 
 ```sh
-curl -fsSL https://sats.sh/setup.sh | sh
+curl -fsSL https://sats.sh/setup.sh | sudo sh
 ```
 
 > [!WARNING]
@@ -44,12 +44,14 @@ payment, once. AI asks. You approve. Keys stay yours.
 macOS and Linux, x86_64 or ARM64:
 
 ```sh
-curl -fsSL https://sats.sh/setup.sh | sh
+curl -fsSL https://sats.sh/setup.sh | sudo sh
 ```
 
-The installer verifies the release checksum and installs `sats` to
-`~/.local/bin`. Set `SATS_VERSION` to pin a release or `SATS_INSTALL_DIR` to
-install elsewhere.
+The installer verifies the release checksum, creates the private `_sats` vault,
+and installs the setuid executable in `/usr/local/bin`. Run wallet commands as
+yourself. Release builds require this protected installation. A custom
+`SATS_INSTALL_DIR` must have only root-owned, non-writable-by-others ancestors.
+Pass `SATS_VERSION` to the root installer to pin a release.
 
 ## Get started
 
@@ -119,7 +121,8 @@ Visit [sats.sh/docs](https://sats.sh/docs) for the manual: the
 ## Build from source
 
 ```sh
-cargo install --locked --path crates/sats-cli
+cargo build --release --locked -p sats-cli
+sudo sh setup.sh --binary target/release/sats
 ```
 
 ## Contributing

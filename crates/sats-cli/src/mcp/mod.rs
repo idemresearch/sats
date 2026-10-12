@@ -69,7 +69,7 @@ pub fn run(
     );
 
     let service = server::SatsMcp::new(
-        store.dir_override().map(|p| p.to_path_buf()),
+        store.dir().to_path_buf(),
         network,
         agent.to_string(),
         providers,

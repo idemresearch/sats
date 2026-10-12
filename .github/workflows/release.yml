@@ -46,7 +46,7 @@ jobs:
             exit 1
           fi
       - run: sh -n setup.sh scripts/test-setup.sh
-      - run: sh scripts/test-setup.sh
+      - run: sudo sh scripts/test-setup.sh
       - run: cargo test --workspace --locked
 
   build:

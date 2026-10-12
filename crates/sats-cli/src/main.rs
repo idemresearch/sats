@@ -1,5 +1,4 @@
-use sats_core::amount;
-mod cli;
+use sats_cli::{cli, vault};
 mod commands;
 mod keys;
 #[cfg(feature = "mcp")]
@@ -14,6 +13,7 @@ use sats_wallet::store::Store;
 use crate::cli::{Cli, Command};
 
 fn main() {
+    vault::enter();
     ui::install_warnings();
     let cli = Cli::parse_with_safe_errors();
     if let Err(err) = run(cli) {
@@ -23,7 +23,7 @@ fn main() {
 }
 
 fn run(cli: Cli) -> anyhow::Result<()> {
-    let store = Store::open(cli.dir.as_deref())?;
+    let store = Store::open(&vault::wallet_dir(&cli)?)?;
     let config = Config::load(&store)?;
     let net_name = cli
         .network
@@ -35,8 +35,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
     // Workflows with local branches resolve only when they reach chain work.
     let overrides = cli.provider;
     let services = |config: &Config| {
-        provider::resolve(config, overrides.as_ref(), network)
-            .map(|services| services.with_progress(ui::sync_progress()))
+        provider::resolve(
+            config,
+            overrides.as_ref(),
+            network,
+            vault::allows_file_providers(),
+        )
+        .map(|services| services.with_progress(ui::sync_progress()))
     };
 
     match cli.command {

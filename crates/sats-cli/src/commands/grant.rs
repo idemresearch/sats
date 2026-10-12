@@ -191,36 +191,17 @@ pub fn run(
     Ok(())
 }
 
-/// Pin the same configuration and data locations the grant used. An
-/// explicit directory takes precedence over SATS_DIR. When the default
-/// config and data directories are identical, one explicit --dir is the
-/// shortest equivalent command. A split default layout retains the directory
-/// resolver's roots and removes a future client's SATS_DIR in the launched
-/// process itself.
+/// Pin an absolute executable in the vault, or the explicit development
+/// directory outside it. The protected wallet is derived only from the real uid.
 fn mcp_launch_command(store: &Store, network: &str, agent: &str) -> Result<String> {
-    let mut args = Vec::new();
-    let config_path = store.config_path();
-    let seed_path = store.seed_path();
-    let shared_default_dir = match (config_path.parent(), seed_path.parent()) {
-        (Some(config_dir), Some(data_dir)) if config_dir == data_dir => Some(data_dir),
-        _ => None,
+    let executable = if crate::vault::is_protected() {
+        absolute_shell_path(&std::env::current_exe().context("cannot locate installed sats")?)?
+    } else {
+        "sats".into()
     };
-    let pinned_dir = store.dir_override().or(shared_default_dir);
-
-    if pinned_dir.is_none() {
-        let dirs = directories::BaseDirs::new().context("cannot determine home directory")?;
-        args.extend(["env".into(), "-u".into(), "SATS_DIR".into()]);
-        for (name, path) in [
-            ("HOME", dirs.home_dir()),
-            ("XDG_CONFIG_HOME", dirs.config_dir()),
-            ("XDG_DATA_HOME", dirs.data_dir()),
-        ] {
-            args.push(format!("{name}={}", absolute_shell_path(path)?));
-        }
-    }
-    args.extend(["sats".into(), "--network".into(), network.into()]);
-    if let Some(dir) = pinned_dir {
-        args.extend(["--dir".into(), absolute_shell_path(dir)?]);
+    let mut args = vec![executable, "--network".into(), network.into()];
+    if !crate::vault::is_protected() {
+        args.extend(["--dir".into(), absolute_shell_path(store.dir())?]);
     }
     args.extend(["agent".into(), "serve".into()]);
     if agent.starts_with('-') {

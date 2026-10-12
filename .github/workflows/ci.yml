@@ -18,15 +18,37 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: sh -n setup.sh scripts/test-setup.sh
-      - run: sh scripts/test-setup.sh
+      - run: sudo sh scripts/test-setup.sh
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Protected vault integration (root)
+        run: |
+          test_bin=$(cargo test -p sats-cli --test vault --no-run --locked --message-format=json | jq -r 'select(.reason == "compiler-artifact" and .target.name == "vault" and .executable != null) | .executable')
+          test -n "$test_bin"
+          sudo "$test_bin" --ignored
       - run: cargo build --release --locked
+      - name: Release installation and refusal checks
+        run: |
+          ./target/release/sats --version
+          if SATS_DIR="$RUNNER_TEMP/unused-wallet" ./target/release/sats balance > refusal.log 2>&1; then exit 1; fi
+          grep -F 'install with' refusal.log
+          sudo sh setup.sh --binary target/release/sats
+          /usr/local/bin/sats providers list
+          if /usr/local/bin/sats --dir "$RUNNER_TEMP/unused-wallet" providers > refusal.log 2>&1; then exit 1; fi
+          grep -F 'unexpected argument' refusal.log
+          if sudo /usr/local/bin/sats balance > refusal.log 2>&1; then exit 1; fi
+          grep -F 'run sats as yourself, not with sudo' refusal.log
       # Experimental Alkanes code is excluded from default builds; keep it
       # compiling and tested.
       - run: cargo clippy -p sats-cli --all-targets --features experimental-alkanes-execute -- -D warnings
       - run: cargo test -p sats-cli --locked --features experimental-alkanes-execute --bins --test alkanes
+
+  macos-installer:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo sh scripts/test-setup.sh
 
   # Guards the portable-core boundary documented in docs/architecture.md.
   wasm-check:

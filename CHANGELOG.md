@@ -8,11 +8,23 @@ Notable changes to sats, newest first. Versions follow
 ### Building from source
 
 - The CLI crate is now `crates/sats-cli` (the command is still `sats`):
-  `cargo install --locked --path crates/sats-cli`. Storage, providers, and
+  build with `cargo build --release --locked -p sats-cli` and install with
+  `sudo sh setup.sh --binary target/release/sats`. Storage, providers, and
   the request workflow moved into a new `sats-wallet` library that future
   front ends will share.
 
 ### Security
+
+- Release builds now require a protected vault owned by the dedicated `_sats`
+  account. The root installer creates it and atomically installs the setuid
+  binary. Wallets are separated by real uid; sudo wallet commands are refused.
+- Caller-named PSBT and transaction files are accessed with caller permissions.
+  Saved provider credentials, sealed seeds, grants, and logs live in the vault.
+  A saved Subfrost key no longer follows a changed `providers add --url`.
+- Release builds have no `--dir`, environment-based wallet relocation, or
+  `file://` providers. Debug wallets require an explicit directory. Existing
+  home-directory wallets are detected with recovery and seed-rotation guidance.
+
 
 - The wallet password and mnemonic are read only from a terminal.
   `SATS_PASSWORD` is gone: every program you start, agents included,

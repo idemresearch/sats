@@ -47,9 +47,7 @@ fn init_refuses_existing_wallet() {
         .stderr(predicate::str::contains(
             "Use `sats balance` or `sats receive`",
         ))
-        .stderr(predicate::str::contains(
-            "set SATS_DIR to an empty directory",
-        ))
+        .stderr(predicate::str::contains("sats --network <network> init"))
         .stderr(predicate::str::contains("delete").not());
 }
 
@@ -1842,4 +1840,21 @@ fn pending_saved_transaction_requires_providers_but_receipt_repair_does_not() {
         .assert()
         .success();
     common::assert_no_provider_calls(&servers);
+}
+
+#[test]
+fn debug_wallet_requires_an_explicit_directory() {
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = assert_cmd::Command::cargo_bin("sats").unwrap();
+    cmd.env_remove("SATS_DIR")
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("XDG_DATA_HOME", home.path())
+        .arg("providers")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "debug builds require SATS_DIR or --dir",
+        ));
+    assert!(std::fs::read_dir(home.path()).unwrap().next().is_none());
 }

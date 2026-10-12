@@ -39,9 +39,10 @@ claude mcp add --transport stdio --scope local sats --env SATS_AGENT_TOKEN=<toke
   can't launch a local stdio server.
 - **Claude Code uses local scope** and writes no repository `.mcp.json`.
 - **The client stores the raw token** in its local configuration.
-- **The command is pinned.** It fixes the network and the wallet and
-  configuration paths, with relative paths made absolute and arguments
-  safely quoted, so a different working directory can't redirect it.
+- **The installed command is pinned.** It names the absolute executable
+  and network; the real OS uid selects the protected wallet. Debug development
+  commands also pin an absolute `--dir`. Arguments are safely quoted, so a
+  different working directory cannot redirect the wallet.
   Provider credentials aren't copied; the server reads them from the
   wallet's configuration. If you launch the server by hand, pass the same
   `--network` and wallet directory.

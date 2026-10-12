@@ -24,15 +24,29 @@ cargo build --locked
 SATS_DIR="$(mktemp -d)" cargo run -- init
 ```
 
-Always use an isolated `SATS_DIR` for manual runs. Never point a development
+Debug runs require an explicit `SATS_DIR` or `--dir`; no home-directory
+default exists. Debug builds retain `SATS_PASSWORD` and `file://` fixtures
+only for tests and development. Run as yourself, never as root. Never point a development
 build at a real wallet, or put a real mnemonic in a command, fixture, log, or
 screenshot.
 
 | Build | Command |
 |---|---|
-| Without MCP | `cargo install --locked --path crates/sats-cli --no-default-features` |
-| With Alkanes views (experimental) | `cargo install --locked --path crates/sats-cli --features experimental-alkanes` |
+| Without MCP | `cargo build --locked -p sats-cli --no-default-features` |
+| With Alkanes views (experimental) | `cargo build --locked -p sats-cli --features experimental-alkanes` |
 | With Alkanes execution (development only, never released) | `cargo test -p sats-cli --locked --features experimental-alkanes-execute --test alkanes` |
+
+Release builds require installation even for development:
+
+```sh
+cargo build --release --locked -p sats-cli
+sudo sh setup.sh --binary target/release/sats
+sats providers list
+```
+
+Running `target/release/sats balance` directly is refused; metadata flags
+still work. The installed command uses the real vault, so use a disposable
+VM or OS account for release tests.
 
 ## Verification gate
 
@@ -41,7 +55,7 @@ ready, run the full gate, which matches CI:
 
 ```sh
 sh -n setup.sh scripts/test-setup.sh
-sh scripts/test-setup.sh
+sudo sh scripts/test-setup.sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
@@ -52,14 +66,26 @@ cargo check -p sats-core --target wasm32-unknown-unknown
 cargo check -p sats-playground --target wasm32-unknown-unknown
 ```
 
+The Linux vault integration test needs root and disposable system accounts:
+
+```sh
+test_bin=$(cargo test -p sats-cli --test vault --no-run --locked --message-format=json | jq -r 'select(.reason == "compiler-artifact" and .target.name == "vault" and .executable != null) | .executable')
+sudo "$test_bin" --ignored
+```
+
+CI also runs the installer test on macOS to exercise `dscl` account creation.
+The ordinary Rust gate runs as an unprivileged user. Installer overrides
+`SATS_ACCOUNT`, `SATS_VAULT_DIR`, and `SATS_INSTALL_DIR` isolate test state;
+they do not change a release binary's compiled-in vault location.
+
 Terminal tests open a controlling TTY for hidden password entry, and provider
 fixtures bind localhost sockets, so sandboxes must allow both. WASM
 dependency builds need a C compiler with WASM support. On macOS you may need
 LLVM Clang instead of Apple Clang, set through `CC_wasm32_unknown_unknown`
 and `AR_wasm32_unknown_unknown`.
 
-Then exercise the freshly built binary on the path you changed, with an
-isolated `SATS_DIR`. For MCP changes, run the local binary as the stdio
+Then exercise the freshly built debug binary with an isolated `SATS_DIR`,
+or the installed release binary as yourself on a disposable test system. For MCP changes, run the local binary as the stdio
 server and call the affected tool. Report exactly what you ran. If something
 couldn't be run, say so rather than calling the change complete.
 
@@ -73,7 +99,7 @@ couldn't be run, say so rather than calling the change complete.
 | Playground unit | `crates/sats-playground/src/` | Simulated wallet loop, grant lifecycle, denials |
 | CLI integration | `crates/sats-cli/tests/` | Wallet flows, failures, providers, grants, request review, Alkanes |
 | MCP integration | `crates/sats-cli/tests/mcp.rs` | Tool schemas, filing, idempotency, the approval loop, startup refusal, revocation |
-| Installer | `scripts/test-setup.sh` | Targets, checksums, version pinning, PATH edits, atomic replacement |
+| Installer | `scripts/test-setup.sh` | Root requirement, accounts, ownership/modes, trusted paths, checksums, atomic replacement |
 | WASM | CI `wasm-check` | `sats-core` and `sats-playground` build for `wasm32-unknown-unknown` |
 
 Tests must not need public services, credentials, or real funds. Cover network

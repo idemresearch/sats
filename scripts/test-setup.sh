@@ -1,116 +1,136 @@
 #!/bin/sh
 set -eu
 
+[ "$(id -u)" -eq 0 ] || { echo 'run: sudo sh scripts/test-setup.sh' >&2; exit 1; }
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
 repo_root=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
+cmp -s "$repo_root/setup.sh" "$repo_root/website/public/setup.sh" || {
+    echo 'website/public/setup.sh differs from setup.sh' >&2; exit 1;
+}
 
-# The copy served from https://sats.sh/setup.sh must stay byte-for-byte
-# identical to the audited repository installer (docs/releasing.md).
-if ! cmp -s "$repo_root/setup.sh" "$repo_root/website/public/setup.sh"; then
-    printf 'website/public/setup.sh differs from setup.sh; run: cp setup.sh website/public/setup.sh\n' >&2
-    exit 1
+case "$(uname -s)" in
+    Linux) os=Linux; parent=/var/lib; suffix=unknown-linux-gnu ;;
+    Darwin) os=Darwin; parent=/private/var/db; suffix=apple-darwin ;;
+    *) echo 'unsupported test platform' >&2; exit 1 ;;
+esac
+case "$(uname -m)" in
+    x86_64 | amd64) arch=x86_64 ;;
+    arm64 | aarch64) arch=aarch64 ;;
+    *) echo 'unsupported test architecture' >&2; exit 1 ;;
+esac
+# /tmp is world-writable, and must be rejected as an install ancestor. This
+# disposable directory has only trusted ancestors, just like a real install.
+tmp_dir=$(mktemp -d "$parent/sats-installer-test.XXXXXX")
+vault_user="_satstest_$$"
+if id "$vault_user" >/dev/null 2>&1; then
+    echo 'test account already exists; refusing to reuse it' >&2; exit 1
 fi
-
-tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/sats-installer-test.XXXXXX")
 cleanup() {
+    if [ "$os" = Linux ]; then
+        userdel "$vault_user" 2>/dev/null || true
+        groupdel "$vault_user" 2>/dev/null || true
+    else
+        dscl . -delete "/Users/$vault_user" 2>/dev/null || true
+        dscl . -delete "/Groups/$vault_user" 2>/dev/null || true
+    fi
     rm -rf "$tmp_dir"
 }
 trap cleanup 0
 trap 'exit 1' HUP INT TERM
+chmod 0755 "$tmp_dir"
+cp "$repo_root/setup.sh" "$tmp_dir/setup.sh"
+chmod 0755 "$tmp_dir/setup.sh"
+export SATS_ACCOUNT="$vault_user"
+export SATS_VAULT_DIR="$tmp_dir/vault"
+export SATS_INSTALL_DIR="$tmp_dir/bin"
+export SATS_RELEASE_BASE_URL="file://$tmp_dir/releases"
+unset SATS_VERSION
 
-case "$(uname -m)" in
-    x86_64 | amd64) arch="x86_64" ;;
-    arm64 | aarch64) arch="aarch64" ;;
-    *) printf 'unsupported test architecture\n' >&2; exit 1 ;;
-esac
-case "$(uname -s)" in
-    Linux) target="${arch}-unknown-linux-gnu"; bash_profile_name=".bashrc" ;;
-    Darwin) target="${arch}-apple-darwin"; bash_profile_name=".bash_profile" ;;
-    *) printf 'unsupported test operating system\n' >&2; exit 1 ;;
-esac
+asset="sats-$arch-$suffix.tar.gz"
+latest="$tmp_dir/releases/latest/download"
+version="$tmp_dir/releases/download/v0.1.0"
+broken="$tmp_dir/releases/download/v0.2.0"
+mkdir -p "$latest" "$version" "$broken" "$tmp_dir/payload"
+printf '#!/bin/sh\nprintf "sats 0.1.0-test\\n"\n' > "$tmp_dir/payload/sats"
+chmod 0755 "$tmp_dir/payload/sats"
+tar -czf "$latest/$asset" -C "$tmp_dir/payload" sats
+checksum() {
+    if [ "$os" = Linux ]; then sha256sum "$1"; else shasum -a 256 "$1"; fi
+}
+checksum "$latest/$asset" > "$latest/$asset.sha256"
+cp "$latest/$asset" "$version/$asset"
+cp "$latest/$asset.sha256" "$version/$asset.sha256"
+printf '#!/bin/sh\nexit 1\n' > "$tmp_dir/broken-sats"
+chmod 0755 "$tmp_dir/broken-sats"
 
-asset="sats-${target}.tar.gz"
-release_root="$tmp_dir/releases"
-latest_dir="$release_root/latest/download"
-version_dir="$release_root/download/v0.1.0"
-broken_dir="$release_root/download/v0.2.0"
-payload_dir="$tmp_dir/payload"
-broken_payload_dir="$tmp_dir/broken-payload"
-mkdir -p "$latest_dir" "$version_dir" "$broken_dir" "$payload_dir" "$broken_payload_dir"
+metadata() {
+    if [ "$os" = Darwin ]; then stat -f '%u:%g:%Lp' "$1"; else stat -c '%u:%g:%a' "$1"; fi
+}
+reject() {
+    expected=$1
+    shift
+    if "$@" > "$tmp_dir/reject.out" 2> "$tmp_dir/reject.err"; then
+        echo "installer incorrectly accepted: $*" >&2; exit 1
+    fi
+    grep -F "$expected" "$tmp_dir/reject.err" >/dev/null || {
+        cat "$tmp_dir/reject.err" >&2; exit 1;
+    }
+}
 
-printf '#!/bin/sh\nprintf "sats 0.1.0-test\\n"\n' > "$payload_dir/sats"
-chmod 0755 "$payload_dir/sats"
-tar -czf "$latest_dir/$asset" -C "$payload_dir" sats
+# Fresh install and the actual OS account backend (useradd or dscl).
+sh "$tmp_dir/setup.sh" > "$tmp_dir/fresh.out"
+vault_uid=$(id -u "$vault_user")
+vault_gid=$(id -g "$vault_user")
+test "$(metadata "$SATS_INSTALL_DIR/sats")" = "$vault_uid:$vault_gid:4555"
+test "$(metadata "$SATS_VAULT_DIR")" = "$vault_uid:$vault_gid:700"
+test "$("$SATS_INSTALL_DIR/sats" --version)" = 'sats 0.1.0-test'
+if [ "$os" = Darwin ]; then
+    test "$vault_uid" -lt 500
+    test "$vault_gid" -lt 500
+    dscl . -read "/Users/$vault_user" IsHidden | grep -F 'IsHidden: 1' >/dev/null
+fi
 
-if command -v sha256sum >/dev/null 2>&1; then
-    archive_sha=$(sha256sum "$latest_dir/$asset" | awk '{ print $1 }')
+# Rerun must repair permissions and preserve the account and vault contents.
+printf preserved > "$SATS_VAULT_DIR/marker"
+chmod 0755 "$SATS_VAULT_DIR"
+chown root "$SATS_VAULT_DIR"
+sh "$tmp_dir/setup.sh" --binary "$tmp_dir/payload/sats" > "$tmp_dir/rerun.out"
+test "$(id -u "$vault_user")" = "$vault_uid"
+test "$(metadata "$SATS_VAULT_DIR")" = "$vault_uid:$vault_gid:700"
+test "$(metadata "$SATS_INSTALL_DIR/sats")" = "$vault_uid:$vault_gid:4555"
+test "$(cat "$SATS_VAULT_DIR/marker")" = preserved
+SATS_VERSION=0.1.0 sh "$tmp_dir/setup.sh" > "$tmp_dir/pinned.out"
+
+# Refusal is based on real process identity, not a mocked id command.
+if [ "$os" = Linux ]; then
+    reject '| sudo sh' runuser -u nobody -- sh "$tmp_dir/setup.sh"
 else
-    archive_sha=$(shasum -a 256 "$latest_dir/$asset" | awk '{ print $1 }')
+    reject '| sudo sh' sudo -u nobody sh "$tmp_dir/setup.sh"
 fi
-printf '%s  %s\n' "$archive_sha" "$asset" > "$latest_dir/$asset.sha256"
-cp "$latest_dir/$asset" "$version_dir/$asset"
-cp "$latest_dir/$asset.sha256" "$version_dir/$asset.sha256"
-printf '#!/bin/sh\nexit 1\n' > "$broken_payload_dir/sats"
-chmod 0755 "$broken_payload_dir/sats"
-tar -czf "$broken_dir/$asset" -C "$broken_payload_dir" sats
-if command -v sha256sum >/dev/null 2>&1; then
-    broken_sha=$(sha256sum "$broken_dir/$asset" | awk '{ print $1 }')
-else
-    broken_sha=$(shasum -a 256 "$broken_dir/$asset" | awk '{ print $1 }')
-fi
-printf '%s  %s\n' "$broken_sha" "$asset" > "$broken_dir/$asset.sha256"
 
-SATS_RELEASE_BASE_URL="file://$release_root" \
-SATS_INSTALL_DIR="$tmp_dir/latest-bin" \
-SATS_NO_MODIFY_PATH=1 \
-    sh "$repo_root/setup.sh" > "$tmp_dir/latest.out"
+mkdir "$tmp_dir/writable" "$tmp_dir/caller-owned" "$tmp_dir/unsafe-parent"
+chmod 0777 "$tmp_dir/writable" "$tmp_dir/unsafe-parent"
+chown nobody "$tmp_dir/caller-owned"
+reject 'root-owned and not group- or world-writable' env SATS_INSTALL_DIR="$tmp_dir/writable" sh "$tmp_dir/setup.sh"
+reject 'root-owned and not group- or world-writable' env SATS_INSTALL_DIR="$tmp_dir/caller-owned" sh "$tmp_dir/setup.sh"
+reject 'root-owned and not group- or world-writable' env SATS_INSTALL_DIR="$tmp_dir/unsafe-parent/bin" sh "$tmp_dir/setup.sh"
+test ! -e "$tmp_dir/unsafe-parent/bin"
+ln -s "$SATS_INSTALL_DIR" "$tmp_dir/link"
+reject 'refusing symlink' env SATS_INSTALL_DIR="$tmp_dir/link" sh "$tmp_dir/setup.sh"
+ln -s "$SATS_VAULT_DIR" "$tmp_dir/vault-link"
+reject 'symlink vault' env SATS_VAULT_DIR="$tmp_dir/vault-link" sh "$tmp_dir/setup.sh"
 
-test -x "$tmp_dir/latest-bin/sats"
-test "$("$tmp_dir/latest-bin/sats" --version)" = "sats 0.1.0-test"
-grep -F "Installed sats 0.1.0-test" "$tmp_dir/latest.out" >/dev/null
-
-SATS_VERSION=0.1.0 \
-SATS_RELEASE_BASE_URL="file://$release_root" \
-SATS_INSTALL_DIR="$tmp_dir/version-bin" \
-SATS_NO_MODIFY_PATH=1 \
-    sh "$repo_root/setup.sh" > "$tmp_dir/version.out"
-test -x "$tmp_dir/version-bin/sats"
-
-mkdir -p "$tmp_dir/default-home"
-HOME="$tmp_dir/default-home" \
-SHELL=/bin/bash \
-SATS_RELEASE_BASE_URL="file://$release_root" \
-    sh "$repo_root/setup.sh" > "$tmp_dir/default.out"
-test -x "$tmp_dir/default-home/.local/bin/sats"
-grep -F 'export PATH="$HOME/.local/bin:$PATH"' "$tmp_dir/default-home/$bash_profile_name" >/dev/null
-HOME="$tmp_dir/default-home" \
-SHELL=/bin/bash \
-SATS_RELEASE_BASE_URL="file://$release_root" \
-    sh "$repo_root/setup.sh" > "$tmp_dir/default-second.out"
-test "$(grep -c 'Added by the sats installer' "$tmp_dir/default-home/$bash_profile_name")" -eq 1
-
-printf 'corrupt' >> "$latest_dir/$asset"
-if SATS_RELEASE_BASE_URL="file://$release_root" \
-    SATS_INSTALL_DIR="$tmp_dir/corrupt-bin" \
-    SATS_NO_MODIFY_PATH=1 \
-    sh "$repo_root/setup.sh" > "$tmp_dir/corrupt.out" 2> "$tmp_dir/corrupt.err"; then
-    printf 'installer accepted a corrupt archive\n' >&2
-    exit 1
-fi
-test ! -e "$tmp_dir/corrupt-bin/sats"
-grep -F "checksum mismatch" "$tmp_dir/corrupt.err" >/dev/null
-
-mkdir -p "$tmp_dir/atomic-bin"
-printf '#!/bin/sh\nprintf "existing sats\\n"\n' > "$tmp_dir/atomic-bin/sats"
-chmod 0755 "$tmp_dir/atomic-bin/sats"
-if SATS_VERSION=0.2.0 \
-    SATS_RELEASE_BASE_URL="file://$release_root" \
-    SATS_INSTALL_DIR="$tmp_dir/atomic-bin" \
-    SATS_NO_MODIFY_PATH=1 \
-    sh "$repo_root/setup.sh" > "$tmp_dir/atomic.out" 2> "$tmp_dir/atomic.err"; then
-    printf 'installer accepted a binary that does not start\n' >&2
-    exit 1
-fi
-test "$("$tmp_dir/atomic-bin/sats")" = "existing sats"
-grep -F "downloaded binary did not start" "$tmp_dir/atomic.err" >/dev/null
-
-printf 'setup.sh tests passed\n'
+# Both download failures and broken local builds preserve the old executable.
+old_sum=$(checksum "$SATS_INSTALL_DIR/sats" | awk '{print $1}')
+printf corrupt >> "$latest/$asset"
+reject 'checksum mismatch' sh "$tmp_dir/setup.sh"
+reject 'binary did not start' sh "$tmp_dir/setup.sh" --binary "$tmp_dir/broken-sats"
+cp "$tmp_dir/broken-sats" "$tmp_dir/payload/sats"
+tar -czf "$broken/$asset" -C "$tmp_dir/payload" sats
+checksum "$broken/$asset" > "$broken/$asset.sha256"
+reject 'binary did not start' env SATS_VERSION=0.2.0 sh "$tmp_dir/setup.sh"
+test "$(checksum "$SATS_INSTALL_DIR/sats" | awk '{print $1}')" = "$old_sum"
+test "$(metadata "$SATS_INSTALL_DIR/sats")" = "$vault_uid:$vault_gid:4555"
+test -z "$(find "$SATS_INSTALL_DIR" -name '.sats-install.*' -print)"
+printf 'setup.sh tests passed (%s)\n' "$os"

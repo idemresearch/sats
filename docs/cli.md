@@ -3,6 +3,17 @@
 Every sats command, flag, and setting. Run `sats <command> --help` for the
 exact options in your installed version.
 
+## Install
+
+```sh
+curl -fsSL https://sats.sh/setup.sh | sudo sh
+```
+
+The installer creates a private vault and installs sats in `/usr/local/bin`.
+Run sats as yourself; `sudo sats` is refused. Release commands require the
+protected installation, with no alternate wallet-directory mode. `--help`
+and `--version` also work before installation.
+
 ## Commands
 
 | Command | Does |
@@ -40,10 +51,6 @@ exact options in your installed version.
 | `--provider <KIND=URL>` | Replace the network's provider for this run. See [Providers](providers.md#one-off-overrides). |
 | `--json` | Machine-readable output, where supported |
 
-| Variable | Meaning |
-|---|---|
-| `SATS_DIR` | Put all configuration and data under one directory. Useful for test wallets. |
-
 **Amounts** are whole satoshis. `25000`, `25k`, and `1.5m` (1,500,000) all
 work. Suffixes are case-insensitive, and shorthand must resolve to a whole
 sat.
@@ -60,8 +67,8 @@ sats --network mainnet init   # mainnet is always explicit
 `init` shows a new mnemonic once. Write it down before you continue. One seed
 serves every network: on a machine that already has a seed, `init` with
 another `--network` adds that network's wallet. If a wallet already exists,
-use `sats balance` or `sats receive`. For a separate test wallet, point
-`SATS_DIR` at an empty directory.
+use `sats balance` or `sats receive`. Separate development wallets are covered
+in [Development](development.md#build-and-run).
 
 ### Restoring
 
@@ -277,7 +284,8 @@ spending budget again.
 
 `sats alkanes` is an experimental, signet-first client for Alkanes contracts.
 Default builds don't include it. Build it with
-`cargo install --locked --path crates/sats-cli --features experimental-alkanes`.
+`cargo build --release --locked -p sats-cli --features experimental-alkanes`,
+then install it with `sudo sh setup.sh --binary target/release/sats`.
 It needs Subfrost as the network's provider (`sats providers add subfrost`),
 and there is no fallback.
 
@@ -308,12 +316,16 @@ no JSON mode, so the mnemonic never lands on a machine-readable stream.
 
 ## Configuration
 
-| Platform | Config file | Data |
-|---|---|---|
-| Linux | `~/.config/sats/config.toml` | `~/.local/share/sats/` |
-| macOS | `~/Library/Application Support/sats/config.toml` | same directory |
+Configuration and wallet data share one directory, owned by `_sats`:
 
-`SATS_DIR` replaces both with one directory.
+| Platform | Wallet directory |
+|---|---|
+| Linux | `/var/lib/sats/users/<your uid>/` |
+| macOS | `/var/db/sats/users/<your uid>/` |
+
+`config.toml` lives there alongside `seed.sealed` and the network directories.
+Your OS uid selects the wallet; environment variables cannot redirect it.
+The vault is available before `init`, so you can configure providers first.
 
 ```toml
 network = "signet"        # default network
@@ -323,8 +335,8 @@ fee_target = 1008         # confirmation target in blocks (1–1008, default 2)
 ```
 
 Each network's provider lives under `[<network>]` too, written by
-`sats providers` or by hand. See [Providers](providers.md#configuration). sats writes
-`config.toml` owner-only, because it can hold provider API keys.
+`sats providers`. See [Providers](providers.md#configuration). The file and
+its credentials are readable only by the vault account and administrators.
 
 ## Exit behavior
 

@@ -115,6 +115,10 @@ multi-signer flows.
 The invariant holds. Some boundaries are process-internal rather than
 device-separated:
 
+- Release builds run only through a protected installation: a dedicated
+  `_sats` account owns the vault, with one wallet per real OS uid. Shell
+  agents cannot directly copy the sealed seed, edit grants, read provider
+  credentials, or attach an ordinary same-user debugger to sats.
 - The signer is an in-memory software signer, built inside the approving CLI
   process from the seed your password unseals for that one execution. No
   long-running process keeps an unsealed seed.
@@ -132,8 +136,9 @@ and sats verifies a transaction's intent independently before signing.
 
 sats does not claim that the seed is never decrypted, that the wallet
 survives a compromised operating system, or that approval is a
-hardware-backed signature. An agent with shell access as your user is outside
-the MCP boundary. See [Security](security.md#limits).
+hardware-backed signature. The vault provides an OS identity boundary, but
+input interception and imitation of password prompts remain possible. See
+[Security](security.md#limits).
 
 ## Principles
 
