@@ -33,6 +33,11 @@ jobs:
           ./target/release/sats --version
           if SATS_DIR="$RUNNER_TEMP/unused-wallet" ./target/release/sats balance > refusal.log 2>&1; then exit 1; fi
           grep -F 'install with' refusal.log
+          # Hosted runners leave /usr/local/bin writable by non-root users,
+          # which the installer rightly refuses. Restore a stock layout on
+          # this throwaway machine so the default install path is tested.
+          sudo chown root:root /usr/local /usr/local/bin
+          sudo chmod 0755 /usr/local /usr/local/bin
           sudo sh setup.sh --binary target/release/sats
           /usr/local/bin/sats providers list
           if /usr/local/bin/sats --dir "$RUNNER_TEMP/unused-wallet" providers > refusal.log 2>&1; then exit 1; fi
