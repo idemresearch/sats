@@ -40,8 +40,8 @@ or `override`).
 
 | Provider | Endpoint |
 |---|---|
-| `mempool` | `https://mempool.space/api`, `/signet/api`, or `/testnet4/api` |
-| `subfrost` | Subfrost's mainnet or signet endpoint, or a `--url` you give |
+| `mempool` | `https://mempool.space/signet/api` or `/testnet4/api` |
+| `subfrost` | Subfrost's signet endpoint, or a `--url` you give |
 | `esplora` | The server you add. Regtest defaults to `http://localhost:3002`. |
 
 `sats providers add` makes the added provider the network's provider, and
@@ -71,8 +71,9 @@ crate) and displays view results without trusting them.
 a terminal it reads one line from stdin, so
 `printf '%s\n' "$KEY" | sats providers add subfrost` works in scripts. A
 credential is never a command-line argument. One saved key serves every
-network: on another network, run `sats --network mainnet providers add subfrost`
-and press enter to keep it.
+network: on another network, run
+`sats --network regtest providers add subfrost --url URL` and press enter to
+keep it.
 
 `sats providers add esplora --url URL` asks for an optional bearer token;
 press enter for none. A saved token is kept on enter only for the same URL:
@@ -108,11 +109,11 @@ api_key = "replace-with-key"        # shared by every network
 chain = "subfrost"                  # provider: mempool (default), subfrost, or esplora
 fee_target = 1008                   # confirmation target in blocks
 
-[mainnet]
+[testnet4]
 chain = "esplora"
 
-[mainnet.esplora]
-url = "https://bitcoin.example/api"
+[testnet4.esplora]
+url = "https://testnet4.example/api"
 bearer = "replace-with-token"       # optional
 
 [regtest]

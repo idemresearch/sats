@@ -67,6 +67,7 @@ SATS_NO_MODIFY_PATH=1 \
 test -x "$tmp_dir/latest-bin/sats"
 test "$("$tmp_dir/latest-bin/sats" --version)" = "sats 0.1.0-test"
 grep -F "Installed sats 0.1.0-test" "$tmp_dir/latest.out" >/dev/null
+grep -F "mainnet is refused" "$tmp_dir/latest.out" >/dev/null
 
 SATS_VERSION=0.1.0 \
 SATS_RELEASE_BASE_URL="file://$release_root" \

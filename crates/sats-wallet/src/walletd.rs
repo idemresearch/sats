@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 use bdk_wallet::{PersistedWallet, Wallet};
 use rusqlite::Connection;
 use sats_core::bitcoin::Network;
+use sats_core::network::ensure_test_network;
 
 use crate::config::network_name;
 use crate::store::Store;
@@ -20,6 +21,7 @@ pub struct WalletCtx {
 /// Create the persisted watch-only wallet for a network. Public descriptors
 /// only — the sqlite file never holds key material.
 pub fn create(store: &Store, network: Network, ext: String, int: String) -> Result<()> {
+    ensure_test_network(network)?;
     let net_name = network_name(network);
     let db = store.wallet_db_path(net_name);
     if db.exists() {
@@ -36,6 +38,7 @@ pub fn create(store: &Store, network: Network, ext: String, int: String) -> Resu
 }
 
 pub fn open(store: &Store, network: Network) -> Result<WalletCtx> {
+    ensure_test_network(network)?;
     let net_name = network_name(network);
     let db = store.wallet_db_path(net_name);
     if !db.exists() {
@@ -59,5 +62,21 @@ impl WalletCtx {
     pub fn persist(&mut self) -> Result<()> {
         self.wallet.persist(&mut self.conn)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mainnet_wallets_are_never_created_or_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let err = create(&store, Network::Bitcoin, String::new(), String::new()).unwrap_err();
+        assert!(format!("{err:#}").contains("mainnet is not supported"));
+        let err = open(&store, Network::Bitcoin).err().unwrap();
+        assert!(format!("{err:#}").contains("mainnet is not supported"));
+        assert!(!store.wallet_db_path("mainnet").exists());
     }
 }

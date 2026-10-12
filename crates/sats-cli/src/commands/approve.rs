@@ -95,9 +95,6 @@ pub fn run(
     ];
     if json {
         ui::kv_rows_stderr(&rows);
-        if network == Network::Bitcoin {
-            eprintln!("! mainnet approval — this signs and broadcasts real bitcoin");
-        }
         if confirm && !ui::confirm_stderr("Approve and sign?", selected.is_none())? {
             eprintln!("aborted — the request remains available for review");
             if selected.is_some() {
@@ -110,9 +107,6 @@ pub fn run(
         }
     } else {
         ui::kv_rows(&rows);
-        if network == Network::Bitcoin {
-            ui::warn("mainnet approval — this signs and broadcasts real bitcoin");
-        }
         if confirm && !ui::confirm("Approve and sign?", selected.is_none())? {
             ui::dim("aborted — the request remains available for review");
             return Ok(());
@@ -127,7 +121,7 @@ pub fn run(
     let mnemonic = keys::unlock(store)?;
     let request_id = staged.request().id.clone();
     let outcome = execute::commit(store, network, *staged, move || {
-        Ok(Box::new(LocalSigner::new(mnemonic, network)))
+        Ok(Box::new(LocalSigner::new(mnemonic, network)?))
     })?;
 
     match outcome {

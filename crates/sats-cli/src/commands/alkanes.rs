@@ -3,8 +3,8 @@
 //! Views go through the network's provider, which must be Subfrost;
 //! `simulate`'s wire format is unverified against a live endpoint, so
 //! results are interpreted tolerantly and always displayed verbatim.
-//! Execution is human-only: simulate, show, confirm, password-sign — and
-//! refuses mainnet. The whole module is experimental
+//! Execution is human-only: simulate, show, confirm, password-sign. The
+//! whole module is experimental
 //! (`experimental-alkanes`) and excluded from default builds; execution
 //! needs `experimental-alkanes-execute` on top.
 
@@ -129,11 +129,6 @@ pub fn execute(
     yes: bool,
     json: bool,
 ) -> Result<()> {
-    // Before anything else, including any wallet or provider access: the
-    // encoding and dialect are young, and real bitcoin waits.
-    if network == Network::Bitcoin {
-        bail!("alkanes execute is not enabled on mainnet in this release — dogfood on signet");
-    }
     let target = parse_id(id)?;
     let call = AlkaneCall {
         target,

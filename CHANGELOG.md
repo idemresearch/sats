@@ -14,6 +14,14 @@ Notable changes to sats, newest first. Versions follow
 
 ### Security
 
+- sats is a test-network release: it runs on signet (the default), testnet4,
+  and regtest, and refuses mainnet everywhere — `--network`, the config's
+  `network`, a `[mainnet]` config section, wallet open and create, provider
+  resolution, the agent server, and the local signer. The mainnet restore
+  confirmation and mainnet warnings are gone with it. If you used mainnet
+  with an earlier build, move those funds with that build before upgrading:
+  the seed file is shared by every network. Then start sats from a fresh
+  seed and never use it on mainnet.
 - The wallet password and mnemonic are read only from a terminal.
   `SATS_PASSWORD` is gone: every program you start, agents included,
   inherits your environment, so an agent with a shell could have run

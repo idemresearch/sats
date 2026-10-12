@@ -121,10 +121,6 @@ fn restore_wallet(
         "Restoring onto {net_name}. A different network is selected with --network."
     ));
 
-    if network == Network::Bitcoin {
-        confirm_mainnet_restore()?;
-    }
-
     println!("Enter your backup phrase: 12 or 24 words separated by spaces.");
     ui::dim(
         "Input stays hidden. The phrase is checked before anything is stored — a typo cannot cause harm.",
@@ -170,22 +166,6 @@ fn mnemonic_guidance(err: &sats_core::error::SeedError) -> anyhow::Error {
     anyhow::anyhow!(
         "{hint}. Nothing was stored, and a typo here cannot affect your funds — try again."
     )
-}
-
-/// Restoring on mainnet converts a paper backup into a hot, agent-grantable
-/// key. A y/n prompt gets reflex-confirmed; typing the consequence does not.
-fn confirm_mainnet_restore() -> Result<()> {
-    ui::warn("mainnet restore: this machine will hold keys that can spend real funds");
-    ui::warn("agent grants you create here will be able to spend from them");
-    println!("If you only want to watch a cold wallet, stop — restore is not that.");
-    print!("To continue, type: hot wallet\n> ");
-    std::io::stdout().flush()?;
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    if line.trim().to_lowercase() != "hot wallet" {
-        bail!("mainnet restore cancelled — nothing was stored");
-    }
-    Ok(())
 }
 
 /// Hidden entry on a terminal. Never a CLI argument (argv and shell history

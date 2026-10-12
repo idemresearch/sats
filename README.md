@@ -7,9 +7,10 @@ curl -fsSL https://sats.sh/setup.sh | sh
 ```
 
 > [!WARNING]
-> sats 0.0.2 is experimental. It defaults to signet, where coins have no
-> value. Read the [security model](docs/security.md) before using mainnet, and
-> keep amounts and agent budgets small.
+> sats is a test-network developer release. It runs on signet (the default),
+> testnet4, and regtest, where coins have no value, and refuses mainnet. Use a
+> fresh seed for sats and never move it to mainnet. See the
+> [security model](docs/security.md).
 
 sats is a command-line Bitcoin wallet written in Rust, with an MCP server for
 agents. You spend directly. An agent can only ask: it proposes a payment
@@ -97,9 +98,9 @@ contract.
 
 ## Networks and providers
 
-Signet is the default. `mainnet`, `testnet4`, and `regtest` are available
-with `--network`, and mainnet is always an explicit choice. Each network has
-its own wallet, derived from the same seed.
+Signet is the default; `testnet4` and `regtest` are available with
+`--network`. Mainnet is refused everywhere: the flag, the config, and the agent
+server. Each network has its own wallet, derived from the same seed.
 
 sats uses mempool.space for Bitcoin data unless you choose another provider:
 `sats providers add subfrost` switches to Subfrost after asking for your API

@@ -256,8 +256,8 @@ impl Store {
     /// The record's own `network` is checked against the requested one,
     /// like every sibling loader: a grant carries no seal binding it to a
     /// network, so this check is what keeps a signet grant from
-    /// authorizing a mainnet signature when its file is dropped into
-    /// another network's directory.
+    /// authorizing a signature on another network when its file is
+    /// dropped into that network's directory.
     pub fn load_grant(&self, network: &str, agent: &str) -> Result<Option<Grant>> {
         let agent = agent_component(agent)?;
         let path = self.grants_dir(network).join(format!("{agent}.json"));
@@ -902,20 +902,20 @@ mod tests {
 
     /// A grant authorizes only the network it names: it carries no seal
     /// binding it, so `load_grant` is what keeps a signet grant dropped
-    /// into the mainnet directory from authorizing mainnet signing.
+    /// into the testnet4 directory from authorizing testnet4 signing.
     #[test]
     fn load_grant_refuses_a_grant_from_another_network() {
         let dir = TempDir::new().unwrap();
         let store = Store::open(Some(dir.path())).unwrap();
 
-        // The exploit: a real signet grant's file placed under mainnet.
+        // The exploit: a real signet grant's file placed under testnet4.
         let signet_grant = grant("signet");
-        store.save_grant("mainnet", &signet_grant).unwrap();
+        store.save_grant("testnet4", &signet_grant).unwrap();
 
-        let err = store.load_grant("mainnet", "claude").unwrap_err();
+        let err = store.load_grant("testnet4", "claude").unwrap_err();
         let message = format!("{err:#}");
         assert!(
-            message.contains("does not match mainnet"),
+            message.contains("does not match testnet4"),
             "cross-network grant must be refused, got: {message}"
         );
 
@@ -923,8 +923,8 @@ mod tests {
         // wrong directory simply has no grant rather than a stolen one.
         store.save_grant("signet", &grant("signet")).unwrap();
         assert!(store.load_grant("signet", "claude").unwrap().is_some());
-        // (only the mainnet copy remains under mainnet, still refused)
-        assert!(store.load_grant("mainnet", "claude").is_err());
+        // (only the signet copy remains under testnet4, still refused)
+        assert!(store.load_grant("testnet4", "claude").is_err());
     }
 
     /// Pre-release state discipline: unreleased development records —

@@ -212,7 +212,7 @@ fn execute_refuses_mainnet() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("not enabled on mainnet"));
+        .stderr(predicate::str::contains("mainnet is not supported"));
 }
 
 #[test]

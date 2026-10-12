@@ -347,7 +347,8 @@ impl Sim {
         now: u64,
     ) -> Result<TransactionRecord, String> {
         let mut psbt = plan.psbt().clone();
-        let mut signer = LocalSigner::new(self.mnemonic.clone(), NETWORK);
+        let mut signer =
+            LocalSigner::new(self.mnemonic.clone(), NETWORK).map_err(|e| e.to_string())?;
         let finalized = signer.sign(&mut psbt).map_err(|e| e.to_string())?;
         if !finalized {
             return Err("signing did not finalize the transaction".to_string());

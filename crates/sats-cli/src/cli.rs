@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
     disable_help_subcommand = true
 )]
 pub struct Cli {
-    /// Network: mainnet, signet, testnet4, regtest (overrides config)
+    /// Network: signet, testnet4, regtest (overrides config; mainnet is refused)
     #[arg(long, global = true, value_name = "NET")]
     pub network: Option<String>,
 
@@ -141,7 +141,7 @@ pub struct AddArgs {
     /// Provider to add
     #[arg(value_enum, value_name = "PROVIDER")]
     pub kind: ProviderArg,
-    /// Endpoint URL (default: Subfrost's endpoint for mainnet and signet;
+    /// Endpoint URL (default: Subfrost's signet endpoint;
     /// required for esplora)
     #[arg(long, value_name = "URL")]
     pub url: Option<String>,
@@ -183,8 +183,7 @@ pub enum AlkanesCommand {
         #[arg(value_name = "INPUTS")]
         inputs: Vec<u128>,
     },
-    /// Execute a contract call: simulate, confirm, sign, broadcast.
-    /// Refuses mainnet in this release
+    /// Execute a contract call: simulate, confirm, sign, broadcast
     #[cfg(feature = "experimental-alkanes-execute")]
     Execute {
         /// Alkane id (e.g. 2:1)

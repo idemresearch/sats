@@ -15,7 +15,7 @@ const PUBLIC_DOC_SLUGS = [
 const PUBLIC_DOCS_INDEX = [
   "# Documentation",
   "",
-  "Learn the wallet on signet first. Mainnet is always an explicit choice.",
+  "sats runs on test networks only: signet (the default), testnet4, and regtest. Mainnet is refused.",
   "",
   "## Use sats",
   "",

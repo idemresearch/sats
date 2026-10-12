@@ -17,7 +17,10 @@ the playground version all come from `workspace.package.version` in
 1. Run the full [verification gate](development.md#verification-gate).
 2. Regenerate the playground if `sats-core` or `sats-playground` changed.
 3. Exercise the request and recovery flows with a local build.
-4. Optionally run the workflow manually. It builds each archive and checksum
+4. Confirm the local build refuses mainnet (`sats --network mainnet init`
+   fails and writes nothing), and that the changelog entry states the
+   test-network policy.
+5. Optionally run the workflow manually. It builds each archive and checksum
    without publishing, so you can download and check them first.
 
 Local tests use disposable wallets and mock providers. They don't verify live
@@ -49,6 +52,8 @@ existing assets, which recovers a partially failed upload.
 3. `SHA256SUMS` lists every archive.
 4. `setup.sh` installs the tagged release on at least one target.
 5. The installed binary reports the tagged version.
+6. The installer prints the test-network notice, and the installed binary
+   refuses `--network mainnet`.
 
 The installer at `https://sats.sh/setup.sh` is the committed
 `website/public/setup.sh`, and it must stay byte-for-byte identical to the

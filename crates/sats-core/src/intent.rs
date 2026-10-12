@@ -108,7 +108,7 @@ mod tests {
     fn digest_changes_with_each_field() {
         let base = intent().digest();
         let mut network = intent();
-        network.network = "mainnet".into();
+        network.network = "testnet4".into();
         let mut agent = intent();
         agent.agent = "other".into();
         let mut recipient = intent();

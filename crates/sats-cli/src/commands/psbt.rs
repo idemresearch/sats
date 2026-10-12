@@ -112,7 +112,7 @@ pub fn sign(
     let bytes = fs::read(file).with_context(|| format!("cannot read {}", file.display()))?;
     let mut psbt = parse_psbt(&bytes)?;
 
-    let mut signer = LocalSigner::new(keys::unlock(store)?, network);
+    let mut signer = LocalSigner::new(keys::unlock(store)?, network)?;
     let finalized = signer.sign(&mut psbt)?;
 
     if let Some(out_path) = out {

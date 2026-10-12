@@ -123,6 +123,8 @@ device-separated:
   property.
 - The only execution path for an agent request is `sats agent approve`.
   There is no daemon and no durable approval another process can reuse.
+- Because the signer shares a machine and a user with the agent, software
+  signing is confined to test networks: sats refuses mainnet.
 
 ## What sats claims, and what it doesn't
 

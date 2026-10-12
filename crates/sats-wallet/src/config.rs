@@ -2,6 +2,7 @@ use std::fs;
 
 use anyhow::{Context, Result, bail};
 use sats_core::bitcoin::Network;
+use sats_core::network::MainnetRefused;
 use serde::{Deserialize, Serialize};
 
 use crate::provider::error::redact_url;
@@ -16,8 +17,6 @@ pub struct Config {
     pub network: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subfrost: Option<SubfrostConfig>,
-    #[serde(default, skip_serializing_if = "NetworkConfig::is_empty")]
-    pub mainnet: NetworkConfig,
     #[serde(default, skip_serializing_if = "NetworkConfig::is_empty")]
     pub signet: NetworkConfig,
     #[serde(default, skip_serializing_if = "NetworkConfig::is_empty")]
@@ -133,7 +132,6 @@ impl Default for Config {
         Config {
             network: "signet".into(),
             subfrost: None,
-            mainnet: NetworkConfig::default(),
             signet: NetworkConfig::default(),
             testnet4: NetworkConfig::default(),
             regtest: NetworkConfig::default(),
@@ -156,6 +154,15 @@ impl Config {
         // The source may be a URL or authentication field, so retain only its
         // location and never attach the original parser error as a source.
         let config: Config = toml::from_str(&text).map_err(|error: toml::de::Error| {
+            if let Ok(table) = toml::from_str::<toml::Table>(&text)
+                && table.contains_key("mainnet")
+            {
+                return anyhow::anyhow!(
+                    "config {} has a [mainnet] section — {MainnetRefused}; remove [mainnet] from \
+                     the config",
+                    path.display()
+                );
+            }
             if let Ok(table) = toml::from_str::<toml::Table>(&text)
                 && UNSUPPORTED_SECTIONS
                     .iter()
@@ -201,6 +208,12 @@ impl Config {
     /// Esplora URL, Subfrost not set up) are resolution errors, so
     /// local commands keep working while they are fixed.
     fn validate(&self) -> Result<()> {
+        parse_network(&self.network).with_context(|| {
+            format!(
+                "network = {:?} cannot be used — set network = \"signet\"",
+                self.network
+            )
+        })?;
         if self
             .subfrost
             .as_ref()
@@ -233,17 +246,16 @@ impl Config {
         Ok(())
     }
 
-    pub fn networks(&self) -> [(&'static str, &NetworkConfig); 4] {
+    pub fn networks(&self) -> [(&'static str, &NetworkConfig); 3] {
         [
-            ("mainnet", &self.mainnet),
             ("signet", &self.signet),
             ("testnet4", &self.testnet4),
             ("regtest", &self.regtest),
         ]
     }
 
-    /// One network's settings. Legacy testnet3 never parses, so it has
-    /// none.
+    /// One network's settings. Mainnet and legacy testnet3 never parse,
+    /// so they have none.
     pub fn net(&self, network: Network) -> &NetworkConfig {
         const NONE: &NetworkConfig = &NetworkConfig {
             chain: None,
@@ -252,7 +264,6 @@ impl Config {
             subfrost_url: None,
         };
         match network {
-            Network::Bitcoin => &self.mainnet,
             Network::Signet => &self.signet,
             Network::Testnet4 => &self.testnet4,
             Network::Regtest => &self.regtest,
@@ -262,18 +273,16 @@ impl Config {
 
     pub fn net_mut(&mut self, network: Network) -> &mut NetworkConfig {
         match network {
-            Network::Bitcoin => &mut self.mainnet,
             Network::Signet => &mut self.signet,
             Network::Testnet4 => &mut self.testnet4,
             Network::Regtest => &mut self.regtest,
-            _ => unreachable!("legacy testnet3 is refused by parse_network"),
+            _ => unreachable!("mainnet and legacy testnet3 are refused by parse_network"),
         }
     }
 
     /// The public mempool.space Esplora API for a network.
     pub fn mempool_url(network: Network) -> Option<&'static str> {
         match network {
-            Network::Bitcoin => Some("https://mempool.space/api"),
             Network::Signet => Some("https://mempool.space/signet/api"),
             Network::Testnet4 => Some("https://mempool.space/testnet4/api"),
             _ => None,
@@ -301,14 +310,16 @@ pub fn network_name(network: Network) -> &'static str {
     }
 }
 
+/// The networks this build serves; mainnet is refused by
+/// [`sats_core::network`].
 pub fn parse_network(name: &str) -> Result<Network> {
     Ok(match name {
-        "mainnet" | "bitcoin" => Network::Bitcoin,
+        "mainnet" | "bitcoin" => return Err(MainnetRefused.into()),
         "signet" => Network::Signet,
         "testnet4" => Network::Testnet4,
         "regtest" => Network::Regtest,
         "testnet" => bail!("legacy testnet3 is not supported — use testnet4"),
-        other => bail!("unknown network {other:?} (use mainnet, signet, testnet4, or regtest)"),
+        other => bail!("unknown network {other:?} (use signet, testnet4, or regtest)"),
     })
 }
 
@@ -335,8 +346,8 @@ api_key = "secret"
 chain = "subfrost"
 fee_target = 1008
 
-[mainnet.esplora]
-url = "https://bitcoin.example/api"
+[testnet4.esplora]
+url = "https://testnet4.example/api"
 bearer = "token"
 "#;
         let (_dir, store) = store_with(text);
@@ -344,15 +355,15 @@ bearer = "token"
         assert_eq!(config.signet.chain, Some(ChainChoice::Subfrost));
         assert_eq!(config.signet.fee_target, Some(1008));
         assert_eq!(config.subfrost.as_ref().unwrap().api_key, "secret");
-        assert!(config.mainnet.chain.is_none());
-        assert!(config.testnet4.is_empty());
+        assert!(config.testnet4.chain.is_none());
+        assert!(config.regtest.is_empty());
 
         config.save(&store).unwrap();
         let again = Config::load(&store).unwrap();
         assert_eq!(again.signet, config.signet);
-        assert_eq!(again.mainnet, config.mainnet);
+        assert_eq!(again.testnet4, config.testnet4);
         let saved = std::fs::read_to_string(store.config_path()).unwrap();
-        assert!(!saved.contains("[testnet4]"), "empty networks are omitted");
+        assert!(!saved.contains("[regtest]"), "empty networks are omitted");
     }
 
     #[test]
@@ -387,6 +398,38 @@ bearer = "token"
     }
 
     #[test]
+    fn mainnet_never_parses() {
+        for name in ["mainnet", "bitcoin"] {
+            let rendered = format!("{:#}", parse_network(name).unwrap_err());
+            assert!(rendered.contains("mainnet is not supported"), "{rendered}");
+        }
+        for (name, network) in [
+            ("signet", Network::Signet),
+            ("testnet4", Network::Testnet4),
+            ("regtest", Network::Regtest),
+        ] {
+            assert_eq!(parse_network(name).unwrap(), network);
+            assert_eq!(network_name(network), name);
+        }
+    }
+
+    #[test]
+    fn a_mainnet_config_is_refused_with_the_fix() {
+        let (_dir, store) = store_with("network = \"mainnet\"\n");
+        let rendered = format!("{:#}", Config::load(&store).unwrap_err());
+        assert!(rendered.contains("set network = \"signet\""), "{rendered}");
+        assert!(rendered.contains("mainnet is not supported"), "{rendered}");
+
+        let (_dir, store) = store_with(
+            "network = 'signet'\n[mainnet.esplora]\nurl = 'https://PATHSECRET'\nbearer = 'BEARERSECRET'\n",
+        );
+        let rendered = format!("{:#}", Config::load(&store).unwrap_err());
+        assert!(rendered.contains("remove [mainnet]"), "{rendered}");
+        assert!(rendered.contains("mainnet is not supported"), "{rendered}");
+        assert!(!rendered.contains("PATHSECRET") && !rendered.contains("BEARERSECRET"));
+    }
+
+    #[test]
     fn credentials_are_redacted_from_debug_output() {
         let mut config = Config {
             subfrost: Some(SubfrostConfig {
@@ -401,7 +444,7 @@ bearer = "token"
             ),
             bearer: Some("bearer-secret".into()),
         });
-        config.mainnet.subfrost_url = Some(RedactedUrl("https://host.example/KEYPATH".into()));
+        config.testnet4.subfrost_url = Some(RedactedUrl("https://host.example/KEYPATH".into()));
         for debug in [format!("{config:?}"), format!("{config:#?}")] {
             assert!(debug.contains("https://host.example"));
             for secret in [
