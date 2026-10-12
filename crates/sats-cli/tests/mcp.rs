@@ -10,241 +10,10 @@
 
 mod common;
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 
+use common::mcp::*;
 use tempfile::TempDir;
-
-const PASSWORD: &str = "integration-test-pw";
-const ADDRESS: &str = "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n";
-
-fn sats_bin() -> std::path::PathBuf {
-    std::env::var_os("SATS_TEST_BINARY")
-        .map(Into::into)
-        .unwrap_or_else(|| env!("CARGO_BIN_EXE_sats").into())
-}
-
-fn sats_output(dir: &TempDir, args: &[&str]) -> std::process::Output {
-    Command::new(sats_bin())
-        .args(args)
-        .env("SATS_DIR", dir.path())
-        .env("SATS_PASSWORD", PASSWORD)
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap()
-}
-
-fn run_sats(dir: &TempDir, args: &[&str]) {
-    let output = sats_output(dir, args);
-    assert!(
-        output.status.success(),
-        "sats {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// Run a command that prints JSON on stdout and parse it.
-fn sats_json(dir: &TempDir, args: &[&str]) -> serde_json::Value {
-    let output = sats_output(dir, args);
-    assert!(
-        output.status.success(),
-        "sats {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    serde_json::from_slice(&output.stdout).expect("json stdout")
-}
-
-/// The server request id a `request_send` result carries: `r-` plus 32
-/// hex characters, the only handle a human approves or dismisses by.
-fn id_of(view: &serde_json::Value) -> String {
-    let id = view["request_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no request_id in {view}"))
-        .to_string();
-    assert_eq!(id.len(), 34, "{id}");
-    assert!(id.starts_with("r-"), "{id}");
-    assert!(id[2..].bytes().all(|b| b.is_ascii_hexdigit()), "{id}");
-    id
-}
-
-/// The human authorizes and executes one request: `sats agent approve`
-/// with the password from the environment, as a script would.
-fn approve(dir: &TempDir, id: &str) -> serde_json::Value {
-    sats_json(dir, &["--json", "agent", "approve", id, "--yes"])
-}
-
-/// Issue a grant and capture the bearer token, which is printed once and
-/// never stored — the only place a test can get it is here.
-fn grant_token(dir: &TempDir, agent: &str, extra: &[&str]) -> String {
-    let mut args = vec!["--json", "agent", "grant", agent];
-    args.extend_from_slice(extra);
-    let json = sats_json(dir, &args);
-    json["token"]
-        .as_str()
-        .expect("grant --json must emit the token exactly once")
-        .to_string()
-}
-
-struct McpSession {
-    child: Child,
-    reader: BufReader<std::process::ChildStdout>,
-}
-
-impl McpSession {
-    fn start(dir: &TempDir, agent: &str, token: &str) -> McpSession {
-        let mut child = Command::new(sats_bin())
-            .args(["agent", "serve", agent])
-            .env("SATS_DIR", dir.path())
-            .env("SATS_AGENT_TOKEN", token)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let reader = BufReader::new(child.stdout.take().unwrap());
-        McpSession { child, reader }
-    }
-
-    fn send(&mut self, msg: serde_json::Value) {
-        let stdin = self.child.stdin.as_mut().unwrap();
-        writeln!(stdin, "{msg}").unwrap();
-        stdin.flush().unwrap();
-    }
-
-    fn recv(&mut self) -> serde_json::Value {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            let n = self.reader.read_line(&mut line).unwrap();
-            assert!(n > 0, "mcp server closed stdout unexpectedly");
-            if !line.trim().is_empty() {
-                return serde_json::from_str(line.trim()).unwrap();
-            }
-        }
-    }
-
-    /// The whole JSON-RPC response, for calls expected to be rejected
-    /// before a tool result exists.
-    fn call_tool_raw(
-        &mut self,
-        id: u64,
-        name: &str,
-        arguments: serde_json::Value,
-    ) -> serde_json::Value {
-        self.send(serde_json::json!({
-            "jsonrpc": "2.0", "id": id, "method": "tools/call",
-            "params": { "name": name, "arguments": arguments },
-        }));
-        let response = self.recv();
-        assert_eq!(response["id"], id);
-        response
-    }
-
-    fn call_tool(
-        &mut self,
-        id: u64,
-        name: &str,
-        arguments: serde_json::Value,
-    ) -> serde_json::Value {
-        self.call_tool_raw(id, name, arguments)["result"]["structuredContent"].clone()
-    }
-
-    /// A read tool refused because the session's grant is no longer
-    /// live: an `isError` result whose structured content names the code.
-    fn refused_read(&mut self, id: u64, name: &str, code: &str) -> serde_json::Value {
-        let response = self.call_tool_raw(id, name, serde_json::json!({}));
-        assert_eq!(response["result"]["isError"], true, "{name}: {response}");
-        let refused = response["result"]["structuredContent"].clone();
-        assert_eq!(refused["status"], "error", "{name}: {refused}");
-        assert_eq!(refused["error_code"], code, "{name}: {refused}");
-        refused
-    }
-
-    fn request_send(&mut self, id: u64, amount_sat: u64, key: &str) -> serde_json::Value {
-        self.call_tool(
-            id,
-            "request_send",
-            serde_json::json!({ "address": ADDRESS, "amount_sat": amount_sat, "idempotency_key": key }),
-        )
-    }
-
-    fn check_request(&mut self, id: u64, request_id: &str) -> serde_json::Value {
-        self.call_tool(
-            id,
-            "check_request",
-            serde_json::json!({ "request_id": request_id }),
-        )
-    }
-}
-
-impl Drop for McpSession {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn handshake(mcp: &mut McpSession) {
-    mcp.send(serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": { "name": "smoke-test", "version": "0" },
-        },
-    }));
-    mcp.recv();
-    mcp.send(serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
-}
-
-/// A wallet the approving human can actually spend from: mock provider
-/// config plus directly seeded confirmed UTXOs, and a granted agent.
-struct Fixture {
-    mockdata: std::path::PathBuf,
-    token: String,
-}
-
-fn funded_setup(dir: &TempDir, grant_args: &[&str], values_sat: &[u64]) -> Fixture {
-    run_sats(dir, &["init"]);
-    let mockdata = common::write_mock_provider(dir);
-    let token = grant_token(dir, "claude", grant_args);
-    common::fund_wallet(dir, values_sat);
-    Fixture { mockdata, token }
-}
-
-fn read_json(path: &std::path::Path) -> serde_json::Value {
-    serde_json::from_slice(&std::fs::read(path).unwrap())
-        .unwrap_or_else(|e| panic!("bad json at {}: {e}", path.display()))
-}
-
-fn request_record(dir: &TempDir, agent: &str, id: &str) -> serde_json::Value {
-    read_json(
-        &dir.path()
-            .join("signet/agent-requests")
-            .join(agent)
-            .join(format!("{id}.json")),
-    )
-}
-
-fn spent_sat(dir: &TempDir) -> u64 {
-    read_json(&dir.path().join("signet/grants/claude.json"))["spent_sat"]
-        .as_u64()
-        .unwrap()
-}
-
-fn event_kinds(dir: &TempDir) -> Vec<String> {
-    let log =
-        std::fs::read_to_string(dir.path().join("signet/events/log.jsonl")).unwrap_or_default();
-    log.lines()
-        .map(|line| {
-            serde_json::from_str::<serde_json::Value>(line).unwrap()["event"]
-                .as_str()
-                .unwrap()
-                .to_string()
-        })
-        .collect()
-}
 
 #[test]
 fn mcp_serves_five_tools_and_enforces_the_grant() {
@@ -873,6 +642,43 @@ fn expiry_cuts_off_a_running_session() {
     handshake(&mut fresh_mcp);
     let next = fresh_mcp.call_tool(2, "get_receive_address", serde_json::json!({}));
     assert_eq!(next["index"].as_u64().unwrap(), index + 1, "{next}");
+}
+
+/// A request filed before its grant expired is denied at approval, never
+/// signed, and the agent observes the denial and its reason.
+#[test]
+fn a_request_pending_at_expiry_is_denied_at_approval() {
+    let dir = TempDir::new().unwrap();
+    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let mut mcp = McpSession::start(&dir, "claude", &fx.token);
+    handshake(&mut mcp);
+    let filed = mcp.request_send(2, 1_000, "late");
+    assert_eq!(filed["status"], "pending_approval");
+    let late = id_of(&filed);
+
+    let grant_path = dir.path().join("signet/grants/claude.json");
+    let mut grant = read_json(&grant_path);
+    grant["expires_at"] = serde_json::json!(1);
+    std::fs::write(&grant_path, grant.to_string()).unwrap();
+
+    let output = sats_output(&dir, &["agent", "approve", &late, "--yes"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("expired"), "{stderr}");
+    assert_eq!(request_record(&dir, "claude", &late)["status"], "denied");
+    assert_eq!(spent_sat(&dir), 0);
+    assert_eq!(event_kinds(&dir), ["request_received", "denied"]);
+    assert!(!dir.path().join("signet/transactions").exists());
+
+    // The expired session observes nothing; a fresh grant's session sees
+    // the old request as denied, with the reason.
+    assert_eq!(mcp.check_request(3, &late)["error_code"], "no_grant");
+    let fresh = grant_token(&dir, "claude", &["--budget", "50000"]);
+    let mut fresh_mcp = McpSession::start(&dir, "claude", &fresh);
+    handshake(&mut fresh_mcp);
+    let view = fresh_mcp.check_request(2, &late);
+    assert_eq!(view["status"], "denied", "{view}");
+    assert_eq!(view["reason"], "expired", "{view}");
 }
 
 #[test]

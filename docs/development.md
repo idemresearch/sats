@@ -72,7 +72,8 @@ couldn't be run, say so rather than calling the change complete.
 | CLI unit | `crates/sats-cli/src/` | Flag parsing, review menus, the warning filter, MCP receipts |
 | Playground unit | `crates/sats-playground/src/` | Simulated wallet loop, grant lifecycle, denials |
 | CLI integration | `crates/sats-cli/tests/` | Wallet flows, failures, providers, grants, request review, Alkanes |
-| MCP integration | `crates/sats-cli/tests/mcp.rs` | Tool schemas, filing, idempotency, the approval loop, startup refusal, revocation |
+| MCP integration | `crates/sats-cli/tests/mcp.rs` | Tool schemas, filing, idempotency, the approval loop, startup refusal, revocation, expiry |
+| MCP demo | `crates/sats-cli/tests/demo.rs` | The request loop as a printed transcript: approval, denial, expiry, revocation, failed broadcast (`sh scripts/demo-mcp.sh`) |
 | Installer | `scripts/test-setup.sh` | Targets, checksums, version pinning, PATH edits, atomic replacement |
 | WASM | CI `wasm-check` | `sats-core` and `sats-playground` build for `wasm32-unknown-unknown` |
 

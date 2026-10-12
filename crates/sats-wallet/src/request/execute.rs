@@ -1208,6 +1208,32 @@ mod tests {
         assert_eq!(fx.events(), vec!["request_received", "denied"]);
     }
 
+    /// A pending request outlives its grant's expiry too: the grant is
+    /// still on disk, so the request stays bound to it, and the ladder
+    /// denies it as expired without constructing a signer.
+    #[test]
+    fn expired_grant_denies_the_pending_request() {
+        let fx = Fixture::new(&[100_000]);
+        let token = fx.grant(50_000, 5_000);
+        let id = fx.create(&token, "pay", 10_000).id;
+        let mut grant = fx.grant_state();
+        grant.expires_at = 1;
+        {
+            let _lock = fx.store.lock_grants("signet").unwrap();
+            fx.store.save_grant("signet", &grant).unwrap();
+        }
+        let probe = SignerProbe::default();
+        let outcome = approve(&fx, &id, &probe).unwrap();
+        let expired = DenyReason::Expired { expired_at: 1 };
+        assert_eq!(outcome, Outcome::Denied(expired.clone()));
+        assert_eq!(probe.counts(), (0, 0));
+        let request = fx.request(&id);
+        assert_eq!(request.state.deny_reason(), Some(&expired));
+        assert!(!request.is_approvable());
+        assert_eq!(fx.grant_state().spent_sat, 0);
+        assert_eq!(fx.events(), vec!["request_received", "denied"]);
+    }
+
     /// A re-issued grant for the same agent never inherits the old
     /// grant's requests: revoke, re-grant, approve still refuses.
     #[test]

@@ -3,6 +3,9 @@
 //! instead of a prompt, and talks to the file-driven mock provider.
 #![allow(dead_code)]
 
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
 use assert_cmd::Command;
 use bdk_wallet::bitcoin::hashes::Hash;
 use bdk_wallet::bitcoin::{Amount, BlockHash, Network, OutPoint};

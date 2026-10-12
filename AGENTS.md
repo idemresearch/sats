@@ -366,7 +366,8 @@ cargo check -p sats-playground --target wasm32-unknown-unknown
 Agent-path work is covered by `crates/sats-wallet/src/request/execute.rs` (unit
 tests with a signer probe and crash reconciliation) and
 `crates/sats-cli/tests/mcp.rs` (the served process, the CLI approval, and the
-observed result, each against its own `SATS_DIR`).
+observed result, each against its own `SATS_DIR`). `sh scripts/demo-mcp.sh` prints the
+same loop as a transcript and is itself a test (`crates/sats-cli/tests/demo.rs`).
 
 After changing `sats-core` or `sats-playground`, regenerate the committed playground
 module with `sh scripts/build-playground.sh` (see
