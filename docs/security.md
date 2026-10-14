@@ -326,8 +326,8 @@ endpoint. Redaction does not make a provider honest.
 Provider credentials live in `config.toml`, which sats writes owner-only.
 `sats providers add` reads a key from a hidden prompt or stdin, never from
 the command line, and checks the endpoint before saving it. A saved Esplora
-token never follows a new URL, and the Subfrost key is never sent to a
-`--provider` override. Configuring providers is a human CLI task: no MCP
+token or Subfrost key never follows a new URL: a changed endpoint needs the
+credential typed again, and a `--provider` override never receives one. Configuring providers is a human CLI task: no MCP
 tool configures them, and the MCP server only uses what is configured.
 
 ## PSBTs
