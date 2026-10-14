@@ -3,14 +3,11 @@
 Notable changes to sats, newest first. Versions follow
 `workspace.package.version` in `Cargo.toml`.
 
-## Unreleased
+## 0.0.3 (2026-10-14)
 
-### Building from source
-
-- The CLI crate is now `crates/sats-cli` (the command is still `sats`):
-  `cargo install --locked --path crates/sats-cli`. Storage, providers, and
-  the request workflow moved into a new `sats-wallet` library that future
-  front ends will share.
+sats is now a test-network developer release: mainnet is refused. If you
+used mainnet with an earlier build, move those funds before upgrading (see
+Security).
 
 ### Security
 
@@ -27,6 +24,20 @@ Notable changes to sats, newest first. Versions follow
   inherits your environment, so an agent with a shell could have run
   `sats agent approve --yes` and signed without you. Restore no longer
   reads a piped phrase.
+
+### Agents
+
+- `sh scripts/demo-mcp.sh` runs the agent request loop end to end offline:
+  an MCP session over stdio and the human's CLI, through approval, denial,
+  expiry, revocation, and a failed broadcast, on a mock chain. It runs in
+  CI as a test.
+
+### Building from source
+
+- The CLI crate is now `crates/sats-cli` (the command is still `sats`):
+  `cargo install --locked --path crates/sats-cli`. Storage, providers, and
+  the request workflow moved into a new `sats-wallet` library that future
+  front ends will share.
 
 ## 0.0.2 (2026-10-07)
 
