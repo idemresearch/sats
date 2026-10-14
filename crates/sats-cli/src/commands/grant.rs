@@ -188,21 +188,19 @@ pub fn run(
     Ok(())
 }
 
-/// Pin the same configuration and data locations the grant used. An
-/// explicit directory takes precedence over SATS_DIR. When the default
-/// config and data directories are identical, one explicit --dir is the
-/// shortest equivalent command. A split default layout retains the directory
-/// resolver's roots and removes a future client's SATS_DIR in the launched
-/// process itself.
+/// Pin the same configuration and data locations the grant used. When the
+/// config and data directories are identical (`--dir`, `SATS_DIR`, or the
+/// macOS default), one explicit --dir is the shortest equivalent command.
+/// A split default layout retains the directory resolver's roots and
+/// removes a future client's SATS_DIR in the launched process itself.
 fn mcp_launch_command(store: &Store, network: &str, agent: &str) -> Result<String> {
     let mut args = Vec::new();
     let config_path = store.config_path();
     let seed_path = store.seed_path();
-    let shared_default_dir = match (config_path.parent(), seed_path.parent()) {
+    let pinned_dir = match (config_path.parent(), seed_path.parent()) {
         (Some(config_dir), Some(data_dir)) if config_dir == data_dir => Some(data_dir),
         _ => None,
     };
-    let pinned_dir = store.dir_override().or(shared_default_dir);
 
     if pinned_dir.is_none() {
         let dirs = directories::BaseDirs::new().context("cannot determine home directory")?;

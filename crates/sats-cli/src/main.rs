@@ -7,6 +7,9 @@ mod mcp;
 mod password;
 mod ui;
 
+use std::path::Path;
+
+use anyhow::Context;
 use sats_wallet::config::{Config, parse_network};
 use sats_wallet::provider;
 use sats_wallet::store::Store;
@@ -22,8 +25,22 @@ fn main() {
     }
 }
 
+/// `--dir` or `SATS_DIR` puts configuration and data in one directory.
+/// Otherwise the platform's: XDG on Linux (`~/.config/sats` +
+/// `~/.local/share/sats`), `~/Library/Application Support/sats` on macOS.
+fn open_store(dir: Option<&Path>) -> anyhow::Result<Store> {
+    Ok(match dir {
+        Some(dir) => Store::open(dir),
+        None => {
+            let dirs = directories::ProjectDirs::from("", "", "sats")
+                .context("cannot determine home directory")?;
+            Store::with_dirs(dirs.config_dir(), dirs.data_dir())
+        }
+    })
+}
+
 fn run(cli: Cli) -> anyhow::Result<()> {
-    let store = Store::open(cli.dir.as_deref())?;
+    let store = open_store(cli.dir.as_deref())?;
     let config = Config::load(&store)?;
     let net_name = cli
         .network

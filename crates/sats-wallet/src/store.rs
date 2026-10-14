@@ -1,9 +1,9 @@
 //! On-disk layout, atomic writes, and secret file permissions.
 //!
-//! Default layout is the platform's: XDG on Linux (`~/.config/sats` +
-//! `~/.local/share/sats`), `~/Library/Application Support/sats` on macOS.
-//! The `SATS_DIR` env var or `--dir` flag relocates everything under one
-//! directory. Data is namespaced per network so wallets never mix.
+//! A surface chooses where the store lives and passes the directories in;
+//! this crate never looks up a home directory. `config.toml` sits in the
+//! config directory and everything else in the data directory, namespaced
+//! per network so wallets never mix.
 
 use std::fs;
 use std::io::Write;
@@ -59,36 +59,24 @@ pub struct RequestClaim {
     _file: fs::File,
 }
 
+#[derive(Clone)]
 pub struct Store {
     config_dir: PathBuf,
     data_dir: PathBuf,
-    override_dir: Option<PathBuf>,
 }
 
 impl Store {
-    pub fn open(dir_override: Option<&Path>) -> Result<Store> {
-        let (config_dir, data_dir) = match dir_override {
-            Some(dir) => (dir.to_path_buf(), dir.to_path_buf()),
-            None => {
-                let dirs = directories::ProjectDirs::from("", "", "sats")
-                    .context("cannot determine home directory")?;
-                (
-                    dirs.config_dir().to_path_buf(),
-                    dirs.data_dir().to_path_buf(),
-                )
-            }
-        };
-        Ok(Store {
-            config_dir,
-            data_dir,
-            override_dir: dir_override.map(Path::to_path_buf),
-        })
+    /// A store whose configuration and data share one directory.
+    pub fn open(dir: &Path) -> Store {
+        Store::with_dirs(dir, dir)
     }
 
-    /// The `--dir`/`SATS_DIR` override this store was opened with, if any —
-    /// lets long-running components reconstruct an identical store.
-    pub fn dir_override(&self) -> Option<&Path> {
-        self.override_dir.as_deref()
+    /// A store with separate configuration and data directories.
+    pub fn with_dirs(config_dir: &Path, data_dir: &Path) -> Store {
+        Store {
+            config_dir: config_dir.to_path_buf(),
+            data_dir: data_dir.to_path_buf(),
+        }
     }
 
     /// Create `dir` and restrict it — and every component from the data
@@ -906,7 +894,7 @@ mod tests {
     #[test]
     fn load_grant_refuses_a_grant_from_another_network() {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
 
         // The exploit: a real signet grant's file placed under testnet4.
         let signet_grant = grant("signet");
@@ -934,7 +922,7 @@ mod tests {
     #[test]
     fn load_grant_refuses_unreleased_and_newer_records() {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         store.save_grant("signet", &grant("signet")).unwrap();
         let path = store.grants_dir("signet").join("claude.json");
         let pristine = fs::read(&path).unwrap();
@@ -985,7 +973,7 @@ mod tests {
     #[test]
     fn event_lines_tolerate_unknown_kinds() {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         let event = sats_core::event::AgentEvent {
             format_version: sats_core::event::EVENT_FORMAT_VERSION,
             at: 1,
@@ -1021,7 +1009,7 @@ mod tests {
     #[test]
     fn grant_lock_excludes_a_second_holder() {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         let held = store.lock_grants("signet").unwrap();
         // A separate open of the lock file must contend, even in-process.
         let second = fs::File::create(store.grants_dir("signet").join(".lock")).unwrap();
@@ -1055,7 +1043,7 @@ mod tests {
     #[test]
     fn find_agent_request_refuses_duplicate_exact_ids() {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         let mut alice = agent_request("r-0123456789abcdef0123456789abcdef");
         alice.agent = "alice".into();
         let mut bob = agent_request("r-0123456789abcdef0123456789abcdef");
@@ -1087,7 +1075,7 @@ mod tests {
     #[test]
     fn agent_request_claim_is_exclusive_and_private() {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         let request = agent_request("k-job-1");
 
         let claim = store
@@ -1136,7 +1124,7 @@ mod tests {
     #[test]
     fn event_log_appends_lines_privately() {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         let event = sats_core::event::AgentEvent {
             format_version: sats_core::event::EVENT_FORMAT_VERSION,
             at: 1,
@@ -1168,7 +1156,7 @@ mod tests {
     #[test]
     fn listing_transactions_skips_unreadable_files() {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         store
             .save_transaction("signet", &record_with(1_000, 10))
             .unwrap();
@@ -1190,7 +1178,7 @@ mod tests {
     #[test]
     fn finalized_transactions_are_private_and_resolvable() {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         let record = record_with(1_000, 42);
 
         store.save_transaction("signet", &record).unwrap();
@@ -1228,7 +1216,7 @@ mod tests {
     #[test]
     fn traversal_agent_names_are_rejected_at_the_store() {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
 
         for evil in ["../evil", "a/b", "", "/etc", "A", "a\\b"] {
             assert!(store.load_grant("signet", evil).is_err(), "load {evil:?}");
@@ -1277,7 +1265,7 @@ mod tests {
     #[test]
     fn listing_does_not_delete_expired_grants_but_prune_does() {
         let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         let mut expired = grant("signet");
         expired.expires_at = 100;
         store.save_grant("signet", &expired).unwrap();
@@ -1309,7 +1297,7 @@ mod tests {
     fn data_directories_are_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         store.save_grant("signet", &grant("signet")).unwrap();
         store
             .create_agent_request("signet", &agent_request("k-job-1"))

@@ -984,7 +984,7 @@ mod tests {
     #[test]
     fn sync_wallet_full_scans_fresh_wallet_and_persists_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         let mut ctx = fresh_wallet(&store);
         assert_eq!(ctx.wallet.latest_checkpoint().height(), 0);
         let genesis = constants::genesis_block(Network::Signet).block_hash();
@@ -1031,7 +1031,7 @@ mod tests {
     #[test]
     fn sync_wallet_rejects_wrong_network_before_scanning() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         let mut ctx = fresh_wallet(&store);
         let (url, requests) = local_server(vec![rpc_response(serde_json::json!(
             constants::genesis_block(Network::Bitcoin).block_hash()

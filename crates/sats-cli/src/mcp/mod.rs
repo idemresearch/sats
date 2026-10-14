@@ -68,13 +68,7 @@ pub fn run(
         ui::human_duration(grant.expires_at.saturating_sub(unix_now())),
     );
 
-    let service = server::SatsMcp::new(
-        store.dir_override().map(|p| p.to_path_buf()),
-        network,
-        agent.to_string(),
-        providers,
-        token,
-    );
+    let service = server::SatsMcp::new(store.clone(), network, agent.to_string(), providers, token);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

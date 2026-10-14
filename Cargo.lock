@@ -1419,7 +1419,6 @@ dependencies = [
  "anyhow",
  "bdk_esplora",
  "bdk_wallet",
- "directories",
  "hex",
  "log",
  "minreq",

@@ -58,6 +58,8 @@ The native workflow every front end shares. It never talks to the human:
 no terminal output, prompts, or password reading. Warnings go through the
 `log` facade, sync progress through `provider::Progress`, and the signer
 arrives as a factory from a surface that has the human's authorization.
+The surface also chooses where the wallet lives: `Store` takes explicit
+config and data directories and never looks up a home directory.
 
 | Module | Owns |
 |---|---|
