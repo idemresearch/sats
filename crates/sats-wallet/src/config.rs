@@ -329,7 +329,7 @@ mod tests {
 
     fn store_with(text: &str) -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         std::fs::write(store.config_path(), text).unwrap();
         (dir, store)
     }
@@ -484,7 +484,7 @@ bearer = "token"
     #[test]
     fn saved_config_is_owner_only() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         let config = Config {
             subfrost: Some(SubfrostConfig {
                 api_key: "secret".into(),

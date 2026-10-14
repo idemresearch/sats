@@ -12,8 +12,6 @@
 //! against the grant on file, so revoking, re-issuing, or expiry cuts a
 //! running session off at its next call, reads included.
 
-use std::path::PathBuf;
-
 use anyhow::Result;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::IntoCallToolResult;
@@ -230,7 +228,7 @@ impl RequestView {
 
 #[derive(Clone)]
 pub struct SatsMcp {
-    dir: Option<PathBuf>,
+    store: Store,
     network: Network,
     agent: String,
     /// The CLI --provider override the server was launched with; chain-reading
@@ -375,14 +373,14 @@ impl IntoCallToolResult for ToolError {
 
 impl SatsMcp {
     pub fn new(
-        dir: Option<PathBuf>,
+        store: Store,
         network: Network,
         agent: String,
         providers: Option<provider::CliProvider>,
         token: Zeroizing<String>,
     ) -> Self {
         SatsMcp {
-            dir,
+            store,
             network,
             agent,
             providers,
@@ -395,17 +393,17 @@ impl SatsMcp {
     async fn blocking<T, F>(&self, f: F) -> Result<T, ErrorData>
     where
         T: Send + 'static,
-        F: FnOnce(Option<PathBuf>, Network, String, Option<provider::CliProvider>) -> Result<T>
+        F: FnOnce(Store, Network, String, Option<provider::CliProvider>) -> Result<T>
             + Send
             + 'static,
     {
-        let (dir, network, agent, providers) = (
-            self.dir.clone(),
+        let (store, network, agent, providers) = (
+            self.store.clone(),
             self.network,
             self.agent.clone(),
             self.providers.clone(),
         );
-        tokio::task::spawn_blocking(move || f(dir, network, agent, providers))
+        tokio::task::spawn_blocking(move || f(store, network, agent, providers))
             .await
             .map_err(|e| ErrorData::internal_error(format!("task failed: {e}"), None))?
             .map_err(|e| ErrorData::internal_error(format!("{e:#}"), None))
@@ -419,8 +417,7 @@ impl SatsMcp {
         F: FnOnce(&Store, Network, Option<provider::CliProvider>) -> Result<T> + Send + 'static,
     {
         let token = self.token.clone();
-        self.blocking(move |dir, network, agent, providers| {
-            let store = Store::open(dir.as_deref())?;
+        self.blocking(move |store, network, agent, providers| {
             Ok(match authorize(&store, network, &agent, &token) {
                 Ok(_) => Ok(f(&store, network, providers)?),
                 Err(refusal) => Err(refusal),
@@ -491,8 +488,7 @@ impl SatsMcp {
     )]
     async fn get_grant(&self) -> Result<Json<GrantResult>, ErrorData> {
         let token = self.token.clone();
-        self.blocking(move |dir, network, agent, _providers| {
-            let store = Store::open(dir.as_deref())?;
+        self.blocking(move |store, network, agent, _providers| {
             let net_name = network_name(network);
             // A grant this session's token no longer names is reported
             // inactive, never described: a stale token learns nothing
@@ -564,8 +560,7 @@ impl SatsMcp {
         Parameters(params): Parameters<RequestSendParams>,
     ) -> Result<Json<RequestView>, ErrorData> {
         let token = self.token.clone();
-        self.blocking(move |dir, network, agent, _providers| {
-            let store = Store::open(dir.as_deref())?;
+        self.blocking(move |store, network, agent, _providers| {
             let created = request::create(
                 &store,
                 network,
@@ -606,8 +601,7 @@ impl SatsMcp {
         Parameters(params): Parameters<CheckRequestParams>,
     ) -> Result<Json<RequestView>, ErrorData> {
         let token = self.token.clone();
-        self.blocking(move |dir, network, agent, _providers| {
-            let store = Store::open(dir.as_deref())?;
+        self.blocking(move |store, network, agent, _providers| {
             let net_name = network_name(network);
             if let Err(refusal) = authorize(&store, network, &agent, &token) {
                 return Ok(RequestView::error(refusal.code, refusal.message));
@@ -739,7 +733,7 @@ mod receipt_tests {
     #[test]
     fn signing_observation_distinguishes_live_and_abandoned_without_writes() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         let record = signing_record();
         let claim = store
             .create_agent_request("signet", &record)
@@ -781,7 +775,7 @@ mod receipt_tests {
     #[test]
     fn failed_execution_probe_is_a_store_error_not_inactivity() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         drop(
             store
                 .create_agent_request("signet", &signing_record())
@@ -803,7 +797,7 @@ mod receipt_tests {
     #[test]
     fn unreadable_request_is_a_store_error_with_its_id() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         let requests = store.agent_requests_dir("signet").join("alice");
         std::fs::create_dir_all(&requests).unwrap();
         let path = requests.join(format!("{ID}.json"));
@@ -830,7 +824,7 @@ mod receipt_tests {
     #[test]
     fn absent_and_malformed_requests_still_have_absence_results() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         for id in [ID, "../../other", "my-idempotency-key"] {
             let view = check_request_record(&store, "signet", "alice", id);
             assert_eq!(view.status, "not_found");

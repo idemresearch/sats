@@ -729,7 +729,7 @@ mod tests {
     impl Fixture {
         fn new(fund_sat: &[u64]) -> Fixture {
             let dir = tempfile::tempdir().unwrap();
-            let store = Store::open(Some(dir.path())).unwrap();
+            let store = Store::open(dir.path());
             let mockdata = dir.path().join("mockdata");
             std::fs::create_dir_all(&mockdata).unwrap();
             std::fs::write(
@@ -1283,7 +1283,7 @@ mod tests {
         let dir = fx.dir.path().to_path_buf();
         let old_token = old.clone();
         let worker = std::thread::spawn(move || {
-            let store = Store::open(Some(&dir)).unwrap();
+            let store = Store::open(&dir);
             create(
                 &store,
                 Network::Signet,

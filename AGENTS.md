@@ -151,6 +151,7 @@ the request workflow, but never the human:
   through `provider::Progress`, and results are typed values;
 - no prompts and no password or mnemonic reading: a surface obtains the
   human's authorization and hands the executor a signer factory;
+- no home-directory lookup: a surface chooses the store's directories;
 - no CLI, MCP, or other surface types.
 
 A workflow two surfaces could need belongs here, not in a command.

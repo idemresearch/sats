@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn mainnet_wallets_are_never_created_or_opened() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(Some(dir.path())).unwrap();
+        let store = Store::open(dir.path());
         let err = create(&store, Network::Bitcoin, String::new(), String::new()).unwrap_err();
         assert!(format!("{err:#}").contains("mainnet is not supported"));
         let err = open(&store, Network::Bitcoin).err().unwrap();
