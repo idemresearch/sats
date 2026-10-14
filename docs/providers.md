@@ -71,9 +71,9 @@ crate) and displays view results without trusting them.
 a terminal it reads one line from stdin, so
 `printf '%s\n' "$KEY" | sats providers add subfrost` works in scripts. A
 credential is never a command-line argument. One saved key serves every
-network: on another network, run
-`sats --network regtest providers add subfrost --url URL` and press enter to
-keep it.
+network. Pressing enter keeps it only while the endpoint stays the same: a
+new `--url`, including another network's, needs the key typed again, so the
+saved key never goes to an endpoint you haven't given it to.
 
 `sats providers add esplora --url URL` asks for an optional bearer token;
 press enter for none. A saved token is kept on enter only for the same URL:

@@ -3,6 +3,16 @@
 Notable changes to sats, newest first. Versions follow
 `workspace.package.version` in `Cargo.toml`.
 
+## Unreleased
+
+### Providers
+
+- `sats providers add subfrost --url URL` keeps the saved key on enter only
+  when the endpoint is unchanged. A new URL, including another network's,
+  needs the key typed again, as an Esplora token already did.
+- Release builds refuse `file://` provider URLs, the undocumented test
+  driver.
+
 ## 0.0.3 (2026-10-14)
 
 sats is now a test-network developer release: mainnet is refused. If you

@@ -302,10 +302,22 @@ fn subfrost_endpoint(
     subfrost_chain(&url, api_key, Source::Config).map(Some)
 }
 
+/// The file-driven test driver exists for the debug builds the tests
+/// drive. Release builds refuse `file://` endpoints, so no config or
+/// `--provider` can replace a real chain source with local files.
+const TEST_DRIVER: bool = cfg!(debug_assertions);
+
 /// The undocumented file-driven test driver answers any `file://`
-/// endpoint; see [`mock`].
-fn mock_chain(url: &str, source: Source) -> Option<Result<(ChainSource, Endpoint), String>> {
+/// endpoint when `allowed`; see [`mock`].
+fn mock_chain(
+    url: &str,
+    source: Source,
+    allowed: bool,
+) -> Option<Result<(ChainSource, Endpoint), String>> {
     url.starts_with("file://").then(|| {
+        if !allowed {
+            return Err("file:// endpoints aren't supported — use an http(s) URL".into());
+        }
         let mock = MockProvider::new(url)?;
         let endpoint = Endpoint {
             provider: "mock",
@@ -323,7 +335,7 @@ fn esplora_chain(
     bearer: Option<String>,
     source: Source,
 ) -> Result<(ChainSource, Endpoint), String> {
-    if let Some(mock) = mock_chain(url, source) {
+    if let Some(mock) = mock_chain(url, source, TEST_DRIVER) {
         return mock;
     }
     let auth = if bearer.is_some() {
@@ -350,7 +362,7 @@ fn subfrost_chain(
     api_key: Option<String>,
     source: Source,
 ) -> Result<(ChainSource, Endpoint), String> {
-    if let Some(mock) = mock_chain(url, source) {
+    if let Some(mock) = mock_chain(url, source, TEST_DRIVER) {
         return mock;
     }
     let auth = if api_key.is_some() {
@@ -743,6 +755,16 @@ mod tests {
         let services = resolve(&config, None, Network::Signet).unwrap();
         assert!(matches!(services.fees, ChainSource::Mock(_)));
         assert!(matches!(services.broadcast, ChainSource::Esplora(_)));
+    }
+
+    #[test]
+    fn release_builds_refuse_file_endpoints() {
+        match mock_chain("file:///tmp/chain", Source::Config, false) {
+            Some(Err(reason)) => assert!(reason.contains("file://"), "{reason}"),
+            Some(Ok(_)) => panic!("a refused test driver was built"),
+            None => panic!("a file:// endpoint must be refused, not passed on"),
+        }
+        assert!(mock_chain("https://mempool.space/api", Source::Config, false).is_none());
     }
 
     #[test]

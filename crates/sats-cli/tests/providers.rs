@@ -253,6 +253,43 @@ fn an_esplora_token_never_follows_a_new_url() {
 }
 
 #[test]
+fn a_subfrost_key_never_follows_a_new_url() {
+    let dir = TempDir::new().unwrap();
+    let (first, _) = fake_subfrost();
+    let (second, second_seen) = fake_subfrost();
+    add_subfrost(&dir, &first);
+    let saved = config_text(&dir);
+
+    // Same endpoint, empty input: the key stays.
+    sats(&dir)
+        .args(["providers", "add", "subfrost", "--url", &first])
+        .write_stdin("\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("updated subfrost"));
+    assert_eq!(config_text(&dir), saved);
+
+    // A new endpoint, empty input: refused, and the new endpoint never
+    // hears from sats.
+    sats(&dir)
+        .args(["providers", "add", "subfrost", "--url", &second])
+        .write_stdin("\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no Subfrost API key"))
+        .stderr(predicate::str::contains(KEY).not());
+    assert!(second_seen.lock().unwrap().is_empty());
+    assert_eq!(config_text(&dir), saved);
+
+    // Typing the key again moves it.
+    add_subfrost(&dir, &second);
+    assert_eq!(
+        second_seen.lock().unwrap().last().unwrap().as_deref(),
+        Some(KEY)
+    );
+}
+
+#[test]
 fn add_refuses_what_it_cannot_use() {
     let dir = TempDir::new().unwrap();
     sats(&dir)

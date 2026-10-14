@@ -45,8 +45,22 @@ pub fn add(
             {
                 bail!("Subfrost has no default endpoint for {net_name} — pass --url");
             }
-            let current = config.subfrost.as_ref().map(|s| s.api_key.clone());
-            updated = current.is_some();
+            updated = config.subfrost.is_some();
+            let saved_url = config
+                .net(network)
+                .subfrost_url
+                .as_ref()
+                .map(|url| url.0.as_str())
+                .or_else(|| provider::subfrost::default_url(network));
+            // As with an Esplora token, the saved key is only ever kept for
+            // the same endpoint: a new URL needs the key typed again, so
+            // pressing enter never sends it somewhere new.
+            let same_endpoint = args.url.as_deref().is_none_or(|url| Some(url) == saved_url);
+            let current = config
+                .subfrost
+                .as_ref()
+                .filter(|_| same_endpoint)
+                .map(|s| s.api_key.clone());
             let api_key = read_credential("Subfrost API key", current, true)?
                 .context("no Subfrost API key")?;
             config.subfrost = Some(SubfrostConfig { api_key });

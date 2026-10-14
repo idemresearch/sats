@@ -251,7 +251,7 @@ A workflow two surfaces could need belongs here, not in a command.
   doesn't fail closed.
 - Each network has exactly one chain source for sync, fees, and broadcast.
   A `--provider` override replaces only that source, and a saved credential
-  never follows an override URL.
+  never follows an override URL or a newly configured endpoint.
 - Validate that a provider serves the selected Bitcoin network.
 - Treat authentication material as secret in errors and debug output. Keep
   Subfrost path credentials behind its redacted display URL, never print
