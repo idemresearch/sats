@@ -68,6 +68,7 @@ config and data directories and never looks up a home directory.
 | `walletd` | The SQLite-backed watch-only BDK wallet |
 | `provider` | Per-network provider, driver resolution, chain access, experimental Alkanes views |
 | `prepare` | The preparation pipeline shared by human sends and approved requests |
+| `assets` | Experimental builds: which outputs carry alkanes, and the exclusion every send applies |
 | `request` | Request create, dismiss, reconcile, and the executor (`stage`, `commit`) |
 | `spend` | The shared tail: sign, persist, then broadcast; rebroadcast a saved transaction |
 
@@ -86,12 +87,13 @@ The `sats` binary: the human CLI and the MCP server.
 ### `sats-alkanes`
 
 Pure Alkanes encoding: alkane ids, LEB128 varints, cellpacks, the
-protostone/runestone envelope, bytecode hashing, and tolerant simulation
+protostone/runestone envelope and its decoder, bytecode hashing, the
+outpoint balance view, transfers and their check, and tolerant simulation
 views. Encodings follow the published alkanes-rs reference, frozen by unit
 vectors. Like `sats-core`, it does no I/O. Default builds don't include it:
-the `experimental-alkanes` feature adds `sats alkanes inspect` and
-`simulate`, and execution sits behind the development-only
-`experimental-alkanes-execute` feature.
+the `experimental-alkanes` feature adds `sats alkanes balance`, `inspect`,
+and `simulate`, and asset-safe sends; execution (`execute`, `send`) sits
+behind the development-only `experimental-alkanes-execute` feature.
 
 ### `sats-playground`
 

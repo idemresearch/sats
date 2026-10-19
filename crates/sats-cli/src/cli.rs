@@ -168,6 +168,8 @@ pub enum ChainArg {
 #[cfg(feature = "experimental-alkanes")]
 #[derive(Subcommand)]
 pub enum AlkanesCommand {
+    /// Show the alkanes this wallet holds, as the indexer reports them
+    Balance,
     /// Fetch a contract's bytecode and show its code hash
     Inspect {
         /// Alkane id (e.g. 2:1)
@@ -196,6 +198,29 @@ pub enum AlkanesCommand {
         #[arg(long, value_name = "SAT_VB")]
         fee_rate: Option<u64>,
         /// Sats carried by the pointer output the call's assets land on
+        #[arg(long, value_name = "SATS", default_value_t = 546)]
+        postage: u64,
+        /// Skip the confirmation prompt
+        #[arg(short, long)]
+        yes: bool,
+    },
+    /// Send an exact amount of one alkane: review, confirm, sign, broadcast
+    #[cfg(feature = "experimental-alkanes-execute")]
+    Send {
+        /// Alkane id (e.g. 32:0)
+        #[arg(value_name = "BLOCK:TX")]
+        id: String,
+        /// Amount in the asset's base units
+        #[arg(value_name = "AMOUNT")]
+        amount: u128,
+        /// Recipient address
+        #[arg(value_name = "ADDRESS")]
+        address: String,
+        /// Fee rate in sat/vB (default: estimated for configured target)
+        #[arg(long, value_name = "SATS_VB")]
+        fee_rate: Option<u64>,
+        /// Sats carried by the recipient's output and by the output the
+        /// remainder returns on
         #[arg(long, value_name = "SATS", default_value_t = 546)]
         postage: u64,
         /// Skip the confirmation prompt

@@ -7,7 +7,9 @@
 //!    ProtoPointer = 91, Refund = 93, then one Message = 81 pair per
 //!    15-byte chunk of the message, packed little-endian into a u128
 //!    (`byte_utils.rs::snap_to_15_bytes` — 15 bytes so the packed
-//!    varint never reaches a cenotaph-length 19 bytes).
+//!    varint never reaches a cenotaph-length 19 bytes), then, when there
+//!    are edicts, Body = 0 followed by every edict as
+//!    `[block delta, tx delta, amount, output]`, sorted by id.
 //! 2. The protostone list becomes `[protocol_tag, field_count, fields…]`
 //!    per stone, LEB128-encoded and re-packed 15 bytes per u128
 //!    (`crates/protorune/src/protostone.rs::encipher`).
@@ -20,16 +22,18 @@
 use sats_core::bitcoin::opcodes::all::{OP_PUSHNUM_13, OP_RETURN};
 use sats_core::bitcoin::script::{Builder, PushBytesBuf, ScriptBuf};
 
+use crate::id::AlkaneId;
 use crate::varint;
 
 /// The alkanes protocol tag (`src/message.rs::protocol_tag()` returns 1).
 pub const ALKANES_PROTOCOL_TAG: u128 = 1;
 
-const TAG_PROTOCOL: u128 = 16_383;
-const TAG_MESSAGE: u128 = 81;
-const TAG_PROTO_POINTER: u128 = 91;
-const TAG_REFUND: u128 = 93;
-const MESSAGE_CHUNK: usize = 15;
+pub(crate) const TAG_PROTOCOL: u128 = 16_383;
+pub(crate) const TAG_MESSAGE: u128 = 81;
+pub(crate) const TAG_PROTO_POINTER: u128 = 91;
+pub(crate) const TAG_REFUND: u128 = 93;
+pub(crate) const TAG_BODY: u128 = 0;
+pub(crate) const MESSAGE_CHUNK: usize = 15;
 const MAX_PUSH: usize = 520;
 
 /// Our own conservative ceiling on the whole scriptPubKey; the reference
@@ -45,6 +49,19 @@ pub struct Protostone {
     pub pointer: Option<u32>,
     /// Output index refunded on failure.
     pub refund_pointer: Option<u32>,
+    /// Asset transfers applied to the protostone's incoming balance;
+    /// whatever they don't move goes to `pointer`.
+    pub edicts: Vec<Edict>,
+}
+
+/// Move `amount` of `id` to output `output`. An amount of 0 moves the
+/// whole incoming balance of `id`; an amount above it moves what there
+/// is (`process_edict` in `crates/protorune/src/lib.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edict {
+    pub id: AlkaneId,
+    pub amount: u128,
+    pub output: u32,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -80,6 +97,24 @@ impl Protostone {
         for chunk in split_bytes(&self.message) {
             values.push(TAG_MESSAGE);
             values.push(chunk);
+        }
+        if !self.edicts.is_empty() {
+            // Body must come last: on decode it consumes every value after
+            // it. Ids are delta-encoded against the previous edict's id.
+            values.push(TAG_BODY);
+            let mut edicts = self.edicts.clone();
+            edicts.sort_by_key(|edict| edict.id);
+            let mut previous = AlkaneId { block: 0, tx: 0 };
+            for edict in edicts {
+                let block = edict.id.block - previous.block;
+                let tx = if block == 0 {
+                    edict.id.tx - previous.tx
+                } else {
+                    edict.id.tx
+                };
+                values.extend([block, tx, edict.amount, u128::from(edict.output)]);
+                previous = edict.id;
+            }
         }
         values
     }
@@ -135,6 +170,7 @@ mod tests {
             message: AlkaneCall { target, inputs }.encode_cellpack(),
             pointer,
             refund_pointer: refund,
+            edicts: Vec::new(),
         }
     }
 
@@ -208,6 +244,7 @@ mod tests {
             message: vec![0xff; 12_000],
             pointer: Some(1),
             refund_pointer: Some(1),
+            edicts: Vec::new(),
         };
         assert!(matches!(
             runestone_script(&[stone]),
@@ -223,6 +260,7 @@ mod tests {
             message: Vec::new(),
             pointer: None,
             refund_pointer: None,
+            edicts: Vec::new(),
         };
         let script = runestone_script(&[stone]).unwrap();
         assert_eq!(script.to_bytes(), hex::decode("6a5d03ff7f01").unwrap());

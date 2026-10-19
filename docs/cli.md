@@ -281,9 +281,20 @@ It needs Subfrost as the network's provider (`sats providers add subfrost`),
 and there is no fallback.
 
 ```sh
+sats alkanes balance              # alkanes held by this wallet's outputs
 sats alkanes inspect 2:1          # bytecode size and sha256 code hash
 sats alkanes simulate 2:1 77      # advisory call simulation
 ```
+
+`balance` asks the indexer's `protorunesbyoutpoint` view what each wallet
+output carries, after a sync. An output the indexer doesn't confirm
+knowing (an unconfirmed one, for example) is listed as not yet indexed.
+
+In these builds every send also protects assets: an output carrying
+alkanes, or one the indexer hasn't confirmed, is never used to fund a
+plain BTC send, because a transaction without a protostone burns the
+alkanes on its inputs. No flag bypasses this. If the indexer can't be
+reached, the send fails rather than falling back to the dust heuristic.
 
 `inspect` prints the code hash so you can compare it with a build you trust.
 `simulate` shows the recognized fields (status, gas, asset transfers) next to
@@ -291,14 +302,31 @@ the raw result. It is display only, never authorization. Both commands are
 read-only and check the endpoint's network first. `inspect` reads bytecode
 through the indexer's `getbytecode` view, checked against Subfrost's signet
 endpoint; `simulate`'s request format hasn't been verified against a live
-endpoint yet. Alkanes execution is never in released builds.
+endpoint yet, and neither has `balance`'s. Alkanes execution is never in
+released builds.
+
+With `experimental-alkanes-execute`, `sats alkanes send` transfers an exact
+amount of one alkane:
+
+```sh
+sats alkanes send 32:0 40000 tb1p...   # amount in the asset's base units
+```
+
+It spends indexed outputs holding the asset, sends the amount to the
+recipient's output (546 sats of postage, `--postage` to change it), and
+returns everything else those outputs carry to a wallet output. Before the
+review, sats decodes the built transaction and replays the indexer's
+transfer rules; it refuses unless the recipient gets exactly the amount and
+nothing else, and every other alkane stays in the wallet. The review shows
+the asset, amount, recipient, what stays, the postage, and the fee, and it
+precedes the password (on stderr with `--json`).
 
 ## JSON output
 
 `--json` is supported by `balance`, `receive`, `send` (all modes), `status`,
 `history`, `psbt inspect`, `psbt sign`, `tx broadcast`, every `agent`
-subcommand except `serve`, every `providers` subcommand, and both `alkanes`
-subcommands in builds that include them.
+subcommand except `serve`, every `providers` subcommand, and every `alkanes`
+subcommand in builds that include them.
 
 Field names are a compatibility surface. Branch on the documented `status`
 and `reason` fields, not on messages. `agent grant --json` includes `token`,

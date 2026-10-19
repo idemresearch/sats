@@ -94,6 +94,7 @@ advice for exactly that file.
 | `crates/sats-wallet/src/store.rs` | Paths, atomic files, permissions, finalized transactions, grants, requests, and the event log |
 | `crates/sats-wallet/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
 | `crates/sats-wallet/src/prepare.rs` | The shared preparation pipeline: validate, sync, exclude dust, estimate, build |
+| `crates/sats-wallet/src/assets.rs` | Experimental: which wallet outputs carry alkanes, and the send exclusion |
 | `crates/sats-wallet/src/request/` | The native request workflow: create, dismiss, reconcile, and the human-authorized executor |
 | `crates/sats-wallet/src/spend.rs` | The shared signing and broadcast tail: persist before broadcast, rebroadcast |
 | `crates/sats-cli/src/main.rs` | Composition and command dispatch only |
@@ -101,7 +102,7 @@ advice for exactly that file.
 | `crates/sats-cli/src/commands/` | Human CLI workflows and rendering |
 | `crates/sats-cli/src/mcp/` | MCP transport and schemas — reads the wallet and files requests |
 | `crates/sats-cli/tests/` | Native CLI and MCP integration tests |
-| `crates/sats-alkanes/src/` | Pure Alkanes protocol composition: ids, cellpacks, protostones, inspection, simulation views |
+| `crates/sats-alkanes/src/` | Pure Alkanes protocol composition: ids, cellpacks, protostones and their decoding, transfers and their check, inspection, balance and simulation views |
 | `crates/sats-playground/src/lib.rs` | Browser playground: wasm bindings over sats-core and the simulated chain |
 | `website/` | Project website, including the interactive playground terminal |
 
@@ -247,9 +248,11 @@ A workflow two surfaces could need belongs here, not in a command.
 - Planning must not continue on stale chain state after sync failure.
 - The local dust heuristic (546/330 sats) excludes candidates before coin
   selection; only a human's per-invocation `--allow-dust` bypasses it.
-- sats ships no third-party asset guard. Never add one that can add
-  candidates or authorize a spend, that is enabled by default, or that
-  doesn't fail closed.
+- Default builds ship no third-party asset guard. The experimental
+  Alkanes builds exclude outputs the indexer says carry alkanes, or can't
+  confirm knowing, from every send (`sats-wallet::assets`). Never add a
+  guard that can add candidates or authorize a spend, that ships in
+  default builds, or that doesn't fail closed.
 - Each network has exactly one chain source for sync, fees, and broadcast.
   A `--provider` override replaces only that source, and a saved credential
   never follows an override URL or a newly configured endpoint.

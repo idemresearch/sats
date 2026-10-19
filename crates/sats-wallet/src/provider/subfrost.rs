@@ -216,6 +216,29 @@ impl SubfrostClient {
         parse_bytecode_result(&value).map_err(|m| self.view_err(m))
     }
 
+    /// The alkanes one outpoint holds, as the indexer reports them. An
+    /// outpoint the indexer doesn't know comes back empty; the caller
+    /// checks the echoed outpoint.
+    #[cfg(feature = "experimental-alkanes")]
+    pub fn alkanes_outpoint(
+        &self,
+        outpoint: &OutPoint,
+    ) -> Result<sats_alkanes::view::OutpointAssets, ProviderError> {
+        let request = sats_alkanes::view::outpoint_request(outpoint);
+        let value: serde_json::Value = self
+            .call(
+                dialect::METASHREW_VIEW,
+                serde_json::json!([
+                    "protorunesbyoutpoint",
+                    format!("0x{}", hex::encode(request)),
+                    "latest"
+                ]),
+            )
+            .map_err(|m| self.view_err(m))?;
+        let bytes = parse_view_bytes(&value).map_err(|m| self.view_err(m))?;
+        sats_alkanes::view::parse_outpoint_response(&bytes).map_err(|m| self.view_err(m))
+    }
+
     /// Simulate a contract call; the result is returned verbatim.
     #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_simulate(
@@ -672,6 +695,20 @@ fn parse_jsonrpc<T: DeserializeOwned>(body: &str) -> Result<T, String> {
         .get("result")
         .ok_or_else(|| "json-rpc response has no result".to_string())?;
     serde_json::from_value(result.clone()).map_err(|_| "unexpected result shape".to_string())
+}
+
+/// A view's hex-string result as bytes; an empty result is empty bytes.
+#[cfg(feature = "experimental-alkanes")]
+fn parse_view_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
+    let hex_str = value
+        .as_str()
+        .ok_or_else(|| "expected a hex string result".to_string())?
+        .trim();
+    let stripped = hex_str
+        .strip_prefix("0x")
+        .or_else(|| hex_str.strip_prefix("0X"))
+        .unwrap_or(hex_str);
+    hex::decode(stripped).map_err(|_| "invalid view result hex".to_string())
 }
 
 /// A bytecode result is a hex string, with or without a 0x prefix. An

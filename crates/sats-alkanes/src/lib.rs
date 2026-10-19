@@ -17,9 +17,11 @@
 
 pub mod build;
 pub mod call;
+pub mod decode;
 pub mod delta;
 pub mod id;
 pub mod inspect;
 pub mod protostone;
+pub mod transfer;
 pub mod varint;
 pub mod view;

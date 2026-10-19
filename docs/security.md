@@ -350,6 +350,22 @@ come from the network's provider, which must be Subfrost. There is no
 Alkanes MCP tool or grant authority. The simulation request format has not
 been verified against a live endpoint.
 
+In experimental builds, sends also exclude outputs that carry alkanes. The
+indexer is asked about every unspent output; an output it doesn't confirm
+knowing (its answer must echo the outpoint and value) is excluded too, and
+an unreachable indexer stops planning. The check only excludes: it never
+adds a candidate or authorizes anything. The indexer is trusted for what
+it reports, so a lying indexer can hide an asset and cause its loss; it
+cannot redirect BTC.
+
+`sats alkanes send` (execution builds only) checks the transaction it
+built by decoding it, not by trusting the builder: it accepts only one
+alkanes protostone with no contract call, an explicit pointer, and edicts
+to real outputs, and only if the recipient receives exactly the requested
+amount of the requested asset and every other alkane lands on a wallet
+output. Ordinals runes are not modeled; any on the spent outputs would go
+to the recipient.
+
 ## Threat summary
 
 | Threat | Boundary | Remaining risk |
@@ -368,6 +384,7 @@ been verified against a live endpoint.
 | Broadcast failure | Transaction saved first; request `broadcast_pending` | Retry with `sats tx broadcast` |
 | Wrong network | Address and provider network validation | Misconfigured third-party responses |
 | Malicious Alkanes view (experimental builds) | Advisory display only | Can mislead inspection or simulation |
+| Alkane on a wallet output (experimental builds) | Indexer-backed exclusion, failing closed | A lying indexer can hide it |
 
 ## Operational guidance
 

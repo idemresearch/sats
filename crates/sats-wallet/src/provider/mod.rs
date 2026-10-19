@@ -508,6 +508,38 @@ impl Services {
         }
     }
 
+    /// Whether this network's provider serves Alkanes views at all.
+    #[cfg(feature = "experimental-alkanes")]
+    pub fn serves_alkanes(&self) -> bool {
+        !matches!(self.sync, ChainSource::Esplora(_))
+    }
+
+    /// The typed refusal when this network's provider serves no Alkanes
+    /// views.
+    #[cfg(feature = "experimental-alkanes")]
+    pub fn require_alkanes(&self) -> Result<(), ProviderError> {
+        if self.serves_alkanes() {
+            Ok(())
+        } else {
+            Err(self.no_alkanes())
+        }
+    }
+
+    /// The alkanes one wallet output holds. `value_sat` is the output's
+    /// value; the mock echoes it, a live indexer reports its own.
+    #[cfg(feature = "experimental-alkanes")]
+    pub fn alkanes_outpoint(
+        &self,
+        outpoint: &sats_core::bitcoin::OutPoint,
+        value_sat: u64,
+    ) -> Result<sats_alkanes::view::OutpointAssets, ProviderError> {
+        match &self.sync {
+            ChainSource::Subfrost(c) => c.alkanes_outpoint(outpoint),
+            ChainSource::Mock(m) => m.alkanes_outpoint(outpoint, value_sat),
+            ChainSource::Esplora(_) => Err(self.no_alkanes()),
+        }
+    }
+
     /// Simulate a contract call; the result is the endpoint's verbatim
     /// JSON. Advisory only — a simulation never authorizes anything.
     #[cfg(feature = "experimental-alkanes")]

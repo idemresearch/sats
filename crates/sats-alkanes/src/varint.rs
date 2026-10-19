@@ -28,6 +28,38 @@ pub fn encode_list(values: &[u128]) -> Vec<u8> {
     out
 }
 
+/// Decode one varint from the front of `buffer`: the value and the bytes
+/// it used. As the reference: at most 19 bytes, and the 19th may carry
+/// only the two bits a u128 has left.
+pub fn decode(buffer: &[u8]) -> Result<(u128, usize), &'static str> {
+    let mut n = 0u128;
+    for (i, &byte) in buffer.iter().enumerate() {
+        if i > 18 {
+            return Err("varint longer than 19 bytes");
+        }
+        let value = u128::from(byte & 0x7f);
+        if i == 18 && value & 0x7c != 0 {
+            return Err("varint overflows u128");
+        }
+        n |= value << (7 * i);
+        if byte & 0x80 == 0 {
+            return Ok((n, i + 1));
+        }
+    }
+    Err("unterminated varint")
+}
+
+/// Decode a buffer that is nothing but concatenated varints.
+pub fn decode_list(mut buffer: &[u8]) -> Result<Vec<u128>, &'static str> {
+    let mut values = Vec::new();
+    while !buffer.is_empty() {
+        let (value, used) = decode(buffer)?;
+        values.push(value);
+        buffer = &buffer[used..];
+    }
+    Ok(values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,6 +81,33 @@ mod tests {
         assert_eq!(bytes.len(), 19);
         assert!(bytes[..18].iter().all(|b| b & 0x80 != 0));
         assert_eq!(bytes[18] & 0x80, 0);
+    }
+
+    #[test]
+    fn decode_inverts_encode() {
+        for n in [
+            0,
+            1,
+            127,
+            128,
+            16_383,
+            16_384,
+            u128::from(u64::MAX),
+            u128::MAX,
+        ] {
+            assert_eq!(decode(&encode(n)), Ok((n, encode(n).len())));
+        }
+        let list = [2, 1, 77, u128::MAX, 0];
+        assert_eq!(decode_list(&encode_list(&list)), Ok(list.to_vec()));
+    }
+
+    #[test]
+    fn decode_refuses_malformed_input() {
+        assert!(decode(&[0x80]).is_err(), "unterminated");
+        assert!(decode(&[0xff; 20]).is_err(), "overlong");
+        let mut overflow = vec![0xff; 18];
+        overflow.push(0x7f);
+        assert!(decode(&overflow).is_err(), "overflow");
     }
 
     #[test]

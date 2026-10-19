@@ -140,6 +140,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         },
         #[cfg(feature = "experimental-alkanes")]
         Command::Alkanes { command } => match command {
+            cli::AlkanesCommand::Balance => {
+                commands::alkanes::balance(&store, network, &services(&config)?, json)
+            }
             cli::AlkanesCommand::Inspect { id } => {
                 commands::alkanes::inspect(&services(&config)?, &id, json)
             }
@@ -162,6 +165,28 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 fee_rate,
                 postage,
                 yes,
+                json,
+            ),
+            #[cfg(feature = "experimental-alkanes-execute")]
+            cli::AlkanesCommand::Send {
+                id,
+                amount,
+                address,
+                fee_rate,
+                postage,
+                yes,
+            } => commands::alkanes::send(
+                &store,
+                network,
+                &services(&config)?,
+                &commands::alkanes::SendArgs {
+                    id: &id,
+                    amount,
+                    address: &address,
+                    fee_rate,
+                    postage,
+                    yes,
+                },
                 json,
             ),
         },

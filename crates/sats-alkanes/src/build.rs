@@ -56,6 +56,7 @@ pub fn build_execute_plan(
         message: call.encode_cellpack(),
         pointer: Some(POINTER_VOUT),
         refund_pointer: Some(POINTER_VOUT),
+        edicts: Vec::new(),
     };
     let runestone = runestone_script(&[stone])?;
 

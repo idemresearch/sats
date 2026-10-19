@@ -10,6 +10,10 @@
 //!   key is a typed view error (experimental Alkanes builds)
 //! - `alkanes-simulate.json`  returned verbatim for any simulate call;
 //!   missing file is a typed view error (experimental Alkanes builds)
+//! - `alkanes-outpoints.json`  `{"TXID:VOUT": {"BLOCK:TX": "amount"}}`;
+//!   an outpoint not listed holds no alkanes, one listed as `null` is
+//!   unknown to the indexer, and a missing file is a typed view error
+//!   (experimental Alkanes builds)
 //! - `fees-via`, `broadcast-via`  an Esplora URL that serves that one role
 //!   instead, so tests reach the real HTTP transport behind a
 //!   deterministic sync
@@ -131,6 +135,43 @@ impl MockProvider {
             .ok_or_else(|| self.view_err(format!("no bytecode for {key}")))?;
         hex::decode(hex_str.strip_prefix("0x").unwrap_or(hex_str))
             .map_err(|e| self.view_err(e.to_string()))
+    }
+
+    /// Echoes the outpoint the way a live indexer does for one it knows;
+    /// the caller supplies the value it expects to see echoed.
+    #[cfg(feature = "experimental-alkanes")]
+    pub fn alkanes_outpoint(
+        &self,
+        outpoint: &sats_core::bitcoin::OutPoint,
+        value_sat: u64,
+    ) -> Result<sats_alkanes::view::OutpointAssets, ProviderError> {
+        use sats_alkanes::view::{AssetBalance, OutpointAssets};
+        let text = std::fs::read_to_string(self.dir.join("alkanes-outpoints.json"))
+            .map_err(|e| self.view_err(e.to_string()))?;
+        let map: HashMap<String, Option<HashMap<String, String>>> =
+            serde_json::from_str(&text).map_err(|e| self.view_err(e.to_string()))?;
+        let balances = match map.get(&outpoint.to_string()) {
+            Some(None) => return Ok(OutpointAssets::default()),
+            Some(Some(entries)) => entries.clone(),
+            None => HashMap::new(),
+        };
+        let mut balances = balances
+            .into_iter()
+            .map(|(id, amount)| {
+                Ok(AssetBalance {
+                    id: id.parse().map_err(|e: String| self.view_err(e))?,
+                    amount: amount.parse().map_err(|_| self.view_err(amount.clone()))?,
+                    name: String::new(),
+                    symbol: String::new(),
+                })
+            })
+            .collect::<Result<Vec<_>, ProviderError>>()?;
+        balances.sort_by_key(|b| b.id);
+        Ok(OutpointAssets {
+            outpoint: Some(*outpoint),
+            value_sat: Some(value_sat),
+            balances,
+        })
     }
 
     #[cfg(feature = "experimental-alkanes")]

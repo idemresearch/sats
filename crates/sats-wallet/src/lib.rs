@@ -11,6 +11,8 @@
 //! through [`provider::Progress`], and the signer arrives as a factory
 //! from a surface that has already obtained the human's authorization.
 
+#[cfg(feature = "experimental-alkanes")]
+pub mod assets;
 pub mod config;
 pub mod prepare;
 pub mod provider;
