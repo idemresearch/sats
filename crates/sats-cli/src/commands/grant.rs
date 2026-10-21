@@ -213,7 +213,13 @@ fn mcp_launch_command(store: &Store, network: &str, agent: &str) -> Result<Strin
             args.push(format!("{name}={}", absolute_shell_path(path)?));
         }
     }
-    args.extend(["sats".into(), "--network".into(), network.into()]);
+    args.extend([
+        absolute_shell_path(
+            &std::env::current_exe().context("cannot locate the running sats executable")?,
+        )?,
+        "--network".into(),
+        network.into(),
+    ]);
     if let Some(dir) = pinned_dir {
         args.extend(["--dir".into(), absolute_shell_path(dir)?]);
     }

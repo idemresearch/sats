@@ -108,11 +108,25 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<ProvidersCommand>,
     },
-    /// Alkanes contract tools (experimental, signet-first)
-    #[cfg(feature = "experimental-alkanes")]
+    /// Show the active network or change the CLI's default
+    Network {
+        #[command(subcommand)]
+        command: Option<NetworkCommand>,
+    },
+    /// Alkanes balances, contract tools, and human-authorized transfers
     Alkanes {
         #[command(subcommand)]
         command: AlkanesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum NetworkCommand {
+    /// Set the default network; existing MCP connections and grants stay pinned
+    Use {
+        /// Network: signet, testnet4, or regtest (mainnet is refused)
+        #[arg(value_name = "NET", value_parser = sats_wallet::config::parse_network)]
+        target: sats_core::bitcoin::Network,
     },
 }
 
@@ -141,7 +155,7 @@ pub struct AddArgs {
     /// Provider to add
     #[arg(value_enum, value_name = "PROVIDER")]
     pub kind: ProviderArg,
-    /// Endpoint URL (default: Subfrost's signet endpoint;
+    /// Endpoint URL (default: Subfrost's endpoint for the selected network;
     /// required for esplora)
     #[arg(long, value_name = "URL")]
     pub url: Option<String>,
@@ -165,9 +179,19 @@ pub enum ChainArg {
     Esplora,
 }
 
-#[cfg(feature = "experimental-alkanes")]
+#[derive(Subcommand)]
+pub enum FrbtcCommand {
+    /// Inspect frBTC bytecode and its current BTC wrapping destination
+    Info,
+}
+
 #[derive(Subcommand)]
 pub enum AlkanesCommand {
+    /// frBTC contract information
+    Frbtc {
+        #[command(subcommand)]
+        command: FrbtcCommand,
+    },
     /// Show the alkanes this wallet holds, as the indexer reports them
     Balance,
     /// Fetch a contract's bytecode and show its code hash
@@ -186,7 +210,6 @@ pub enum AlkanesCommand {
         inputs: Vec<u128>,
     },
     /// Execute a contract call: simulate, confirm, sign, broadcast
-    #[cfg(feature = "experimental-alkanes-execute")]
     Execute {
         /// Alkane id (e.g. 2:1)
         #[arg(value_name = "BLOCK:TX")]
@@ -205,7 +228,6 @@ pub enum AlkanesCommand {
         yes: bool,
     },
     /// Send an exact amount of one alkane: review, confirm, sign, broadcast
-    #[cfg(feature = "experimental-alkanes-execute")]
     Send {
         /// Alkane id (e.g. 32:0)
         #[arg(value_name = "BLOCK:TX")]

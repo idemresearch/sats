@@ -31,6 +31,8 @@ exact options in your installed version.
 | `sats providers add <subfrost\|esplora>` | Add a provider, asking for its key, and use it |
 | `sats providers use <mempool\|subfrost\|esplora>` | Switch the network's provider |
 | `sats providers remove <subfrost\|esplora>` | Remove a provider and its stored key |
+| `sats network` | Show the active network and saved default |
+| `sats network use <signet\|testnet4\|regtest>` | Set the CLI's default network |
 
 ## Global options
 
@@ -62,6 +64,26 @@ serves every network: on a machine that already has a seed, `init` with
 another `--network` adds that network's wallet. If a wallet already exists,
 use `sats balance` or `sats receive`. For a separate test wallet, point
 `SATS_DIR` at an empty directory.
+
+### Switching networks
+
+```sh
+sats network                   # signet (default)
+sats network use testnet4       # save testnet4 as this configuration's default
+sats init                      # initialize its wallet if needed
+sats --network signet balance  # use signet for just this command
+```
+
+Switching updates only the saved default in `config.toml`. Each network keeps
+its wallet, provider settings, grants, requests, and budgets. It needs no
+password or provider connection and does not initialize a wallet. Existing
+MCP connections stay on their pinned network, including after restart; an
+agent needs a separate grant and token to use another network.
+
+`sats network` respects a one-command `--network` override and shows the
+saved default alongside it. `sats network use <NET>` saves its explicit
+target even when `--network` is also present. Both support `--json` with
+`network` (active network) and `default_network` (saved default).
 
 ### Restoring
 
@@ -274,24 +296,30 @@ spending budget again.
 
 ## Alkanes
 
-`sats alkanes` is an experimental, signet-first client for Alkanes contracts.
-Default builds don't include it. Build it with
-`cargo install --locked --path crates/sats-cli --features experimental-alkanes`.
+`sats alkanes` is included in standard builds for the supported test networks.
 It needs Subfrost as the network's provider (`sats providers add subfrost`),
-and there is no fallback.
+and there is no fallback. Generic execution and token transfers require
+human operation. MCP can propose the fixed BTC-to-frBTC wrap under the
+ordinary BTC grant, without a separate protocol permission; `sats agent approve`
+is its only execution path. See [wrapping requests](mcp.md#request_wrap_frbtc). The corresponding
+[MCP reads](mcp.md#alkanes-reads) expose balance, inspection, and advisory
+simulation.
 
 ```sh
+sats alkanes frbtc info            # query frBTC code hash and BTC signer (no spend)
 sats alkanes balance              # alkanes held by this wallet's outputs
 sats alkanes inspect 2:1          # bytecode size and sha256 code hash
-sats alkanes simulate 2:1 77      # advisory call simulation
 ```
+
+`sats alkanes simulate <ID> <INPUTS>...` takes calldata words, opcode first.
+Use the contract's verified method and arguments.
 
 `balance` asks the indexer's `protorunesbyoutpoint` view what each wallet
 output carries, after a sync. An output the indexer doesn't confirm
 knowing (an unconfirmed one, for example) is listed as not yet indexed.
 
-In these builds every send also protects assets: an output carrying
-alkanes, or one the indexer hasn't confirmed, is never used to fund a
+When the selected provider serves Alkanes, every send also protects assets:
+an output carrying alkanes, or one the indexer hasn't confirmed, is never used to fund a
 plain BTC send, because a transaction without a protostone burns the
 alkanes on its inputs. No flag bypasses this. If the indexer can't be
 reached, the send fails rather than falling back to the dust heuristic.
@@ -302,11 +330,29 @@ the raw result. It is display only, never authorization. Both commands are
 read-only and check the endpoint's network first. `inspect` reads bytecode
 through the indexer's `getbytecode` view, checked against Subfrost's signet
 endpoint; `simulate`'s request format hasn't been verified against a live
-endpoint yet, and neither has `balance`'s. Alkanes execution is never in
-released builds.
+endpoint yet, and neither has `balance`'s.
 
-With `experimental-alkanes-execute`, `sats alkanes send` transfers an exact
-amount of one alkane:
+`sats alkanes execute <ID> <INPUTS>...` executes a human-authorized call.
+Execution accepts only the currently recognized simulation result: a numeric top-level `status` of `0`, with no
+reported error or contradictory status in the known result containers.
+Failed, missing, malformed, and unknown results stop before preparation or
+password entry. The read-only `simulate` command still displays them.
+Status zero is a provider claim, not a guarantee of contract effects; the
+simulation wire format remains unverified against a live endpoint.
+
+Before signing a call, sats decodes the built transaction and checks its
+target, calldata, pointer/refund, postage, and wallet-owned outputs. It derives
+the fee from the wallet's own input values. The review shows the wallet,
+network, call, advisory asset predictions, return address, postage, fee, and
+Bitcoin leaving the wallet. Postage returns to the wallet; only the fee
+leaves it. The existing JSON receipt's `total_sat` remains the funding amount
+(postage plus fee).
+
+Both `execute` and `send` always render review before confirmation and
+password entry, including with `--yes`. With `--json`, review, confirmation,
+and cancellation go to stderr; stdout is reserved for the final JSON receipt.
+
+`sats alkanes send` transfers an exact amount of one alkane:
 
 ```sh
 sats alkanes send 32:0 40000 tb1p...   # amount in the asset's base units
@@ -324,9 +370,9 @@ precedes the password (on stderr with `--json`).
 ## JSON output
 
 `--json` is supported by `balance`, `receive`, `send` (all modes), `status`,
-`history`, `psbt inspect`, `psbt sign`, `tx broadcast`, every `agent`
-subcommand except `serve`, every `providers` subcommand, and every `alkanes`
-subcommand in builds that include them.
+`history`, `psbt inspect`, `psbt sign`, `tx broadcast`, `network`, `network use`,
+every `agent` subcommand except `serve`, every `providers` subcommand, and
+every `alkanes` subcommand.
 
 Field names are a compatibility surface. Branch on the documented `status`
 and `reason` fields, not on messages. `agent grant --json` includes `token`,

@@ -51,6 +51,8 @@ pub fn foreign_address(network: Network) -> String {
 pub fn write_mock_provider(dir: &TempDir) -> std::path::PathBuf {
     let mockdata = dir.path().join("mockdata");
     std::fs::create_dir_all(&mockdata).unwrap();
+    // Ordinary fixtures model a healthy indexer with no asset-bearing outputs.
+    std::fs::write(mockdata.join("alkanes-outpoints.json"), "{}").unwrap();
     // The mock is the network's one provider, Alkanes views included.
     let config = format!(
         "network = \"signet\"\n\n[signet]\nchain = \"esplora\"\n\n[signet.esplora]\nurl = \"file://{0}\"\n",

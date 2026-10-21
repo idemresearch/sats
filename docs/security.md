@@ -126,10 +126,15 @@ expiries short, and revoke grants you don't need.
 
 ### Grant format
 
-Grants carry `format_version: 1`. sats is pre-release, so earlier development
-shapes are not migrated: they fail with an error that says to revoke and grant
-again. A grant claiming a newer version is refused, because it may carry
-restrictions this build can't see.
+Grants retain the standard BTC `format_version: 1` shape. Wrapping uses the
+same limits and requires no protocol-specific permission. The obsolete
+pre-release format-2 grants are refused with re-issue guidance; their
+restrictions are never silently discarded. BTC send requests retain
+version 1; frBTC wrapping requests use version 3, binding their recorded
+contract facts and operation so an older binary cannot reinterpret them as
+plain payments. Stored records are never silently migrated. Unsupported
+development shapes fail with recreate guidance, and newer grants are
+refused because they may carry restrictions this build cannot see.
 
 One older shape gets special handling. Pre-daemon development builds stored
 the seed re-sealed inside the grant file, so anything that could read the file
@@ -327,7 +332,8 @@ Provider credentials live in `config.toml`, which sats writes owner-only.
 `sats providers add` reads a key from a hidden prompt or stdin, never from
 the command line, and checks the endpoint before saving it. A saved Esplora
 token or Subfrost key never follows a new URL: a changed endpoint needs the
-credential typed again, and a `--provider` override never receives one. Configuring providers is a human CLI task: no MCP
+credential typed again, as does the first Subfrost setup on another network,
+even with a built-in URL. A `--provider` override never receives one. Configuring providers is a human CLI task: no MCP
 tool configures them, and the MCP server only uses what is configured.
 
 ## PSBTs
@@ -342,15 +348,39 @@ reported as partially signed and written back as an artifact.
 
 ## Alkanes
 
-Default builds include no Alkanes commands. Inspection and advisory
-simulation are compiled only with the non-default `experimental-alkanes`
-feature, and execution only with the development-only
-`experimental-alkanes-execute` feature. Views
-come from the network's provider, which must be Subfrost. There is no
-Alkanes MCP tool or grant authority. The simulation request format has not
-been verified against a live endpoint.
+Standard builds include Alkanes inspection, advisory simulation, balance,
+and human-authorized execution and transfers. Views come from the network's
+provider, which must be Subfrost. MCP exposes Alkanes balance, inspection,
+and advisory simulation, authenticated against the pinned network's grant
+on every call. These reads never prepare, execute, sign, or broadcast.
+The separate fixed `request_wrap_frbtc` capability files a request under
+the ordinary BTC grant for human approval; generic
+contract execution and token transfer proposals remain unavailable.
+Provider text is untrusted data, and asset quantities use decimal strings
+to preserve u128 precision. The generic simulation request format has not been
+verified against a live endpoint. Wrapping uses a separate exact-transaction
+protobuf view checked against testnet4.
 
-In experimental builds, sends also exclude outputs that carry alkanes. The
+Generic calls require a recognized numeric status-zero
+simulation response without reported errors or contradictory statuses.
+Unknown responses remain displayable by the read-only command but cannot
+reach preparation or signing. A successful response is still only an
+advisory provider claim. The transaction checker independently decodes the
+call, enforces wallet-owned pointer/refund and change outputs, rejects
+edicts and unexpected outputs, and derives fees from wallet input values.
+It does not prove future contract effects.
+
+Human Alkanes execution is staged in `sats-wallet::alkanes::human`. The
+surface shows its immutable review, on stderr in JSON mode, before asking
+for confirmation or a password; `--yes` skips only confirmation. Commit
+consumes the operation and invokes a signer factory once, then drops the
+signer, persists the finalized transaction, and attempts broadcast. An
+error after signer invocation never triggers an automatic retry. A failed
+broadcast retains the signed record for rebroadcast. This path carries no
+agent grant authority; agent requests still execute only through the
+human-authorized request executor.
+
+When the provider serves Alkanes, sends exclude outputs that carry alkanes. The
 indexer is asked about every unspent output; an output it doesn't confirm
 knowing (its answer must echo the outpoint and value) is excluded too, and
 an unreachable indexer stops planning. The check only excludes: it never
@@ -358,8 +388,8 @@ adds a candidate or authorizes anything. The indexer is trusted for what
 it reports, so a lying indexer can hide an asset and cause its loss; it
 cannot redirect BTC.
 
-`sats alkanes send` (execution builds only) checks the transaction it
-built by decoding it, not by trusting the builder: it accepts only one
+`sats alkanes send` checks the transaction it built by decoding it, not by
+trusting the builder: it accepts only one
 alkanes protostone with no contract call, an explicit pointer, and edicts
 to real outputs, and only if the recipient receives exactly the requested
 amount of the requested asset and every other alkane lands on a wallet
@@ -383,8 +413,8 @@ to the recipient.
 | Inscription on a non-postage value | Not detected | Can be spent by accident |
 | Broadcast failure | Transaction saved first; request `broadcast_pending` | Retry with `sats tx broadcast` |
 | Wrong network | Address and provider network validation | Misconfigured third-party responses |
-| Malicious Alkanes view (experimental builds) | Advisory display only | Can mislead inspection or simulation |
-| Alkane on a wallet output (experimental builds) | Indexer-backed exclusion, failing closed | A lying indexer can hide it |
+| Malicious Alkanes view | Advisory display only | Can mislead inspection or simulation |
+| Alkane on a wallet output (Alkanes provider) | Indexer-backed exclusion, failing closed | A lying indexer can hide it |
 
 ## Operational guidance
 
@@ -401,3 +431,39 @@ to the recipient.
 - Treat providers and their responses as part of your trust model.
 - Never paste a real mnemonic into issues, logs, screenshots, tests, or agent
   conversations.
+
+### Agent wrapping boundary
+
+`request_wrap_frbtc` reads public contract facts and files a proposal only.
+The request records the frBTC `32:0` code hash and BTC signer address, and
+its digest commits to those facts, the fixed operation, network, agent, and
+gross BTC amount. The agent chooses neither calldata nor destination.
+There is no protocol-specific grant flag. The single `evaluate_send`
+ladder applies the normal BTC mode, expiry, recipient, amount, fee, and
+budget boundaries at filing and execution; the recipient is the actual
+BTC signer address. The request's recipient must agree with its recorded
+signer. Public discovery authenticates before I/O and creation rechecks the
+grant afterwards. An old or revoked token cannot file under a replacement
+grant.
+
+Contract facts are bound to each request rather than the grant. Human
+approval reviews those facts and rechecks them against the provider;
+changes stop the request before signing. Repeat filings observe the
+original receipt without provider I/O and never replace its recorded facts.
+
+Preparation and signing run only in the existing human approval process.
+The exact unsigned transaction pays the pinned signer at output 0, places
+wallet-owned postage at output 1, and carries the fixed protostone at
+output 2; every remaining output belongs to the wallet. Input values come
+from the wallet, not caller PSBT hints. The executor excludes asset-bearing,
+unknown, and dust outputs and refuses failed sync or unrecognized/failed
+simulation. Human review includes the wallet receive address, contract hash,
+BTC payment, postage, actual fee, total, and advisory net frBTC prediction.
+The contract's code hash and signer are rechecked before budget reservation.
+Provider claims and simulations do not prove future contract effects.
+
+Wrapping uses the same reservation ledger, persisted `signing` boundary,
+signed-transaction persistence, unresolved recovery, and rebroadcast-only
+handling as ordinary agent payments. Budget counts gross BTC paid plus miner
+fees, without treating predicted frBTC as a refund. A broadcast receipt does
+not prove minting: confirmation and indexing must be observed separately.

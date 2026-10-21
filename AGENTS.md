@@ -94,7 +94,8 @@ advice for exactly that file.
 | `crates/sats-wallet/src/store.rs` | Paths, atomic files, permissions, finalized transactions, grants, requests, and the event log |
 | `crates/sats-wallet/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
 | `crates/sats-wallet/src/prepare.rs` | The shared preparation pipeline: validate, sync, exclude dust, estimate, build |
-| `crates/sats-wallet/src/assets.rs` | Experimental: which wallet outputs carry alkanes, and the send exclusion |
+| `crates/sats-wallet/src/assets.rs` | Which wallet outputs carry alkanes, and the send exclusion |
+| `crates/sats-wallet/src/alkanes/` | Views and human-authorized staging, review, signing, persistence, and broadcast workflows |
 | `crates/sats-wallet/src/request/` | The native request workflow: create, dismiss, reconcile, and the human-authorized executor |
 | `crates/sats-wallet/src/spend.rs` | The shared signing and broadcast tail: persist before broadcast, rebroadcast |
 | `crates/sats-cli/src/main.rs` | Composition and command dispatch only |
@@ -248,11 +249,10 @@ A workflow two surfaces could need belongs here, not in a command.
 - Planning must not continue on stale chain state after sync failure.
 - The local dust heuristic (546/330 sats) excludes candidates before coin
   selection; only a human's per-invocation `--allow-dust` bypasses it.
-- Default builds ship no third-party asset guard. The experimental
-  Alkanes builds exclude outputs the indexer says carry alkanes, or can't
-  confirm knowing, from every send (`sats-wallet::assets`). Never add a
-  guard that can add candidates or authorize a spend, that ships in
-  default builds, or that doesn't fail closed.
+- When the selected provider serves Alkanes, every send excludes outputs
+  the indexer says carry alkanes, or can't confirm knowing
+  (`sats-wallet::assets`). Other providers retain the local dust heuristic.
+  Never add a guard that can add candidates, authorize a spend, or fail open.
 - Each network has exactly one chain source for sync, fees, and broadcast.
   A `--provider` override replaces only that source, and a saved credential
   never follows an override URL or a newly configured endpoint.
@@ -328,7 +328,7 @@ diverge.
 The pre-release compatibility policy applies: serialized shapes may
 change freely, and unsupported development state fails with a clear
 error naming the recreate step. Grant records carry
-`GRANT_FORMAT_VERSION` (currently 1, the v0.0.1 schema);
+`GRANT_FORMAT_VERSION` (currently 1, the standard BTC grant shape);
 records claiming a newer version are refused because they may carry
 restrictions this build cannot see. Request and event records carry
 their own versions and are read tolerantly for the same forward-safety
@@ -365,8 +365,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
 cargo build --release --locked
-cargo clippy -p sats-cli --all-targets --features experimental-alkanes-execute -- -D warnings
-cargo test -p sats-cli --locked --features experimental-alkanes-execute --bins --test alkanes
+cargo clippy -p sats-cli --all-targets --no-default-features -- -D warnings
+cargo test -p sats-cli --locked --no-default-features --bins --test alkanes
 cargo check -p sats-core --target wasm32-unknown-unknown
 cargo check -p sats-playground --target wasm32-unknown-unknown
 ```

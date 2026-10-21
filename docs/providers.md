@@ -41,8 +41,20 @@ or `override`).
 | Provider | Endpoint |
 |---|---|
 | `mempool` | `https://mempool.space/signet/api` or `/testnet4/api` |
-| `subfrost` | Subfrost's signet endpoint, or a `--url` you give |
+| `subfrost` | Subfrost's endpoint for the selected network, or a saved custom URL |
 | `esplora` | The server you add. Regtest defaults to `http://localhost:3002`. |
+
+Subfrost has built-in endpoints for every supported network:
+
+| Network | Subfrost endpoint |
+|---|---|
+| signet | `https://signet.subfrost.io/v4/jsonrpc` |
+| testnet4 | `https://testnet4.subfrost.io/v4/jsonrpc` |
+| regtest | `https://regtest.subfrost.io/v4/jsonrpc` |
+
+`sats --network testnet4 providers add subfrost` uses the testnet4 endpoint
+without `--url`. A previously saved custom endpoint takes precedence over
+the built-in default. Pass `--url` to select a different endpoint.
 
 `sats providers add` makes the added provider the network's provider, and
 `sats providers use` switches between them. Both check the endpoint's genesis
@@ -59,7 +71,7 @@ include these outputs for one send. Agents never can.
 
 ## Alkanes
 
-`sats alkanes` is experimental and not in default builds (see
+`sats alkanes` is included in standard builds (see
 [CLI](cli.md#alkanes)). It uses the network's provider, which must be
 Subfrost. Views are read-only and never authorize anything.
 `sats alkanes` encodes only calls it builds itself (in the `sats-alkanes`
@@ -70,17 +82,20 @@ crate) and displays view results without trusting them.
 `sats providers add subfrost` asks for your API key with hidden input. Without
 a terminal it reads one line from stdin, so
 `printf '%s\n' "$KEY" | sats providers add subfrost` works in scripts. A
-credential is never a command-line argument. One saved key serves every
-network. Pressing enter keeps it only while the endpoint stays the same: a
-new `--url`, including another network's, needs the key typed again, so the
-saved key never goes to an endpoint you haven't given it to.
+credential is never a command-line argument. One saved key serves configured
+networks. The first setup on each network needs the key typed, including
+when using a built-in endpoint. Pressing enter keeps it only for an already
+configured endpoint; a new `--url` needs the key typed again. `providers use
+subfrost` requires setup on that network first, so the saved key never goes
+to an endpoint you haven't given it to.
 
 `sats providers add esplora --url URL` asks for an optional bearer token;
 press enter for none. A saved token is kept on enter only for the same URL:
 it never follows a new one.
 
-`--url URL` sets the endpoint. It is required for Esplora, and for Subfrost
-on testnet4 and regtest.
+`--url URL` sets the endpoint. It is required for Esplora and optional for
+Subfrost on signet, testnet4, and regtest. Use it for local regtest services
+instead of Subfrost's hosted regtest chain.
 
 Subfrost's JSON-RPC methods map onto sats's sync, fee, broadcast, and
 Alkanes view operations, and broadcast uses `btc_sendrawtransaction`. On a fresh wallet
@@ -120,8 +135,8 @@ bearer = "replace-with-token"       # optional
 subfrost_url = "http://localhost:18888/v4/jsonrpc"
 ```
 
-`subfrost_url` replaces the built-in Subfrost endpoint for one network. It is
-how Subfrost is set up where it has no public endpoint.
+`subfrost_url` records the Subfrost endpoint selected for one network.
+`providers add subfrost` saves either the default or the custom URL there.
 
 sats writes `config.toml` owner-only (`0600`, in an owner-only directory). If
 you edit it yourself, keep its permissions restrictive. Every change made

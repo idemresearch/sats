@@ -16,16 +16,11 @@ default = ["mcp"]
 # The `sats agent serve` MCP server (rmcp + tokio). Disable for a smaller
 # human-only binary: cargo install --no-default-features
 mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
-# Experimental Alkanes contract views (`sats alkanes inspect|simulate`),
-# served by Subfrost. Excluded from default binaries.
-experimental-alkanes = ["dep:sats-alkanes", "sats-wallet/experimental-alkanes"]
-# Development-only execution path; never in released binaries.
-experimental-alkanes-execute = ["experimental-alkanes"]
 
 [dependencies]
 sats-core = { workspace = true }
 sats-wallet = { workspace = true }
-sats-alkanes = { workspace = true, optional = true }
+sats-alkanes = { workspace = true }
 bdk_wallet = { workspace = true, features = ["rusqlite"] }
 clap = { workspace = true }
 rmcp = { workspace = true, optional = true }

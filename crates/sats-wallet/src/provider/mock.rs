@@ -7,13 +7,15 @@
 //! - `fees.json`       `{"2": 3.0}` conf-target → sat/vB map (default: flat 2)
 //! - `broadcasts.log`  broadcast txids are appended here
 //! - `alkanes-bytecode.json`  `{"BLOCK:TX": "<hex>"}`; a missing file or
-//!   key is a typed view error (experimental Alkanes builds)
+//!   key is a typed view error
 //! - `alkanes-simulate.json`  returned verbatim for any simulate call;
-//!   missing file is a typed view error (experimental Alkanes builds)
+//!   missing file is a typed view error
+//! - `alkanes-signer.hex`, `alkanes-wrap.hex`  protobuf SimulateResponse hex
+//!   for signer discovery and exact-transaction wrapping simulation
 //! - `alkanes-outpoints.json`  `{"TXID:VOUT": {"BLOCK:TX": "amount"}}`;
 //!   an outpoint not listed holds no alkanes, one listed as `null` is
 //!   unknown to the indexer, and a missing file is a typed view error
-//!   (experimental Alkanes builds)
+//!
 //! - `fees-via`, `broadcast-via`  an Esplora URL that serves that one role
 //!   instead, so tests reach the real HTTP transport behind a
 //!   deterministic sync
@@ -32,6 +34,16 @@ pub struct MockProvider {
 }
 
 impl MockProvider {
+    pub fn alkanes_context(&self, signer_query: bool) -> Result<Vec<u8>, ProviderError> {
+        let name = if signer_query {
+            "alkanes-signer.hex"
+        } else {
+            "alkanes-wrap.hex"
+        };
+        let text = std::fs::read_to_string(self.dir.join(name))
+            .map_err(|e| self.view_err(e.to_string()))?;
+        hex::decode(text.trim()).map_err(|_| self.view_err("invalid simulation fixture".into()))
+    }
     pub fn new(url: &str) -> Result<Self, String> {
         let path = url
             .strip_prefix("file://")
@@ -115,7 +127,6 @@ impl MockProvider {
         Ok(txid)
     }
 
-    #[cfg(feature = "experimental-alkanes")]
     fn view_err(&self, message: String) -> ProviderError {
         ProviderError::View {
             url: self.display.clone(),
@@ -123,7 +134,6 @@ impl MockProvider {
         }
     }
 
-    #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_bytecode(&self, block: u128, tx: u128) -> Result<Vec<u8>, ProviderError> {
         let text = std::fs::read_to_string(self.dir.join("alkanes-bytecode.json"))
             .map_err(|e| self.view_err(e.to_string()))?;
@@ -139,7 +149,6 @@ impl MockProvider {
 
     /// Echoes the outpoint the way a live indexer does for one it knows;
     /// the caller supplies the value it expects to see echoed.
-    #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_outpoint(
         &self,
         outpoint: &sats_core::bitcoin::OutPoint,
@@ -174,7 +183,6 @@ impl MockProvider {
         })
     }
 
-    #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_simulate(&self) -> Result<serde_json::Value, ProviderError> {
         let text = std::fs::read_to_string(self.dir.join("alkanes-simulate.json"))
             .map_err(|e| self.view_err(e.to_string()))?;

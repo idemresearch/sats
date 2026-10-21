@@ -57,7 +57,7 @@ pub fn run(
     // The human reviews the real transaction before authorizing it, in
     // every mode. With --json, stdout stays a machine-readable result and
     // the review goes to stderr, the human's channel.
-    let rows = vec![
+    let mut rows = vec![
         (
             "Wallet",
             std::fs::canonicalize(store.wallet_db_path(network_name(network)))?
@@ -93,6 +93,20 @@ pub fn run(
             ),
         ),
     ];
+    if let Some(wrap) = staged.wrap_review() {
+        rows.push(("Operation", "Wrap BTC to frBTC (32:0, opcode 77)".into()));
+        rows.push(("Contract code hash", wrap.code_hash.clone()));
+        rows.push(("frBTC receive", wrap.receive_address.clone()));
+        rows.push((
+            "Predicted frBTC",
+            format!("{} base units (advisory)", wrap.predicted_frbtc),
+        ));
+        rows.push((
+            "Postage",
+            format!("{} sat retained by this wallet", wrap.postage_sat),
+        ));
+        rows.push(("Excluded outputs", wrap.excluded_utxos.to_string()));
+    }
     if json {
         ui::kv_rows_stderr(&rows);
         if confirm && !ui::confirm_stderr("Approve and sign?", selected.is_none())? {

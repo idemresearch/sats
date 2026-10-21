@@ -76,7 +76,6 @@ pub fn build(
     }
     // Outputs carrying alkanes, or not yet indexed, where the provider
     // serves Alkanes. No flag bypasses this: spending one burns its assets.
-    #[cfg(feature = "experimental-alkanes")]
     if let Some(assets) = crate::assets::excluded_for_send(ctx, services)? {
         if !assets.is_empty() {
             log::warn!(

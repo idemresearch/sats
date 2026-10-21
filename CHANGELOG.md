@@ -5,6 +5,31 @@ Notable changes to sats, newest first. Versions follow
 
 ## Unreleased
 
+### Alkanes
+
+- MCP `request_wrap_frbtc` files a fixed BTC-to-frBTC proposal under the
+  ordinary BTC grant, with no protocol-specific flag. The request records
+  the contract code hash and BTC signer; approval verifies and simulates
+  the transaction, shows its review before authorization, and uses the
+  shared request ledger and signing boundary. The agent supplies no
+  destination or calldata and only observes after filing.
+- `sats alkanes frbtc info` reads the frBTC contract hash and signer.
+  Grants retain the standard version-1 BTC shape; frBTC requests use
+  version 3 so older binaries refuse them. Unsupported pre-release state
+  is refused without silent migration.
+- Printed MCP setup commands pin the currently running executable as well
+  as the wallet and network, avoiding an older `sats` earlier on PATH.
+
+- Standard builds include `sats alkanes balance`, `inspect`, `simulate`,
+  `execute`, and `send`, with no separate Cargo feature flags. Execution
+  and transfers require human authorization; MCP never executes spends.
+- MCP provides `alkanes_balance`, `alkanes_inspect`, and `alkanes_simulate`
+  under the connection's pinned network and live grant. Asset amounts and
+  calldata use decimal strings; simulations remain advisory and never
+  prepare or execute a spend.
+- With an Alkanes provider, plain BTC sends exclude asset-bearing and
+  unindexed outputs and stop if the indexer is unavailable.
+
 ### Providers
 
 - `sats providers add subfrost --url URL` keeps the saved key on enter only

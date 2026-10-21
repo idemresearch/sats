@@ -39,23 +39,21 @@ pub fn add(
     let updated;
     match args.kind {
         ProviderArg::Subfrost => {
-            if args.url.is_none()
-                && config.net(network).subfrost_url.is_none()
-                && provider::subfrost::default_url(network).is_none()
-            {
-                bail!("Subfrost has no default endpoint for {net_name} — pass --url");
-            }
             updated = config.subfrost.is_some();
-            let saved_url = config
-                .net(network)
-                .subfrost_url
-                .as_ref()
-                .map(|url| url.0.as_str())
-                .or_else(|| provider::subfrost::default_url(network));
+            let saved_url = saved_subfrost_url(&config, network);
+            let url = args
+                .url
+                .as_deref()
+                .or(saved_url)
+                .or_else(|| provider::subfrost::default_url(network))
+                .with_context(|| {
+                    format!("Subfrost has no default endpoint for {net_name} — pass --url")
+                })?
+                .to_string();
             // As with an Esplora token, the saved key is only ever kept for
             // the same endpoint: a new URL needs the key typed again, so
             // pressing enter never sends it somewhere new.
-            let same_endpoint = args.url.as_deref().is_none_or(|url| Some(url) == saved_url);
+            let same_endpoint = Some(url.as_str()) == saved_url;
             let current = config
                 .subfrost
                 .as_ref()
@@ -65,9 +63,7 @@ pub fn add(
                 .context("no Subfrost API key")?;
             config.subfrost = Some(SubfrostConfig { api_key });
             let net = config.net_mut(network);
-            if let Some(url) = &args.url {
-                net.subfrost_url = Some(RedactedUrl(url.clone()));
-            }
+            net.subfrost_url = Some(RedactedUrl(url));
             net.chain = Some(ChainChoice::Subfrost);
         }
         ProviderArg::Esplora => {
@@ -115,6 +111,13 @@ pub fn use_chain(
         ChainArg::Subfrost => ChainChoice::Subfrost,
         ChainArg::Esplora => ChainChoice::Esplora,
     };
+    if choice == ChainChoice::Subfrost && saved_subfrost_url(&config, network).is_none() {
+        bail!(
+            "Subfrost isn't set up for {} — run `sats providers add subfrost` \
+             to enter the key for this endpoint",
+            network_name(network)
+        );
+    }
     config.net_mut(network).chain = Some(choice);
     check_and_save(store, &config, network, false)?;
     if !json {
@@ -126,6 +129,21 @@ pub fn use_chain(
         println!();
     }
     show(&config, None, network, json)
+}
+
+/// An explicitly configured endpoint, including a built-in endpoint selected
+/// by an existing `chain = "subfrost"` setting. A key saved on another
+/// network alone does not authorize sending it to this network's default.
+fn saved_subfrost_url(config: &Config, network: Network) -> Option<&str> {
+    let net = config.net(network);
+    net.subfrost_url
+        .as_ref()
+        .map(|url| url.0.as_str())
+        .or_else(|| {
+            (net.chain == Some(ChainChoice::Subfrost))
+                .then(|| provider::subfrost::default_url(network))
+                .flatten()
+        })
 }
 
 pub fn remove(

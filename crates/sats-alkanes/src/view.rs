@@ -25,7 +25,7 @@ use crate::protostone::ALKANES_PROTOCOL_TAG;
 use crate::varint;
 
 /// Wire type 0: a varint scalar.
-fn put_varint(field: u32, value: u64, out: &mut Vec<u8>) {
+pub(crate) fn put_varint(field: u32, value: u64, out: &mut Vec<u8>) {
     if value != 0 {
         varint::encode_to_vec(u128::from(field << 3), out);
         varint::encode_to_vec(u128::from(value), out);
@@ -33,7 +33,7 @@ fn put_varint(field: u32, value: u64, out: &mut Vec<u8>) {
 }
 
 /// Wire type 2: a length-delimited nested message.
-fn put_message(field: u32, body: &[u8], out: &mut Vec<u8>) {
+pub(crate) fn put_message(field: u32, body: &[u8], out: &mut Vec<u8>) {
     varint::encode_to_vec(u128::from(field << 3 | 2), out);
     varint::encode_to_vec(body.len() as u128, out);
     out.extend_from_slice(body);
@@ -193,20 +193,20 @@ fn parse_uint128(bytes: &[u8]) -> Result<u128, String> {
     Ok(lo | hi << 64)
 }
 
-enum Value<'a> {
+pub(crate) enum Value<'a> {
     Varint(u128),
     Bytes(&'a [u8]),
     Fixed,
 }
 
 /// A minimal protobuf field reader: `(field number, value)` pairs.
-struct Fields<'a> {
+pub(crate) struct Fields<'a> {
     rest: &'a [u8],
     failed: bool,
 }
 
 impl<'a> Fields<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
         Fields {
             rest: bytes,
             failed: false,

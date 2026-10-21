@@ -548,6 +548,7 @@ impl Sim {
             idempotency_key: None,
             recipient: normalized,
             amount_sat,
+            operation: sats_core::intent::RequestOperation::Send,
             intent_digest: digest,
             created_at: now,
             updated_at: now,

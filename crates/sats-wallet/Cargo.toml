@@ -7,13 +7,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[features]
-# Experimental Alkanes contract views, served by Subfrost.
-experimental-alkanes = ["dep:sats-alkanes"]
-
 [dependencies]
 sats-core = { workspace = true }
-sats-alkanes = { workspace = true, optional = true }
+sats-alkanes = { workspace = true }
 bdk_wallet = { workspace = true, features = ["rusqlite"] }
 bdk_esplora = { workspace = true }
 rusqlite = { workspace = true }

@@ -19,9 +19,8 @@ use crate::walletd::{self, WalletCtx};
 /// signer ran. Nothing that holds a budget reservation may refund on it;
 /// agent requests sign only through `request::execute`, which treats any
 /// failure from the signer on as unresolved.
-fn sign_psbt(prepared: &PreparedSpend, mnemonic: Mnemonic, network: Network) -> Result<Psbt> {
+fn sign_psbt(prepared: &PreparedSpend, signer: &mut dyn Signer) -> Result<Psbt> {
     let mut psbt = prepared.psbt().clone();
-    let mut signer = LocalSigner::new(mnemonic, network)?;
     if !signer.sign(&mut psbt)? {
         return Err(anyhow!("signer produced an unfinalized transaction"));
     }
@@ -36,7 +35,17 @@ pub fn sign_to_record(
     mnemonic: Mnemonic,
     network: Network,
 ) -> Result<TransactionRecord> {
-    let psbt = sign_psbt(&prepared, mnemonic, network)?;
+    let mut signer = LocalSigner::new(mnemonic, network)?;
+    sign_with(prepared, &mut signer)
+}
+
+/// Internal human-execution tail through the Signer boundary. Agent requests
+/// keep their own reservation/state ordering in request::execute.
+pub(crate) fn sign_with(
+    prepared: PreparedSpend,
+    signer: &mut dyn Signer,
+) -> Result<TransactionRecord> {
+    let psbt = sign_psbt(&prepared, signer)?;
     Ok(prepared.into_transaction(psbt)?)
 }
 

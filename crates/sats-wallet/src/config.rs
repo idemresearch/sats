@@ -70,8 +70,8 @@ pub struct NetworkConfig {
     pub fee_target: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub esplora: Option<EsploraConfig>,
-    /// Subfrost endpoint for this network, replacing the built-in one
-    /// (required where Subfrost publishes none, such as regtest).
+    /// Subfrost endpoint authorized for this network. `providers add`
+    /// records the selected default here, or a custom endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subfrost_url: Option<RedactedUrl>,
 }

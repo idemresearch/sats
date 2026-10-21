@@ -142,7 +142,27 @@ exec "$SATS_FIXTURE_BINARY" "$@"
 
     fn launch(&self, line: &str) -> Command {
         let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", line])
+        // Instrument the pinned binary at its exact command position so the
+        // fixture can record the environment after any generated `env` prefix.
+        // The emitted command must name the running binary, never PATH's sats.
+        let binary = env!("CARGO_BIN_EXE_sats");
+        let quote = |s: &str| {
+            if s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&b))
+            {
+                s.to_owned()
+            } else {
+                format!("'{}'", s.replace('\'', "'\"'\"'"))
+            }
+        };
+        let pinned = quote(binary);
+        assert!(
+            line.contains(&pinned),
+            "MCP command must pin the current executable"
+        );
+        let instrumented =
+            line.replacen(&pinned, &quote(self.bin.join("sats").to_str().unwrap()), 1);
+        cmd.args(["-c", &instrumented])
             .current_dir(&self.other)
             .env(
                 "PATH",
@@ -415,7 +435,6 @@ fn check_connection(
     // The future client's defaults and this wallet's config may both change.
     // An unresolvable provider setup proves startup, filing and observation
     // stay local.
-    fs::write(&config, format!("network = \"{conflicting}\"\n{providers}")).unwrap();
     let grant_path = data
         .join(network)
         .join("grants")
@@ -427,6 +446,27 @@ fn check_connection(
     );
     let grant: sats_core::authz::Grant = serde_json::from_str(&stored).unwrap();
     assert!(grant.authorizes(token));
+
+    let switch = |target: &str| {
+        let out = fixture
+            .sats(directory.as_deref(), None, xdg)
+            .args(["network", "use", target])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(fs::read_to_string(&grant_path).unwrap(), stored);
+        let saved: toml::Value = toml::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+        let expected: toml::Value =
+            toml::from_str(&format!("network = \"{target}\"\n{providers}")).unwrap();
+        assert_eq!(saved, expected);
+    };
+    // Execute the printed commands after changing the default, just as a
+    // restarted MCP client would. The original grant and token still work.
+    switch(conflicting);
 
     let mut expected = vec!["--network".to_owned(), network.to_owned()];
     let shared_default = directory.is_none() && config.parent() == Some(data);
@@ -453,6 +493,10 @@ fn check_connection(
 
     for (client, line, args_file) in commands {
         let mut mcp = Mcp::start(fixture.launch(line));
+        // A live connection must keep its network while the CLI default
+        // changes, too. Subsequent tools still file under the original grant.
+        switch(network);
+        switch(conflicting);
         assert_eq!(fixture.captured("sats-args"), expected);
         assert!(!fixture.other.join("injected").exists());
         let client_args = fixture.captured(args_file);

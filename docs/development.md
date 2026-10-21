@@ -31,8 +31,7 @@ screenshot.
 | Build | Command |
 |---|---|
 | Without MCP | `cargo install --locked --path crates/sats-cli --no-default-features` |
-| With Alkanes views (experimental) | `cargo install --locked --path crates/sats-cli --features experimental-alkanes` |
-| With Alkanes execution (development only, never released) | `cargo test -p sats-cli --locked --features experimental-alkanes-execute --test alkanes` |
+| Standard build (MCP and human Alkanes commands) | `cargo install --locked --path crates/sats-cli` |
 
 ## Verification gate
 
@@ -46,8 +45,8 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --locked
 cargo build --release --locked
-cargo clippy -p sats-cli --all-targets --features experimental-alkanes-execute -- -D warnings
-cargo test -p sats-cli --locked --features experimental-alkanes-execute --bins --test alkanes
+cargo clippy -p sats-cli --all-targets --no-default-features -- -D warnings
+cargo test -p sats-cli --locked --no-default-features --bins --test alkanes
 cargo check -p sats-core --target wasm32-unknown-unknown
 cargo check -p sats-playground --target wasm32-unknown-unknown
 ```
@@ -79,6 +78,17 @@ couldn't be run, say so rather than calling the change complete.
 
 Tests must not need public services, credentials, or real funds. Cover network
 behavior with deterministic providers and temporary state.
+
+For Alkanes workflow changes, also run
+`cargo test -p sats-wallet --locked alkanes::`.
+For agent wrapping, also run the `request::execute::tests::wrap_` native
+suite and the `frbtc_` tests in the CLI MCP suite. These exercise the fixed
+contract wire vectors, human review, ordinary BTC grant limits, budget draw,
+changed facts, and failures on both sides of the signature boundary.
+Its signer probes cover the staged operation, factory and signer failures,
+persistence-before-broadcast, and retaining signatures after broadcast failure.
+The CLI Alkanes integration suite includes real-terminal review, password,
+and JSON cancellation checks.
 
 ### Vendored `minreq`
 

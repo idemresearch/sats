@@ -15,8 +15,330 @@ use std::process::{Command, Stdio};
 use common::mcp::*;
 use tempfile::TempDir;
 
+fn assert_alkanes_error(response: &serde_json::Value, code: &str) {
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["status"], "error",
+        "{response}"
+    );
+    assert_eq!(
+        response["result"]["structuredContent"]["error_code"], code,
+        "{response}"
+    );
+}
+
+fn assert_alkanes_reads_refused(mcp: &mut McpSession, code: &str) {
+    for (index, (tool, args)) in [
+        ("alkanes_balance", serde_json::json!({})),
+        ("alkanes_inspect", serde_json::json!({"id": "32:0"})),
+        (
+            "alkanes_simulate",
+            serde_json::json!({"id": "32:0", "inputs": ["77"]}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = mcp.call_tool_raw(80 + index as u64, tool, args);
+        assert_alkanes_error(&response, code);
+    }
+}
+
 #[test]
-fn mcp_serves_five_tools_and_enforces_the_grant() {
+fn alkanes_reads_preserve_precision_unknown_results_and_the_pinned_network_without_keys() {
+    let dir = TempDir::new().unwrap();
+    run_sats(&dir, &["init"]);
+    let mock = common::write_mock_provider(&dir);
+    let funded = common::fund_wallet(&dir, &[100_000, 20_000]);
+    let max = u128::MAX.to_string();
+    std::fs::write(
+        mock.join("alkanes-outpoints.json"),
+        serde_json::json!({
+            funded[0].to_string(): {"32:0": max},
+            funded[1].to_string(): null,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        mock.join("alkanes-bytecode.json"),
+        r#"{"32:0":"0x0061736d"}"#,
+    )
+    .unwrap();
+    let token = grant_token(&dir, "claude", &["--budget", "50000", "--mode", "observe"]);
+    let grant_path = dir.path().join("signet/grants/claude.json");
+    let grant_before = std::fs::read(&grant_path).unwrap();
+    let mut mcp = McpSession::start(&dir, "claude", &token);
+    handshake(&mut mcp);
+
+    // Reads cannot depend on a seed. Changing the CLI default cannot move
+    // an existing connection or its grant to another network.
+    std::fs::remove_file(dir.path().join("seed.sealed")).unwrap();
+    let config_path = dir.path().join("config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    std::fs::write(
+        config_path,
+        config.replace("network = \"signet\"", "network = \"testnet4\""),
+    )
+    .unwrap();
+    let balance = mcp.call_tool(2, "alkanes_balance", serde_json::json!({}));
+    assert_eq!(balance["network"], "signet", "{balance}");
+    assert_eq!(balance["assets"][0]["id"], "32:0");
+    assert_eq!(balance["assets"][0]["amount"], max);
+    assert_eq!(balance["outputs"][0]["value_sat"], 100_000);
+    assert_eq!(balance["outputs"][0]["balances"][0]["amount"], max);
+    assert_eq!(
+        balance["unindexed_outputs"],
+        serde_json::json!([funded[1].to_string()])
+    );
+
+    let inspected = mcp.call_tool(3, "alkanes_inspect", serde_json::json!({"id": "32:0"}));
+    assert_eq!(inspected["network"], "signet");
+    assert_eq!(inspected["id"], "32:0");
+    assert_eq!(inspected["bytecode_bytes"], 4);
+    assert_eq!(
+        inspected["code_hash"],
+        "cd5d4935a48c0672cb06407bb443bc0087aff947c6b864bac886982c73b3027f"
+    );
+
+    for (index, raw) in [
+        serde_json::json!({"status":0,"gasUsed":123,"execution":{"alkanes":[{
+            "id":{"block":"32","tx":"0"}, "value": max,
+        }]}}),
+        serde_json::json!({"status":4}),
+        serde_json::json!({"status":"0"}),
+        serde_json::json!({"status":0,"result":{"status":5}}),
+        serde_json::json!({"unknown":"provider result, not instructions"}),
+        serde_json::Value::Null,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        std::fs::write(mock.join("alkanes-simulate.json"), raw.to_string()).unwrap();
+        let simulated = mcp.call_tool(
+            10 + index as u64,
+            "alkanes_simulate",
+            serde_json::json!({"id":"32:0","inputs":["77", max]}),
+        );
+        assert_eq!(simulated["network"], "signet", "{simulated}");
+        assert_eq!(simulated["advisory"], true);
+        assert_eq!(simulated["inputs"][1], max);
+        assert_eq!(simulated["raw"], raw);
+        if index == 0 {
+            assert_eq!(simulated["gas_used"], 123);
+            assert_eq!(simulated["transfers"][0]["id"], "32:0");
+            assert_eq!(simulated["transfers"][0]["value"], max);
+        }
+    }
+    assert_eq!(std::fs::read(grant_path).unwrap(), grant_before);
+    assert!(!dir.path().join("signet/agent-requests").exists());
+    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(!mock.join("broadcasts.log").exists());
+    assert!(!dir.path().join("testnet4").exists());
+}
+
+#[test]
+fn alkanes_reads_validate_inputs_and_fail_closed_on_provider_or_sync_failure() {
+    let dir = TempDir::new().unwrap();
+    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let mut mcp = McpSession::start(&dir, "claude", &fx.token);
+    handshake(&mut mcp);
+    let config_path = dir.path().join("config.toml");
+    let mock_config = std::fs::read_to_string(&config_path).unwrap();
+    // A bad provider cannot mask malformed arguments or turn them into I/O.
+    std::fs::write(&config_path, "network = \"signet\"\n").unwrap();
+    for id in [
+        "frBTC",
+        "32:-1",
+        "340282366920938463463374607431768211456:0",
+    ] {
+        assert_alkanes_error(
+            &mcp.call_tool_raw(2, "alkanes_inspect", serde_json::json!({"id":id})),
+            "invalid_alkane_id",
+        );
+        assert_alkanes_error(
+            &mcp.call_tool_raw(
+                3,
+                "alkanes_simulate",
+                serde_json::json!({"id":id,"inputs":[]}),
+            ),
+            "invalid_alkane_id",
+        );
+    }
+    for input in [
+        "",
+        "-1",
+        "+1",
+        "1.5",
+        "0x1",
+        "340282366920938463463374607431768211456",
+    ] {
+        assert_alkanes_error(
+            &mcp.call_tool_raw(
+                4,
+                "alkanes_simulate",
+                serde_json::json!({"id":"32:0","inputs":[input]}),
+            ),
+            "invalid_alkane_inputs",
+        );
+    }
+    for args in [
+        serde_json::json!({"id":"32:0","inputs":[9007199254740993u64]}),
+        serde_json::json!({"id":"32:0","inputs":[],"url":"https://untrusted.invalid"}),
+        serde_json::json!({"id":"32:0","inputs":[],"password":"not-accepted"}),
+    ] {
+        let response = mcp.call_tool_raw(5, "alkanes_simulate", args);
+        assert!(
+            response.get("error").is_some() || response["result"]["isError"] == true,
+            "{response}"
+        );
+    }
+    assert_alkanes_reads_refused(&mut mcp, "alkanes_unavailable");
+    std::fs::write(&config_path, mock_config).unwrap();
+    std::fs::write(fx.mockdata.join("sync-error"), "offline").unwrap();
+    assert_alkanes_error(
+        &mcp.call_tool_raw(6, "alkanes_balance", serde_json::json!({})),
+        "alkanes_error",
+    );
+    std::fs::remove_file(fx.mockdata.join("sync-error")).unwrap();
+    std::fs::remove_file(fx.mockdata.join("alkanes-outpoints.json")).unwrap();
+    assert_alkanes_error(
+        &mcp.call_tool_raw(7, "alkanes_balance", serde_json::json!({})),
+        "alkanes_error",
+    );
+    assert_alkanes_error(
+        &mcp.call_tool_raw(8, "alkanes_inspect", serde_json::json!({"id":"32:0"})),
+        "alkanes_error",
+    );
+    assert_alkanes_error(
+        &mcp.call_tool_raw(
+            9,
+            "alkanes_simulate",
+            serde_json::json!({"id":"32:0","inputs":[]}),
+        ),
+        "alkanes_error",
+    );
+    std::fs::write(
+        &config_path,
+        "network = \"signet\"\n[signet]\nchain = \"subfrost\"\n",
+    )
+    .unwrap();
+    assert_alkanes_reads_refused(&mut mcp, "provider_error");
+    assert_eq!(
+        mcp.call_tool(10, "get_grant", serde_json::json!({}))["spent_sat"],
+        0
+    );
+    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(!fx.mockdata.join("broadcasts.log").exists());
+}
+
+#[test]
+fn alkanes_reads_check_the_provider_network_preserve_wire_precision_and_redact_failures() {
+    use sats_core::bitcoin::{Network, blockdata::constants::genesis_block};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, Ordering},
+    };
+
+    let dir = TempDir::new().unwrap();
+    run_sats(&dir, &["init"]);
+    let token = grant_token(&dir, "claude", &["--budget", "50000", "--mode", "observe"]);
+    let mode = Arc::new(AtomicU8::new(0));
+    let mode_server = Arc::clone(&mode);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls_server = Arc::clone(&calls);
+    let server = common::HttpServer::start_with_body(move |_request, body| {
+        let rpc: serde_json::Value = serde_json::from_str(body).unwrap();
+        calls_server.lock().unwrap().push(rpc.clone());
+        let response = if mode_server.load(Ordering::SeqCst) == 2 {
+            serde_json::json!({"jsonrpc":"2.0","id":rpc["id"],"error":{
+                "code":-32000,"message":"HEADERSECRET PATHSECRET QUERYSECRET"
+            }})
+        } else {
+            let result = match rpc["method"].as_str().unwrap() {
+                "esplora_block-height" => {
+                    assert_eq!(rpc["params"], serde_json::json!([0]));
+                    let network = if mode_server.load(Ordering::SeqCst) == 1 {
+                        Network::Testnet4
+                    } else {
+                        Network::Signet
+                    };
+                    serde_json::json!(genesis_block(network).block_hash().to_string())
+                }
+                "alkanes_simulate" => serde_json::json!({"status":0}),
+                "metashrew_view" => serde_json::json!("0x0061736d"),
+                method => panic!("read called unexpected method {method}"),
+            };
+            serde_json::json!({"jsonrpc":"2.0","id":rpc["id"],"result":result})
+        };
+        Some((200, response.to_string()))
+    });
+    std::fs::write(dir.path().join("config.toml"), format!(
+        "network = \"signet\"\n[subfrost]\napi_key = \"HEADERSECRET\"\n[signet]\nchain = \"subfrost\"\nsubfrost_url = \"{}/PATHSECRET?key=QUERYSECRET\"\n", server.url
+    )).unwrap();
+    let mut mcp = McpSession::start(&dir, "claude", &token);
+    handshake(&mut mcp);
+    let max = u128::MAX.to_string();
+    let id = format!("{max}:{max}");
+    let simulated = mcp.call_tool(
+        2,
+        "alkanes_simulate",
+        serde_json::json!({"id":id,"inputs":[max]}),
+    );
+    assert_eq!(simulated["status"], 0, "{simulated}");
+    assert_eq!(simulated["id"], id);
+    assert_eq!(simulated["inputs"][0], max);
+    let requests = calls.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["method"], "esplora_block-height");
+    assert_eq!(requests[1]["method"], "alkanes_simulate");
+    assert_eq!(
+        requests[1]["params"],
+        serde_json::json!([{
+            "target":{"block":max,"tx":max}, "inputs":[max],
+        }])
+    );
+    let inspected = mcp.call_tool(3, "alkanes_inspect", serde_json::json!({"id":id}));
+    assert_eq!(inspected["id"], id);
+    assert_eq!(inspected["bytecode_bytes"], 4);
+
+    for failure_mode in [1, 2] {
+        mode.store(failure_mode, Ordering::SeqCst);
+        let before = calls.lock().unwrap().len();
+        for (index, (tool, args)) in [
+            ("alkanes_balance", serde_json::json!({})),
+            ("alkanes_inspect", serde_json::json!({"id":"32:0"})),
+            (
+                "alkanes_simulate",
+                serde_json::json!({"id":"32:0","inputs":[]}),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let response = mcp.call_tool_raw(10 + index as u64, tool, args);
+            assert_alkanes_error(&response, "alkanes_error");
+            let rendered = response.to_string();
+            for secret in ["HEADERSECRET", "PATHSECRET", "QUERYSECRET"] {
+                assert!(!rendered.contains(secret), "{rendered}");
+            }
+            if failure_mode == 1 {
+                assert!(rendered.contains("different network"), "{rendered}");
+            }
+        }
+        let requests = calls.lock().unwrap();
+        assert_eq!(requests.len(), before + 3);
+        assert!(
+            requests[before..]
+                .iter()
+                .all(|rpc| rpc["method"] == "esplora_block-height")
+        );
+    }
+    assert!(!dir.path().join("signet/transactions").exists());
+}
+
+#[test]
+fn mcp_serves_nine_tools_and_enforces_the_grant() {
     let dir = TempDir::new().unwrap();
     run_sats(&dir, &["init"]);
     let token = grant_token(&dir, "claude", &["--budget", "50000", "--max-tx", "10000"]);
@@ -39,7 +361,7 @@ fn mcp_serves_five_tools_and_enforces_the_grant() {
     );
     mcp.send(serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
 
-    // Exactly the five tools: the agent reads, files, and observes. It
+    // Exactly nine tools: the agent reads, files, and observes. It
     // cannot approve, unlock, sign, or broadcast.
     mcp.send(serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }));
     let list = mcp.recv();
@@ -49,11 +371,15 @@ fn mcp_serves_five_tools_and_enforces_the_grant() {
     assert_eq!(
         names,
         [
+            "alkanes_balance",
+            "alkanes_inspect",
+            "alkanes_simulate",
             "check_request",
             "get_balance",
             "get_grant",
             "get_receive_address",
             "request_send",
+            "request_wrap_frbtc",
         ]
     );
     let annotation = |name: &str, key: &str| {
@@ -83,6 +409,47 @@ fn mcp_serves_five_tools_and_enforces_the_grant() {
         annotation("get_receive_address", "readOnlyHint"),
         Some(false.into()),
         "address derivation persists an index and is not read-only"
+    );
+
+    for name in ["alkanes_balance", "alkanes_inspect", "alkanes_simulate"] {
+        assert_eq!(annotation(name, "readOnlyHint"), Some(true.into()));
+        assert_eq!(annotation(name, "idempotentHint"), Some(true.into()));
+        assert_eq!(annotation(name, "openWorldHint"), Some(true.into()));
+    }
+    let simulation = tools
+        .iter()
+        .find(|tool| tool["name"] == "alkanes_simulate")
+        .unwrap();
+    assert_eq!(
+        simulation["inputSchema"]["properties"]["inputs"]["items"]["type"],
+        "string"
+    );
+    assert_eq!(simulation["inputSchema"]["additionalProperties"], false);
+    assert!(instructions.contains("request_wrap_frbtc"));
+
+    assert_eq!(
+        annotation("request_wrap_frbtc", "readOnlyHint"),
+        Some(false.into())
+    );
+    assert_eq!(
+        annotation("request_wrap_frbtc", "destructiveHint"),
+        Some(false.into())
+    );
+    assert_eq!(
+        annotation("request_wrap_frbtc", "openWorldHint"),
+        Some(true.into())
+    );
+    let frbtc = tools
+        .iter()
+        .find(|tool| tool["name"] == "request_wrap_frbtc")
+        .unwrap();
+    assert_eq!(frbtc["inputSchema"]["additionalProperties"], false);
+    assert_eq!(
+        frbtc["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .len(),
+        2
     );
 
     // The grant snapshot lets the agent plan.
@@ -132,6 +499,187 @@ fn mcp_serves_five_tools_and_enforces_the_grant() {
 /// The whole loop: the agent files, the human approves, the approving
 /// process signs and broadcasts, the agent observes. The agent takes no
 /// action after filing, and the served process never signs.
+#[test]
+fn frbtc_wrap_request_is_human_approved_and_observed_end_to_end() {
+    let dir = TempDir::new().unwrap();
+    run_sats(&dir, &["init"]);
+    let mock = common::write_mock_provider(&dir);
+    common::fund_wallet(&dir, &[100_000]);
+    std::fs::write(
+        mock.join("alkanes-bytecode.json"),
+        r#"{"32:0":"0x0061736d"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        mock.join("alkanes-signer.hex"),
+        "0a241a22512030685674457c3eaa6d2904a1340ab80296625e8c7313f54c6ae7c51318f5860710e1fc02",
+    )
+    .unwrap();
+    std::fs::write(mock.join("alkanes-wrap.hex"), "0a5e0a0d0a060a0208201200120308864e122b0a262f7365656e2fffdbcfe2faaab58dcfe6363d4cad67bf68ccae88d3e55e0a685a440e35a85f7412010112200a0c2f746f74616c737570706c7912107acbb22f0100000000000000000000001093880f").unwrap();
+    let info = sats_json(&dir, &["--json", "alkanes", "frbtc", "info"]);
+    assert_eq!(info["id"], "32:0", "{info}");
+    let grant_output = sats_output(
+        &dir,
+        &[
+            "--json",
+            "agent",
+            "grant",
+            "claude",
+            "--budget",
+            "12000",
+            "--max-tx",
+            "10000",
+            "--max-fee",
+            "2000",
+        ],
+    );
+    assert!(
+        grant_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&grant_output.stderr)
+    );
+    let grant: serde_json::Value = serde_json::from_slice(&grant_output.stdout).unwrap();
+    let token = grant["token"].as_str().unwrap();
+    assert!(grant.get("alkanes_wrap").is_none());
+    let mut mcp = McpSession::start(&dir, "claude", token);
+    handshake(&mut mcp);
+    let view = mcp.call_tool(2, "get_grant", serde_json::json!({}));
+    assert!(view.get("alkanes_wrap").is_none());
+    // Filing reads public contract facts without loading a seed or preparing.
+    let seed_path = dir.path().join("seed.sealed");
+    let sealed = std::fs::read(&seed_path).unwrap();
+    std::fs::remove_file(&seed_path).unwrap();
+    let config_path = dir.path().join("config.toml");
+    let config = std::fs::read(&config_path).unwrap();
+    let args = serde_json::json!({"amount_sat":10000,"idempotency_key":"wrap-1"});
+    let filed = mcp.call_tool(3, "request_wrap_frbtc", args.clone());
+    assert_eq!(filed["status"], "pending_approval", "{filed}");
+    assert_eq!(filed["operation"], "frbtc_wrap");
+    assert_eq!(filed["frbtc"]["signer_address"], info["signer_address"]);
+    assert_eq!(filed["frbtc"]["code_hash"], info["code_hash"]);
+    // Once filed, retries return that receipt even when discovery is offline.
+    std::fs::write(&config_path, "network = \"signet\"\n").unwrap();
+    let id = id_of(&filed);
+    assert_eq!(
+        mcp.call_tool(4, "request_wrap_frbtc", args.clone())["request_id"],
+        id
+    );
+    assert_eq!(
+        mcp.request_send(5, 10000, "wrap-1")["error_code"],
+        "idempotency_key_conflict"
+    );
+    assert!(!mock.join("broadcasts.log").exists());
+    assert!(!dir.path().join("signet/transactions").exists());
+    std::fs::write(&config_path, config).unwrap();
+    std::fs::write(&seed_path, sealed).unwrap();
+    let approval = sats_output(&dir, &["--json", "agent", "approve", &id, "--yes"]);
+    assert!(
+        approval.status.success(),
+        "{}",
+        String::from_utf8_lossy(&approval.stderr)
+    );
+    let human_review = String::from_utf8_lossy(&approval.stderr);
+    for field in ["Contract code hash", "frBTC receive", "9990", "546"] {
+        assert!(
+            human_review.contains(field),
+            "missing {field}: {human_review}"
+        );
+    }
+    let result = mcp.check_request(6, &id);
+    assert_eq!(result["status"], "sent", "{result}");
+    assert!(result["message"].as_str().unwrap().contains("confirmation"));
+    let spent = mcp.call_tool(7, "get_grant", serde_json::json!({}));
+    assert_eq!(
+        spent["spent_sat"].as_u64().unwrap(),
+        10000 + result["fee_sat"].as_u64().unwrap()
+    );
+    let broadcasts = std::fs::read(mock.join("broadcasts.log")).unwrap();
+    assert_eq!(
+        mcp.call_tool(8, "request_wrap_frbtc", args)["status"],
+        "sent"
+    );
+    assert!(
+        !sats_output(&dir, &["agent", "approve", &id, "--yes"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        std::fs::read(mock.join("broadcasts.log")).unwrap(),
+        broadcasts
+    );
+}
+
+#[test]
+fn frbtc_requests_use_standard_grants_and_reject_arbitrary_execution_parameters() {
+    let dir = TempDir::new().unwrap();
+    run_sats(&dir, &["init"]);
+    let mock = common::write_mock_provider(&dir);
+    std::fs::write(
+        mock.join("alkanes-bytecode.json"),
+        r#"{"32:0":"0x0061736d"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        mock.join("alkanes-signer.hex"),
+        "0a241a22512030685674457c3eaa6d2904a1340ab80296625e8c7313f54c6ae7c51318f5860710e1fc02",
+    )
+    .unwrap();
+    let token = grant_token(
+        &dir,
+        "claude",
+        &[
+            "--budget",
+            "50000",
+            "--max-fee",
+            "2000",
+            "--mode",
+            "observe",
+        ],
+    );
+    let mut mcp = McpSession::start(&dir, "claude", &token);
+    handshake(&mut mcp);
+    let denied = mcp.call_tool(
+        2,
+        "request_wrap_frbtc",
+        serde_json::json!({"amount_sat":10000,"idempotency_key":"observe"}),
+    );
+    assert_eq!(denied["status"], "denied", "{denied}");
+    assert_eq!(denied["reason"], "observe_only", "{denied}");
+    assert!(
+        !sats_output(&dir, &["agent", "approve", &id_of(&denied), "--yes"])
+            .status
+            .success()
+    );
+    let invalid = mcp.call_tool(
+        3,
+        "request_wrap_frbtc",
+        serde_json::json!({"amount_sat":1,"idempotency_key":"small"}),
+    );
+    assert_eq!(invalid["error_code"], "invalid_amount", "{invalid}");
+    for field in ["address", "inputs", "fee_rate", "psbt", "password", "id"] {
+        let mut args = serde_json::json!({"amount_sat":10000,"idempotency_key":"invalid"});
+        args[field] = "untrusted".into();
+        let response = mcp.call_tool_raw(4, "request_wrap_frbtc", args);
+        assert!(
+            response.get("error").is_some() || response["result"]["isError"] == true,
+            "{response}"
+        );
+    }
+    // Revoke the session before discovery. An unavailable provider must not
+    // mask token authorization or allow a revoked session to access it.
+    run_sats(&dir, &["agent", "revoke", "claude"]);
+    std::fs::remove_file(mock.join("alkanes-signer.hex")).unwrap();
+    assert_eq!(
+        mcp.call_tool(
+            5,
+            "request_wrap_frbtc",
+            serde_json::json!({"amount_sat":10000,"idempotency_key":"revoked"})
+        )["error_code"],
+        "no_grant"
+    );
+    assert!(!mock.join("broadcasts.log").exists());
+}
+
 #[test]
 fn request_send_files_pending_and_approve_executes() {
     let dir = TempDir::new().unwrap();
@@ -404,6 +952,7 @@ fn revocation_takes_effect_mid_session() {
     assert!(grant.get("budget_sat").is_none(), "{grant}");
     mcp.refused_read(5, "get_balance", "no_grant");
     mcp.refused_read(6, "get_receive_address", "no_grant");
+    assert_alkanes_reads_refused(&mut mcp, "no_grant");
     let observed = mcp.check_request(7, &before);
     assert_eq!(observed["status"], "error", "{observed}");
     assert_eq!(observed["error_code"], "no_grant");
@@ -602,6 +1151,7 @@ fn a_replaced_grant_refuses_the_old_session_without_writing() {
     assert!(grant["message"].as_str().unwrap().contains("re-issued"));
     mcp.refused_read(5, "get_balance", "unauthorized");
     mcp.refused_read(6, "get_receive_address", "unauthorized");
+    assert_alkanes_reads_refused(&mut mcp, "unauthorized");
     assert_eq!(
         mcp.check_request(7, "r-00000000000000000000000000000000")["error_code"],
         "unauthorized"
@@ -631,6 +1181,7 @@ fn expiry_cuts_off_a_running_session() {
     assert!(grant["message"].as_str().unwrap().contains("expired"));
     mcp.refused_read(5, "get_balance", "no_grant");
     mcp.refused_read(6, "get_receive_address", "no_grant");
+    assert_alkanes_reads_refused(&mut mcp, "no_grant");
     assert_eq!(
         mcp.check_request(7, &id_of(&filed))["error_code"],
         "no_grant"

@@ -961,10 +961,13 @@ mod tests {
             "future grant must be refused, got: {message}"
         );
 
-        // The current format is v1 and loads cleanly.
+        // The current format loads cleanly.
         fs::write(&path, &pristine).unwrap();
         let loaded = store.load_grant("signet", "claude").unwrap().unwrap();
-        assert_eq!(loaded.format_version, 1);
+        assert_eq!(
+            loaded.format_version,
+            sats_core::authz::GRANT_FORMAT_VERSION
+        );
         assert_eq!(loaded.mode, sats_core::authz::GrantMode::Ask);
     }
 
@@ -1031,6 +1034,7 @@ mod tests {
             idempotency_key: None,
             recipient: "tb1ptest".into(),
             amount_sat: 1_000,
+            operation: sats_core::intent::RequestOperation::Send,
             intent_digest: "d".repeat(64),
             created_at: 42,
             updated_at: 42,
