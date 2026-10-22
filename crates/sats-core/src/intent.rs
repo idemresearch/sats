@@ -13,6 +13,37 @@ use serde::{Deserialize, Serialize};
 /// version; every stored digest becomes unmatchable when this changes.
 pub const INTENT_DIGEST_DOMAIN: &[u8] = b"sats-intent-v1";
 
+/// Public contract facts bound to a single frBTC wrapping request. No key
+/// material: the address is the public BTC payment destination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrbtcContract {
+    pub signer_address: String,
+    pub code_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RequestOperation {
+    #[default]
+    Send,
+    FrbtcWrap {
+        contract: FrbtcContract,
+    },
+}
+
+impl RequestOperation {
+    pub fn is_send(&self) -> bool {
+        matches!(self, Self::Send)
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Send => "send",
+            Self::FrbtcWrap { .. } => "frbtc_wrap",
+        }
+    }
+}
+
 /// The canonical facts of a send: who asks, on which network, to whom,
 /// how much. The fee is deliberately absent — it varies per preparation,
 /// and a retry of the same logical send must produce the same digest.
@@ -26,6 +57,23 @@ pub struct SendIntent {
 }
 
 impl SendIntent {
+    /// Distinguish wrapping from a plain payment even when amount and
+    /// recipient match. The recorded contract facts are part of the intent.
+    pub fn digest_for(&self, operation: &RequestOperation) -> String {
+        let RequestOperation::FrbtcWrap { contract } = operation else {
+            return self.digest();
+        };
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"sats-frbtc-wrap-v1\0");
+        encode_str(&mut bytes, &self.network);
+        encode_str(&mut bytes, &self.agent);
+        encode_str(&mut bytes, &self.recipient);
+        bytes.extend_from_slice(&self.amount_sat.to_le_bytes());
+        encode_str(&mut bytes, "32:0:77:wallet");
+        encode_str(&mut bytes, &contract.signer_address);
+        encode_str(&mut bytes, &contract.code_hash);
+        sha256::Hash::hash(&bytes).to_string()
+    }
     /// 64-char lowercase hex sha256 over a length-prefixed encoding:
     /// `DOMAIN || enc("send") || enc(network) || enc(agent) ||
     /// enc(recipient) || u64_le(amount_sat)` with
@@ -118,6 +166,32 @@ mod tests {
         for changed in [network, agent, recipient, amount] {
             assert_ne!(changed.digest(), base);
         }
+    }
+
+    #[test]
+    fn wrapping_is_bound_to_kind_contract_and_pinned_facts() {
+        let send = intent();
+        let contract = FrbtcContract {
+            signer_address: send.recipient.clone(),
+            code_hash: "ab".repeat(32),
+        };
+        let operation = RequestOperation::FrbtcWrap {
+            contract: contract.clone(),
+        };
+        let digest = send.digest_for(&operation);
+        assert_ne!(digest, send.digest());
+        let mut changed = contract;
+        changed.code_hash = "cd".repeat(32);
+        assert_ne!(
+            digest,
+            send.digest_for(&RequestOperation::FrbtcWrap { contract: changed })
+        );
+        let mut changed = send.clone();
+        changed.amount_sat += 1;
+        assert_ne!(digest, changed.digest_for(&operation));
+        changed = send.clone();
+        changed.network = "testnet4".into();
+        assert_ne!(digest, changed.digest_for(&operation));
     }
 
     #[test]

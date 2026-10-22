@@ -24,6 +24,7 @@ impl Fixture {
         fund_wallet(&dir, values);
         let chain = dir.path().join("chain");
         fs::create_dir(&chain).unwrap();
+        fs::write(chain.join("alkanes-outpoints.json"), "{}").unwrap();
         let fees = HttpServer::start(move |request| {
             assert!(request.starts_with("GET /fee-estimates "), "{request}");
             Some(if fees_available {

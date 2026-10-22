@@ -64,6 +64,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             commands::balance::run(&store, network, || Ok(services(&config)?), offline, json)
         }
         Command::Receive => commands::receive::run(&store, network, json),
+        Command::Network { command } => match command {
+            None => commands::network::show(&config, network, json),
+            Some(cli::NetworkCommand::Use { target }) => {
+                commands::network::use_network(&store, config, target, json)
+            }
+        },
         Command::Send(args) => {
             commands::send::run(&store, network, &services(&config)?, &args, json)
         }
@@ -138,15 +144,19 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 commands::providers::remove(&store, config, network, kind, json)
             }
         },
-        #[cfg(feature = "experimental-alkanes")]
         Command::Alkanes { command } => match command {
+            cli::AlkanesCommand::Frbtc { command } => match command {
+                cli::FrbtcCommand::Info => commands::alkanes::frbtc_info(&services(&config)?, json),
+            },
+            cli::AlkanesCommand::Balance => {
+                commands::alkanes::balance(&store, network, &services(&config)?, json)
+            }
             cli::AlkanesCommand::Inspect { id } => {
                 commands::alkanes::inspect(&services(&config)?, &id, json)
             }
             cli::AlkanesCommand::Simulate { id, inputs } => {
                 commands::alkanes::simulate(&services(&config)?, &id, &inputs, json)
             }
-            #[cfg(feature = "experimental-alkanes-execute")]
             cli::AlkanesCommand::Execute {
                 id,
                 inputs,
@@ -162,6 +172,27 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 fee_rate,
                 postage,
                 yes,
+                json,
+            ),
+            cli::AlkanesCommand::Send {
+                id,
+                amount,
+                address,
+                fee_rate,
+                postage,
+                yes,
+            } => commands::alkanes::send(
+                &store,
+                network,
+                &services(&config)?,
+                &commands::alkanes::SendArgs {
+                    id: &id,
+                    amount,
+                    address: &address,
+                    fee_rate,
+                    postage,
+                    yes,
+                },
                 json,
             ),
         },

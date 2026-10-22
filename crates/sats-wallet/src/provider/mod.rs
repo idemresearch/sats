@@ -3,7 +3,7 @@
 //! Each network has exactly one chain source, chosen by `[<network>]
 //! chain`: the public mempool.space Esplora (the default), Subfrost, or a
 //! configured Esplora server. It serves sync, fee estimates, broadcast,
-//! and, in experimental builds, Alkanes views, which only Subfrost serves.
+//! and Alkanes views, which only Subfrost serves.
 //! Drivers are audited enums, not a plugin surface, and `sats-core` never
 //! sees any of this.
 //!
@@ -381,6 +381,11 @@ fn subfrost_chain(
 }
 
 impl Services {
+    /// Network this service set was resolved for.
+    pub fn network(&self) -> Network {
+        self.network
+    }
+
     /// Report sync progress to `progress`.
     pub fn with_progress(mut self, progress: Arc<dyn Progress>) -> Services {
         self.progress = Indicator(Some(progress));
@@ -487,16 +492,31 @@ impl Services {
 
     /// Alkanes views come from the network's one provider; only Subfrost
     /// serves them.
-    #[cfg(feature = "experimental-alkanes")]
     fn no_alkanes(&self) -> ProviderError {
         ProviderError::NoAlkanes {
             network: network_name(self.network),
         }
     }
 
+    /// Protobuf `simulate` view for a typed frBTC signer query or exact
+    /// unsigned wrap transaction. Never signs or broadcasts.
+    pub fn alkanes_context(
+        &self,
+        request: &[u8],
+        signer_query: bool,
+    ) -> Result<Vec<u8>, ProviderError> {
+        match &self.sync {
+            ChainSource::Subfrost(client) => {
+                client.check_network(self.network)?;
+                client.alkanes_simulate_context(request)
+            }
+            ChainSource::Mock(mock) => mock.alkanes_context(signer_query),
+            ChainSource::Esplora(_) => Err(self.no_alkanes()),
+        }
+    }
+
     /// Contract bytecode for an alkane id. Validates the endpoint's
     /// network before trusting its answer.
-    #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_bytecode(&self, block: u128, tx: u128) -> Result<Vec<u8>, ProviderError> {
         match &self.sync {
             ChainSource::Subfrost(c) => {
@@ -508,9 +528,37 @@ impl Services {
         }
     }
 
+    /// Whether this network's provider serves Alkanes views at all.
+    pub fn serves_alkanes(&self) -> bool {
+        !matches!(self.sync, ChainSource::Esplora(_))
+    }
+
+    /// The typed refusal when this network's provider serves no Alkanes
+    /// views.
+    pub fn require_alkanes(&self) -> Result<(), ProviderError> {
+        if self.serves_alkanes() {
+            Ok(())
+        } else {
+            Err(self.no_alkanes())
+        }
+    }
+
+    /// The alkanes one wallet output holds. `value_sat` is the output's
+    /// value; the mock echoes it, a live indexer reports its own.
+    pub fn alkanes_outpoint(
+        &self,
+        outpoint: &sats_core::bitcoin::OutPoint,
+        value_sat: u64,
+    ) -> Result<sats_alkanes::view::OutpointAssets, ProviderError> {
+        match &self.sync {
+            ChainSource::Subfrost(c) => c.alkanes_outpoint(outpoint),
+            ChainSource::Mock(m) => m.alkanes_outpoint(outpoint, value_sat),
+            ChainSource::Esplora(_) => Err(self.no_alkanes()),
+        }
+    }
+
     /// Simulate a contract call; the result is the endpoint's verbatim
     /// JSON. Advisory only — a simulation never authorizes anything.
-    #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_simulate(
         &self,
         block: u128,
@@ -688,10 +736,22 @@ mod tests {
         let testnet4 = overview(&config, None, Network::Testnet4).unwrap();
         assert_eq!(testnet4.provider, "mempool");
 
-        // Subfrost publishes no regtest endpoint: not set up there.
-        config.regtest.chain = Some(ChainChoice::Subfrost);
-        let reason = setup_reason(resolve(&config, None, Network::Regtest).unwrap_err());
-        assert!(reason.contains("sats providers add subfrost"), "{reason}");
+        // Each selected network resolves its own default, using the same
+        // provider for chain operations and Alkanes views.
+        for (network, url) in [
+            (Network::Testnet4, "https://testnet4.subfrost.io"),
+            (Network::Regtest, "https://regtest.subfrost.io"),
+        ] {
+            config.net_mut(network).chain = Some(ChainChoice::Subfrost);
+            let view = overview(&config, None, network).unwrap();
+            assert_eq!(view.url, url);
+            assert_eq!(view.auth, AuthKind::ApiKey);
+            assert!(matches!(
+                resolve(&config, None, network).unwrap().sync,
+                ChainSource::Subfrost(_)
+            ));
+        }
+        // Explicit endpoints still take precedence over defaults.
         config.regtest.subfrost_url = Some(RedactedUrl("http://localhost:18888/KEY".into()));
         let regtest = overview(&config, None, Network::Regtest).unwrap();
         assert_eq!(regtest.url, "http://localhost:18888");
@@ -768,7 +828,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "experimental-alkanes")]
     fn alkanes_need_subfrost_as_the_provider() {
         // A saved key alone serves nothing: Subfrost must be the network's
         // provider, so no call reaches it here.

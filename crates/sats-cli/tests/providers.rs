@@ -1,6 +1,6 @@
 //! `sats providers`: list, add, use, and remove against local
 //! Subfrost- and Esplora-shaped endpoints. Hermetic: each endpoint is a
-//! loopback listener that answers the signet genesis hash, Subfrost only
+//! loopback listener that answers the selected network's genesis hash, Subfrost only
 //! for the right key.
 
 mod common;
@@ -19,6 +19,13 @@ const SIGNET_GENESIS: &str = "00000008819873e925422c1ff0f99f7cc9bbb232af63a077a4
 /// A loopback Subfrost stand-in. Returns its URL and the API-key headers it
 /// received, one per request.
 fn fake_subfrost() -> (String, Arc<Mutex<Vec<Option<String>>>>) {
+    fake_subfrost_for(sats_core::bitcoin::Network::Signet)
+}
+
+fn fake_subfrost_for(
+    network: sats_core::bitcoin::Network,
+) -> (String, Arc<Mutex<Vec<Option<String>>>>) {
+    let genesis = sats_core::bitcoin::constants::genesis_block(network).block_hash();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/v4/jsonrpc", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -44,7 +51,7 @@ fn fake_subfrost() -> (String, Arc<Mutex<Vec<Option<String>>>>) {
             let mut body = vec![0; length];
             let _ = reader.read_exact(&mut body);
             let response = if key.as_deref() == Some(KEY) {
-                let body = format!(r#"{{"jsonrpc":"2.0","id":0,"result":"{SIGNET_GENESIS}"}}"#);
+                let body = format!(r#"{{"jsonrpc":"2.0","id":0,"result":"{genesis}"}}"#);
                 format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -107,7 +114,7 @@ fn list_shows_the_defaults_and_how_to_add_subfrost() {
     assert!(out.get("chain").is_none());
     assert!(out.get("alkanes_views").is_none());
 
-    // No mempool.space on regtest, and no default Subfrost endpoint.
+    // Regtest keeps its local Esplora default until a provider is selected.
     let regtest = json_stdout(
         sats(&dir)
             .args(["--network", "regtest", "--json", "providers"])
@@ -177,6 +184,100 @@ fn add_subfrost_checks_the_key_and_stores_it_privately() {
         !rendered.contains("/v4/jsonrpc"),
         "only the origin is shown"
     );
+}
+
+#[test]
+fn subfrost_setup_without_a_url_keeps_the_selected_networks_saved_endpoint() {
+    use sats_core::bitcoin::Network;
+
+    for (network, name) in [
+        (Network::Signet, "signet"),
+        (Network::Testnet4, "testnet4"),
+        (Network::Regtest, "regtest"),
+    ] {
+        let dir = TempDir::new().unwrap();
+        let (url, seen) = fake_subfrost_for(network);
+        sats(&dir)
+            .args([
+                "--network",
+                name,
+                "providers",
+                "add",
+                "subfrost",
+                "--url",
+                &url,
+            ])
+            .write_stdin(format!("{KEY}\n"))
+            .assert()
+            .success();
+        let saved = config_text(&dir);
+        let view = json_stdout(
+            sats(&dir)
+                .args(["--network", name, "--json", "providers", "add", "subfrost"])
+                .write_stdin("\n")
+                .assert()
+                .success(),
+        );
+        assert_eq!(view["network"], name);
+        assert_eq!(view["provider"], "subfrost");
+        assert_eq!(view["auth"], "api_key");
+        assert!(
+            view["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("http://127.0.0.1:")
+        );
+        assert_eq!(config_text(&dir), saved);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn a_subfrost_key_never_follows_a_new_networks_default() {
+    let dir = TempDir::new().unwrap();
+    let (url, _) = fake_subfrost();
+    add_subfrost(&dir, &url);
+    let saved = config_text(&dir);
+    for network in ["testnet4", "regtest"] {
+        // These failures happen before any network access: a shared key
+        // does not authorize the newly available default endpoints.
+        sats(&dir)
+            .args(["--network", network, "providers", "add", "subfrost"])
+            .write_stdin("\n")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("no Subfrost API key"));
+        sats(&dir)
+            .args(["--network", network, "providers", "use", "subfrost"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("sats providers add subfrost"));
+        assert_eq!(config_text(&dir), saved);
+    }
+}
+
+#[test]
+fn subfrost_setup_refuses_a_different_network_without_saving() {
+    let dir = TempDir::new().unwrap();
+    let (url, _) = fake_subfrost();
+    for network in ["testnet4", "regtest"] {
+        sats(&dir)
+            .args([
+                "--network",
+                network,
+                "providers",
+                "add",
+                "subfrost",
+                "--url",
+                &url,
+            ])
+            .write_stdin(format!("{KEY}\n"))
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("nothing was saved"))
+            .stderr(predicate::str::contains(KEY).not());
+        assert!(!dir.path().join("config.toml").exists());
+    }
 }
 
 #[test]
@@ -298,12 +399,14 @@ fn add_refuses_what_it_cannot_use() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("no Subfrost API key"));
-    sats(&dir)
-        .args(["--network", "regtest", "providers", "add", "subfrost"])
-        .write_stdin("key\n")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("no default endpoint for regtest"));
+    for network in ["testnet4", "regtest"] {
+        sats(&dir)
+            .args(["--network", network, "providers", "add", "subfrost"])
+            .write_stdin("\n")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("no Subfrost API key"));
+    }
     sats(&dir)
         .args(["providers", "add", "esplora"])
         .write_stdin("\n")

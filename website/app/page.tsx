@@ -20,9 +20,9 @@ const features = [
     title: "Agents ask, you approve",
     body: (
       <>
-        Agents connect over <Link href="/docs/mcp">MCP</Link> and get five
-        tools to read the wallet and file requests. None of them approve,
-        sign, or broadcast.
+        Agents connect over <Link href="/docs/mcp">MCP</Link> to read the
+        wallet and file Bitcoin payment or frBTC wrapping requests. None
+        of these tools approve, sign, or broadcast.
       </>
     ),
   },

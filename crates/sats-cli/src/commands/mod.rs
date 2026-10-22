@@ -1,5 +1,4 @@
 pub mod agent_log;
-#[cfg(feature = "experimental-alkanes")]
 pub mod alkanes;
 pub mod approve;
 pub mod balance;
@@ -9,6 +8,7 @@ pub mod grants;
 pub mod history;
 pub mod init;
 pub mod mode;
+pub mod network;
 pub mod providers;
 pub mod psbt;
 pub mod receive;

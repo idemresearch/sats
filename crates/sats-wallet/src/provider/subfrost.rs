@@ -47,12 +47,10 @@ mod dialect {
     /// protobuf request, "latest"]`. Result: hex string. The gateway's
     /// `alkanes_getbytecode` shortcut drops the alkane id (the indexer
     /// panics unwrapping it), so bytecode is fetched through this view.
-    #[cfg(feature = "experimental-alkanes")]
     pub const METASHREW_VIEW: &str = "metashrew_view";
     /// Simulate a contract call. Params: one
     /// `{target: {block, tx}, inputs: [...]}` object, decimal strings.
     /// Result: opaque JSON, displayed rather than trusted.
-    #[cfg(feature = "experimental-alkanes")]
     pub const ALKANES_SIMULATE: &str = "alkanes_simulate";
     /// `GET /blocks` — recent block summaries. Params: `[]`.
     pub const BLOCKS: &str = "esplora_blocks";
@@ -68,11 +66,13 @@ mod dialect {
     pub const TX_OUTSPEND: &str = "esplora_tx::outspend";
 }
 
-/// Subfrost's public JSON-RPC endpoint for a network, where it runs one.
-/// Other networks need an explicit URL.
+/// Subfrost's public JSON-RPC endpoint for each supported network.
+/// Refused networks have no default.
 pub fn default_url(network: Network) -> Option<&'static str> {
     match network {
         Network::Signet => Some("https://signet.subfrost.io/v4/jsonrpc"),
+        Network::Testnet4 => Some("https://testnet4.subfrost.io/v4/jsonrpc"),
+        Network::Regtest => Some("https://regtest.subfrost.io/v4/jsonrpc"),
         _ => None,
     }
 }
@@ -190,7 +190,6 @@ impl SubfrostClient {
         Ok(txid)
     }
 
-    #[cfg(feature = "experimental-alkanes")]
     fn view_err(&self, message: String) -> ProviderError {
         ProviderError::View {
             url: self.display_url.clone(),
@@ -200,7 +199,6 @@ impl SubfrostClient {
 
     /// Contract bytecode for an alkane id, decoded from the endpoint's
     /// hex result.
-    #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_bytecode(&self, block: u128, tx: u128) -> Result<Vec<u8>, ProviderError> {
         let request = sats_alkanes::view::bytecode_request(block, tx);
         let value: serde_json::Value = self
@@ -216,8 +214,40 @@ impl SubfrostClient {
         parse_bytecode_result(&value).map_err(|m| self.view_err(m))
     }
 
+    /// The alkanes one outpoint holds, as the indexer reports them. An
+    /// outpoint the indexer doesn't know comes back empty; the caller
+    /// checks the echoed outpoint.
+    pub fn alkanes_outpoint(
+        &self,
+        outpoint: &OutPoint,
+    ) -> Result<sats_alkanes::view::OutpointAssets, ProviderError> {
+        let request = sats_alkanes::view::outpoint_request(outpoint);
+        let value: serde_json::Value = self
+            .call(
+                dialect::METASHREW_VIEW,
+                serde_json::json!([
+                    "protorunesbyoutpoint",
+                    format!("0x{}", hex::encode(request)),
+                    "latest"
+                ]),
+            )
+            .map_err(|m| self.view_err(m))?;
+        let bytes = parse_view_bytes(&value).map_err(|m| self.view_err(m))?;
+        sats_alkanes::view::parse_outpoint_response(&bytes).map_err(|m| self.view_err(m))
+    }
+
     /// Simulate a contract call; the result is returned verbatim.
-    #[cfg(feature = "experimental-alkanes")]
+    pub fn alkanes_simulate_context(&self, request: &[u8]) -> Result<Vec<u8>, ProviderError> {
+        let value: serde_json::Value = self
+            .call(
+                dialect::METASHREW_VIEW,
+                serde_json::json!(["simulate", format!("0x{}", hex::encode(request)), "latest"]),
+            )
+            .map_err(|e| self.view_err(e))?;
+        parse_view_bytes(&value).map_err(|e| self.view_err(e))
+    }
+
+    /// Simulate a contract call; the result is returned verbatim.
     pub fn alkanes_simulate(
         &self,
         block: u128,
@@ -674,9 +704,21 @@ fn parse_jsonrpc<T: DeserializeOwned>(body: &str) -> Result<T, String> {
     serde_json::from_value(result.clone()).map_err(|_| "unexpected result shape".to_string())
 }
 
+/// A view's hex-string result as bytes; an empty result is empty bytes.
+fn parse_view_bytes(value: &serde_json::Value) -> Result<Vec<u8>, String> {
+    let hex_str = value
+        .as_str()
+        .ok_or_else(|| "expected a hex string result".to_string())?
+        .trim();
+    let stripped = hex_str
+        .strip_prefix("0x")
+        .or_else(|| hex_str.strip_prefix("0X"))
+        .unwrap_or(hex_str);
+    hex::decode(stripped).map_err(|_| "invalid view result hex".to_string())
+}
+
 /// A bytecode result is a hex string, with or without a 0x prefix. An
 /// empty result means nothing is deployed at that id.
-#[cfg(feature = "experimental-alkanes")]
 fn parse_bytecode_result(value: &serde_json::Value) -> Result<Vec<u8>, String> {
     let hex_str = value
         .as_str()
@@ -703,6 +745,19 @@ mod tests {
     use sats_core::bitcoin::{ScriptBuf, absolute, transaction};
 
     use crate::{config::Config, provider, store::Store, walletd};
+
+    #[test]
+    fn default_endpoints_cover_only_supported_networks() {
+        for (network, url) in [
+            (Network::Signet, "https://signet.subfrost.io/v4/jsonrpc"),
+            (Network::Testnet4, "https://testnet4.subfrost.io/v4/jsonrpc"),
+            (Network::Regtest, "https://regtest.subfrost.io/v4/jsonrpc"),
+        ] {
+            assert_eq!(default_url(network), Some(url));
+        }
+        assert_eq!(default_url(Network::Bitcoin), None);
+        assert_eq!(default_url(Network::Testnet), None);
+    }
 
     fn response(status: &str, headers: &str, body: &str) -> String {
         format!(
@@ -1151,7 +1206,6 @@ mod tests {
         ] {
             let message = parse_jsonrpc::<HashMap<u16, f64>>(&body.to_string()).unwrap_err();
             super::super::error::assert_safe_error(client.sync_err(message.clone()), &secrets);
-            #[cfg(feature = "experimental-alkanes")]
             super::super::error::assert_safe_error(client.view_err(message), &secrets);
         }
     }
@@ -1172,7 +1226,6 @@ mod tests {
             bad.clone(),
             bad.clone(),
         ];
-        #[cfg(feature = "experimental-alkanes")]
         responses.push(bad);
         responses.push(rpc_response(serde_json::json!(echo)));
         let (origin, requests) = local_server(responses);
@@ -1191,7 +1244,6 @@ mod tests {
             client.check_network(Network::Signet).unwrap_err(),
             client.fee_estimates().unwrap_err(),
         ];
-        #[cfg(feature = "experimental-alkanes")]
         errors.push(client.alkanes_bytecode(2, 0).unwrap_err());
         errors.push(client.broadcast(&tx).unwrap_err());
         for error in errors {
@@ -1215,7 +1267,6 @@ mod tests {
     /// The gateway's `alkanes_getbytecode` shortcut drops the id; the view
     /// takes the protobuf request that a live signet indexer answered.
     #[test]
-    #[cfg(feature = "experimental-alkanes")]
     fn bytecode_is_fetched_through_the_indexer_view() {
         let (url, requests) = local_server(vec![rpc_response(serde_json::json!("0x0061736d"))]);
         let client = SubfrostClient::new(url, None);
@@ -1231,7 +1282,39 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "experimental-alkanes")]
+    fn wrapping_context_uses_the_protobuf_simulate_view() {
+        let raw =
+            "0a241a22512030685674457c3eaa6d2904a1340ab80296625e8c7313f54c6ae7c51318f5860710e1fc02";
+        let (url, requests) =
+            local_server(vec![rpc_response(serde_json::json!(format!("0x{raw}")))]);
+        let client = SubfrostClient::new(url, Some("private-fixture-key".into()));
+        let context = sats_alkanes::wrap::context_request(
+            &sats_alkanes::wrap::call(103),
+            None,
+            880_000,
+            0,
+            0,
+        );
+        assert_eq!(
+            hex::encode(client.alkanes_simulate_context(&context).unwrap()),
+            raw
+        );
+        let request = requests.recv().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body["method"], "metashrew_view");
+        assert_eq!(
+            body["params"],
+            serde_json::json!(["simulate", "0x2080db352a03200067", "latest"])
+        );
+        assert!(
+            request
+                .to_lowercase()
+                .contains("x-subfrost-api-key: private-fixture-key")
+        );
+    }
+
+    #[test]
     fn bytecode_results_decode_or_fail_typed() {
         let with_prefix = serde_json::json!("0x0061736d");
         assert_eq!(parse_bytecode_result(&with_prefix).unwrap(), b"\0asm");

@@ -57,7 +57,11 @@ pub fn run(store: &Store, network: Network, all: bool, watch: bool, json: bool) 
             [
                 request.id.clone(),
                 request.agent.clone(),
-                elide(&request.recipient),
+                if request.operation.is_send() {
+                    elide(&request.recipient)
+                } else {
+                    format!("frBTC wrap → {}", elide(&request.recipient))
+                },
                 format_sats(request.amount_sat),
                 status_cell(request),
                 format!(
@@ -212,6 +216,7 @@ pub fn validate_selection(selected: &AgentRequest, current: &AgentRequest) -> Re
         || selected.idempotency_key != current.idempotency_key
         || selected.recipient != current.recipient
         || selected.amount_sat != current.amount_sat
+        || selected.operation != current.operation
         || selected.intent_digest != current.intent_digest
         || selected.created_at != current.created_at
         || selected.updated_at != current.updated_at

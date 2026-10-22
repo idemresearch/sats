@@ -66,8 +66,10 @@ config and data directories and never looks up a home directory.
 | `config` | TOML configuration and network names |
 | `store` | Paths, atomic files, permissions, transactions, grants, requests, the event log |
 | `walletd` | The SQLite-backed watch-only BDK wallet |
-| `provider` | Per-network provider, driver resolution, chain access, experimental Alkanes views |
+| `provider` | Per-network provider, driver resolution, chain access, Alkanes views |
 | `prepare` | The preparation pipeline shared by human sends and approved requests |
+| `assets` | Which outputs carry alkanes, and the exclusion sends apply with an Alkanes provider |
+| `alkanes` | Contract views and the human-authorized stage/review/commit workflow |
 | `request` | Request create, dismiss, reconcile, and the executor (`stage`, `commit`) |
 | `spend` | The shared tail: sign, persist, then broadcast; rebroadcast a saved transaction |
 
@@ -86,12 +88,31 @@ The `sats` binary: the human CLI and the MCP server.
 ### `sats-alkanes`
 
 Pure Alkanes encoding: alkane ids, LEB128 varints, cellpacks, the
-protostone/runestone envelope, bytecode hashing, and tolerant simulation
+protostone/runestone envelope and its decoder, bytecode hashing, the
+outpoint balance view, transfers and their check, and tolerant simulation
 views. Encodings follow the published alkanes-rs reference, frozen by unit
-vectors. Like `sats-core`, it does no I/O. Default builds don't include it:
-the `experimental-alkanes` feature adds `sats alkanes inspect` and
-`simulate`, and execution sits behind the development-only
-`experimental-alkanes-execute` feature.
+vectors. Like `sats-core`, it does no I/O. Standard builds include
+`sats alkanes balance`, `inspect`, `simulate`, `execute`, and `send`.
+When the selected provider serves Alkanes, sends exclude asset-bearing
+and unknown outputs.
+
+Native Alkanes orchestration lives in `sats-wallet::alkanes`. Its
+`human` module stages an unsigned call or transfer and returns an
+immutable typed review. A surface renders that review and obtains explicit
+human authorization before consuming the staged operation with a signer
+factory. The operation binds its wallet, network, provider, and exact PSBT;
+it is not cloneable. The signer is dropped before persistence and broadcast.
+The library prints nothing and reads no password. CLI rendering and secret
+entry remain in `sats-cli`; no MCP tool invokes this workflow.
+
+The narrow `alkanes::wrapping` module supplies request-bound public facts and
+unsigned preparation for `request::execute`. `request_wrap_frbtc` only files
+a typed `FrbtcWrap` request; the common human-authorized request executor
+stages, verifies, simulates, reserves, signs, and persists it. Pure wrapping
+composition, context protobuf encoding, response decoding, and independent
+output checking live in `sats-alkanes::wrap`. The typed contract facts and
+intent digest live in `sats-core`; the ordinary BTC authorization ladder
+applies without protocol permissions.
 
 ### `sats-playground`
 
@@ -147,7 +168,7 @@ broadcast, so a failed broadcast leaves an exact retry.
 
 ## Agent request
 
-Filing happens in the MCP server and touches only the store:
+Plain BTC filing happens in the MCP server and touches only the store:
 
 ```mermaid
 sequenceDiagram
@@ -162,6 +183,12 @@ sequenceDiagram
     H->>H: sats agent approve selects the request for review
     A->>M: check_request until it settles
 ```
+
+A new `request_wrap_frbtc` filing authenticates and checks for an existing
+receipt, reads the frBTC code hash and BTC signer from Subfrost, then
+rechecks the grant and files the canonical request under the ordinary BTC
+ladder. Repeated calls return the stored receipt without provider access.
+Discovery reads public facts only; MCP never prepares a transaction.
 
 Execution happens in the human's process, once, with the password:
 
@@ -192,7 +219,7 @@ reconciled, is specified in [Security](security.md#approving-a-request).
 ## Providers
 
 Each network has exactly one provider (mempool.space, Subfrost, or an
-Esplora server) for sync, fees, and broadcast. In experimental builds,
+Esplora server) for sync, fees, and broadcast.
 Alkanes views come from the same provider, which must be Subfrost. Drivers
 are audited enums.
 Resolution is pure configuration work with no network I/O. Operations check

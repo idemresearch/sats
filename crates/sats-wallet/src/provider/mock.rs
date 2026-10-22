@@ -7,9 +7,15 @@
 //! - `fees.json`       `{"2": 3.0}` conf-target → sat/vB map (default: flat 2)
 //! - `broadcasts.log`  broadcast txids are appended here
 //! - `alkanes-bytecode.json`  `{"BLOCK:TX": "<hex>"}`; a missing file or
-//!   key is a typed view error (experimental Alkanes builds)
+//!   key is a typed view error
 //! - `alkanes-simulate.json`  returned verbatim for any simulate call;
-//!   missing file is a typed view error (experimental Alkanes builds)
+//!   missing file is a typed view error
+//! - `alkanes-signer.hex`, `alkanes-wrap.hex`  protobuf SimulateResponse hex
+//!   for signer discovery and exact-transaction wrapping simulation
+//! - `alkanes-outpoints.json`  `{"TXID:VOUT": {"BLOCK:TX": "amount"}}`;
+//!   an outpoint not listed holds no alkanes, one listed as `null` is
+//!   unknown to the indexer, and a missing file is a typed view error
+//!
 //! - `fees-via`, `broadcast-via`  an Esplora URL that serves that one role
 //!   instead, so tests reach the real HTTP transport behind a
 //!   deterministic sync
@@ -28,6 +34,16 @@ pub struct MockProvider {
 }
 
 impl MockProvider {
+    pub fn alkanes_context(&self, signer_query: bool) -> Result<Vec<u8>, ProviderError> {
+        let name = if signer_query {
+            "alkanes-signer.hex"
+        } else {
+            "alkanes-wrap.hex"
+        };
+        let text = std::fs::read_to_string(self.dir.join(name))
+            .map_err(|e| self.view_err(e.to_string()))?;
+        hex::decode(text.trim()).map_err(|_| self.view_err("invalid simulation fixture".into()))
+    }
     pub fn new(url: &str) -> Result<Self, String> {
         let path = url
             .strip_prefix("file://")
@@ -111,7 +127,6 @@ impl MockProvider {
         Ok(txid)
     }
 
-    #[cfg(feature = "experimental-alkanes")]
     fn view_err(&self, message: String) -> ProviderError {
         ProviderError::View {
             url: self.display.clone(),
@@ -119,7 +134,6 @@ impl MockProvider {
         }
     }
 
-    #[cfg(feature = "experimental-alkanes")]
     pub fn alkanes_bytecode(&self, block: u128, tx: u128) -> Result<Vec<u8>, ProviderError> {
         let text = std::fs::read_to_string(self.dir.join("alkanes-bytecode.json"))
             .map_err(|e| self.view_err(e.to_string()))?;
@@ -133,7 +147,42 @@ impl MockProvider {
             .map_err(|e| self.view_err(e.to_string()))
     }
 
-    #[cfg(feature = "experimental-alkanes")]
+    /// Echoes the outpoint the way a live indexer does for one it knows;
+    /// the caller supplies the value it expects to see echoed.
+    pub fn alkanes_outpoint(
+        &self,
+        outpoint: &sats_core::bitcoin::OutPoint,
+        value_sat: u64,
+    ) -> Result<sats_alkanes::view::OutpointAssets, ProviderError> {
+        use sats_alkanes::view::{AssetBalance, OutpointAssets};
+        let text = std::fs::read_to_string(self.dir.join("alkanes-outpoints.json"))
+            .map_err(|e| self.view_err(e.to_string()))?;
+        let map: HashMap<String, Option<HashMap<String, String>>> =
+            serde_json::from_str(&text).map_err(|e| self.view_err(e.to_string()))?;
+        let balances = match map.get(&outpoint.to_string()) {
+            Some(None) => return Ok(OutpointAssets::default()),
+            Some(Some(entries)) => entries.clone(),
+            None => HashMap::new(),
+        };
+        let mut balances = balances
+            .into_iter()
+            .map(|(id, amount)| {
+                Ok(AssetBalance {
+                    id: id.parse().map_err(|e: String| self.view_err(e))?,
+                    amount: amount.parse().map_err(|_| self.view_err(amount.clone()))?,
+                    name: String::new(),
+                    symbol: String::new(),
+                })
+            })
+            .collect::<Result<Vec<_>, ProviderError>>()?;
+        balances.sort_by_key(|b| b.id);
+        Ok(OutpointAssets {
+            outpoint: Some(*outpoint),
+            value_sat: Some(value_sat),
+            balances,
+        })
+    }
+
     pub fn alkanes_simulate(&self) -> Result<serde_json::Value, ProviderError> {
         let text = std::fs::read_to_string(self.dir.join("alkanes-simulate.json"))
             .map_err(|e| self.view_err(e.to_string()))?;

@@ -207,6 +207,140 @@ fn init_extends_seed_to_second_network() {
 }
 
 #[test]
+fn network_shows_default_and_override_without_writing() {
+    let dir = TempDir::new().unwrap();
+    sats(&dir)
+        .arg("network")
+        .assert()
+        .success()
+        .stdout("signet (default)\n");
+    let view = json_stdout(
+        sats(&dir)
+            .args(["--network", "regtest", "network", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(view["network"], "regtest");
+    assert_eq!(view["default_network"], "signet");
+    sats(&dir)
+        .args(["network", "--network", "testnet4"])
+        .assert()
+        .success()
+        .stdout("testnet4 (override; default: signet)\n");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn network_use_is_local_and_rejects_unsupported_networks_without_saving() {
+    let dir = TempDir::new().unwrap();
+    // Selecting a default needs neither a wallet nor a provider connection.
+    for network in ["testnet4", "regtest", "signet"] {
+        let view = json_stdout(
+            sats(&dir)
+                .args(["network", "use", network, "--json"])
+                .assert()
+                .success(),
+        );
+        assert_eq!(view["network"], network);
+        assert_eq!(view["default_network"], network);
+        sats(&dir)
+            .arg("network")
+            .assert()
+            .success()
+            .stdout(format!("{network} (default)\n"));
+    }
+    let config_path = dir.path().join("config.toml");
+    let before = std::fs::read(&config_path).unwrap();
+    for (network, message) in [
+        ("mainnet", "mainnet is not supported"),
+        ("bitcoin", "mainnet is not supported"),
+        ("testnet", "legacy testnet3 is not supported"),
+        ("typo", "unknown network"),
+    ] {
+        sats(&dir)
+            .args(["network", "use", network])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(message));
+        assert_eq!(std::fs::read(&config_path).unwrap(), before);
+    }
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(config_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn network_use_selects_wallet_and_preserves_provider_settings_and_grants() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    sats(&dir)
+        .args(["--network", "testnet4", "init"])
+        .assert()
+        .success();
+    sats(&dir)
+        .args(["agent", "grant", "claude", "--budget", "50000"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sats --network signet --dir"));
+    let grant_path = dir.path().join("signet/grants/claude.json");
+    let grant = std::fs::read(&grant_path).unwrap();
+    let signet_address = json_stdout(sats(&dir).args(["receive", "--json"]).assert().success());
+    assert_eq!(signet_address["index"], 0);
+    let config_path = dir.path().join("config.toml");
+    // An unresolvable provider proves switching never connects. All network
+    // settings and credentials must survive the change to the default.
+    std::fs::write(
+        &config_path,
+        "network = \"signet\"\n[subfrost]\napi_key = \"fixture-key\"\n\
+         [signet]\nchain = \"subfrost\"\nfee_target = 6\n\
+         [testnet4]\nchain = \"esplora\"\nfee_target = 3\n\
+         [testnet4.esplora]\nurl = \"http://127.0.0.1:1/api\"\nbearer = \"fixture-token\"\n",
+    )
+    .unwrap();
+    let before: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    sats(&dir)
+        .args(["--network", "regtest", "network", "use", "testnet4"])
+        .assert()
+        .success()
+        .stdout("testnet4 (default)\n");
+    let mut after: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(after["network"].as_str(), Some("testnet4"));
+    after["network"] = before["network"].clone();
+    assert_eq!(after, before);
+    assert_eq!(std::fs::read(&grant_path).unwrap(), grant);
+    assert!(!dir.path().join("testnet4/grants").exists());
+    let address = json_stdout(sats(&dir).args(["receive", "--json"]).assert().success());
+    assert_eq!(address["index"], 0);
+    let overridden = json_stdout(
+        sats(&dir)
+            .args(["--network", "signet", "receive", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(overridden["index"], 1);
+    sats(&dir)
+        .arg("network")
+        .assert()
+        .success()
+        .stdout("testnet4 (default)\n");
+    let grants = json_stdout(
+        sats(&dir)
+            .args(["agent", "list", "--json"])
+            .assert()
+            .success(),
+    );
+    assert!(grants.as_array().unwrap().is_empty());
+}
+
+#[test]
 fn wrong_password_is_rejected() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
@@ -1009,9 +1143,9 @@ fn agent_log_renders_events_and_filters_by_request() {
 }
 
 /// One amount boundary: `--max-tx` is hard, the removed band flag stays
-/// removed, and the grant file carries the first released format.
+/// removed, and the grant file carries the current format.
 #[test]
-fn grant_writes_the_first_released_format() {
+fn grant_writes_the_current_format() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
 
@@ -1048,7 +1182,10 @@ fn grant_writes_the_first_released_format() {
     )
     .unwrap();
     assert_eq!(grant["max_tx_sat"], 10_000);
-    assert_eq!(grant["format_version"], 1);
+    assert_eq!(
+        grant["format_version"],
+        sats_core::authz::GRANT_FORMAT_VERSION
+    );
     assert!(grant.get("ask_max_tx_sat").is_none());
 }
 
@@ -1351,7 +1488,10 @@ fn unreleased_auto_state_fails_closed_and_is_recreated() {
     let grant: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&grant_path).unwrap()).unwrap();
     assert_eq!(grant["mode"], "ask");
-    assert_eq!(grant["format_version"], 1);
+    assert_eq!(
+        grant["format_version"],
+        sats_core::authz::GRANT_FORMAT_VERSION
+    );
 }
 
 /// Allowlist edits carry the attenuation rule (allow = password,

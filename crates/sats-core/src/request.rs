@@ -28,6 +28,8 @@ use serde::{Deserialize, Serialize};
 use crate::authz::DenyReason;
 
 pub const REQUEST_FORMAT_VERSION: u32 = 1;
+/// Older builds must never reinterpret a wrapping request as a BTC send.
+pub const WRAP_REQUEST_FORMAT_VERSION: u32 = 3;
 
 const fn request_format_version() -> u32 {
     REQUEST_FORMAT_VERSION
@@ -58,6 +60,11 @@ pub struct AgentRequest {
     /// Normalized recipient address.
     pub recipient: String,
     pub amount_sat: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::intent::RequestOperation::is_send"
+    )]
+    pub operation: crate::intent::RequestOperation,
     /// Digest of the canonical [`crate::intent::SendIntent`].
     pub intent_digest: String,
     pub created_at: u64,
@@ -172,7 +179,22 @@ impl RequestState {
 
 impl AgentRequest {
     pub fn version_supported(&self) -> bool {
-        self.format_version == REQUEST_FORMAT_VERSION
+        match self.operation {
+            crate::intent::RequestOperation::Send => self.format_version == REQUEST_FORMAT_VERSION,
+            crate::intent::RequestOperation::FrbtcWrap { .. } => {
+                self.format_version == WRAP_REQUEST_FORMAT_VERSION
+            }
+        }
+    }
+
+    pub fn expected_digest(&self) -> String {
+        crate::intent::SendIntent {
+            network: self.network.clone(),
+            agent: self.agent.clone(),
+            recipient: self.recipient.clone(),
+            amount_sat: self.amount_sat,
+        }
+        .digest_for(&self.operation)
     }
 
     /// Awaiting a human decision right now.
@@ -217,6 +239,7 @@ mod tests {
             idempotency_key: Some("job-1".into()),
             recipient: "tb1pexample".into(),
             amount_sat: 25_000,
+            operation: crate::intent::RequestOperation::Send,
             intent_digest: "d".repeat(64),
             created_at: 1_000,
             updated_at: 1_000,
@@ -247,6 +270,29 @@ mod tests {
         assert_eq!(back.state, denied());
         assert!(!back.is_pending_approval());
         assert!(!back.is_approvable());
+    }
+
+    #[test]
+    fn wrapping_requires_its_own_record_version_and_cannot_be_a_plain_send() {
+        let mut req = request(RequestState::PendingApproval);
+        assert!(req.version_supported());
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("operation").is_none());
+        req.operation = crate::intent::RequestOperation::FrbtcWrap {
+            contract: crate::intent::FrbtcContract {
+                signer_address: "tb1pexample".into(),
+                code_hash: "ab".repeat(32),
+            },
+        };
+        assert!(!req.version_supported());
+        req.format_version = WRAP_REQUEST_FORMAT_VERSION;
+        assert!(req.version_supported());
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["operation"]["kind"], "frbtc_wrap");
+        let back: AgentRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(back.operation, req.operation);
+        req.operation = crate::intent::RequestOperation::Send;
+        assert!(!req.version_supported());
     }
 
     #[test]

@@ -77,9 +77,13 @@ sats agent grant claude --budget 50k --for 24h --max-tx 10k
 sats prints a setup command for Claude Code and one for ChatGPT desktop/Codex.
 Run one of them. It contains a token that is shown only once.
 
-The agent gets five tools: `get_balance`, `get_receive_address`, `get_grant`,
-`request_send`, and `check_request`. A payment request comes back
-`pending_approval` and waits for you:
+The agent can call `get_balance`, `get_receive_address`, `get_grant`,
+`request_send`, and `check_request`. With Subfrost, it can also read Alkanes
+balances, inspect contracts, and run advisory simulations with
+`alkanes_balance`, `alkanes_inspect`, and `alkanes_simulate`. Alkanes reads
+provide no execution authority. It can propose BTC-to-frBTC wrapping with
+`request_wrap_frbtc` under the same BTC grant. A valid spend request comes
+back `pending_approval` and waits for you:
 
 ```sh
 sats agent requests --watch   # see new requests as they arrive
@@ -108,6 +112,13 @@ key, and `sats providers` shows what each network uses. sats fails closed: it
 won't spend on out-of-date Bitcoin data, and by default it never spends 546- or
 330-sat outputs, which may carry inscriptions. See
 [Providers](docs/providers.md).
+
+Alkanes commands are included: `sats alkanes balance`, `inspect`, `simulate`,
+`execute`, and `send`. They require Subfrost; execution and transfers are
+human-operated. Agents can propose BTC-to-frBTC wrapping within their normal
+BTC grant; you review and approve each request. With
+Subfrost selected, ordinary sends also exclude outputs
+carrying alkanes or not yet indexed. See [Alkanes](docs/cli.md#alkanes).
 
 ## Documentation
 

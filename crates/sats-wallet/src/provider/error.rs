@@ -18,7 +18,6 @@ pub enum ProviderError {
         reason: String,
     },
 
-    #[cfg(feature = "experimental-alkanes")]
     #[error(
         "Alkanes on {network} needs Subfrost as the provider — run `sats providers add subfrost`"
     )]
@@ -40,7 +39,6 @@ pub enum ProviderError {
     #[error("broadcast failed ({url}): {message}")]
     Broadcast { url: String, message: String },
 
-    #[cfg(feature = "experimental-alkanes")]
     #[error("alkanes view failed ({url}): {message}")]
     View { url: String, message: String },
 }

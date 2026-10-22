@@ -32,7 +32,7 @@ use sats_core::authz::{
 use sats_core::bitcoin::hashes::{Hash, sha256};
 use sats_core::bitcoin::{Address, Network};
 use sats_core::event::{AgentEvent, EVENT_FORMAT_VERSION, EventKind};
-use sats_core::intent::SendIntent;
+use sats_core::intent::{RequestOperation, SendIntent};
 use sats_core::plan::{TransactionRecord, TransactionStatus};
 use sats_core::request::{AgentRequest, REQUEST_FORMAT_VERSION, RequestState};
 
@@ -96,6 +96,7 @@ pub enum CreateError {
     InvalidAgent,
     InvalidIdempotencyKey,
     InvalidAddress(String),
+    InvalidAmount,
     ClockUnavailable(String),
     /// No grant on file for this agent: nothing can be authenticated,
     /// so nothing is written.
@@ -106,6 +107,8 @@ pub enum CreateError {
     Conflict {
         request_id: String,
     },
+    Provider(anyhow::Error),
+    Alkanes(anyhow::Error),
     Store(anyhow::Error),
 }
 
@@ -115,10 +118,13 @@ impl CreateError {
             CreateError::InvalidAgent => "invalid_agent",
             CreateError::InvalidIdempotencyKey => "invalid_idempotency_key",
             CreateError::InvalidAddress(_) => "invalid_address",
+            CreateError::InvalidAmount => "invalid_amount",
             CreateError::ClockUnavailable(_) => "clock_unavailable",
             CreateError::NoGrant => "no_grant",
             CreateError::Unauthorized => "unauthorized",
             CreateError::Conflict { .. } => "idempotency_key_conflict",
+            CreateError::Provider(_) => "provider_error",
+            CreateError::Alkanes(_) => "alkanes_error",
             CreateError::Store(_) => "store_error",
         }
     }
@@ -128,6 +134,7 @@ impl CreateError {
             CreateError::InvalidAgent => AGENT_NAME_RULE.to_string(),
             CreateError::InvalidIdempotencyKey => REQUEST_KEY_RULE.to_string(),
             CreateError::InvalidAddress(message) => message.clone(),
+            CreateError::InvalidAmount => "wrap amount must be at least 546 sat".into(),
             CreateError::ClockUnavailable(message) => message.clone(),
             CreateError::NoGrant => format!(
                 "no active grant — ask the human to run: sats agent grant {agent} --budget <sats>"
@@ -137,10 +144,12 @@ impl CreateError {
                  replaced later has a different token"
             ),
             CreateError::Conflict { request_id } => format!(
-                "idempotency_key was already used for a different send ({request_id}) — pick a \
+                "idempotency_key was already used for a different request ({request_id}) — pick a \
                  fresh key"
             ),
-            CreateError::Store(err) => format!("{err:#}"),
+            CreateError::Provider(err) | CreateError::Alkanes(err) | CreateError::Store(err) => {
+                format!("{err:#}")
+            }
         }
     }
 }
@@ -165,10 +174,98 @@ impl From<anyhow::Error> for CreateError {
 /// without its causal event. The same key with the same canonical
 /// intent returns the existing record without writing anything; the
 /// same key with a different intent is a conflict.
+pub struct CreateWrapParams<'a> {
+    pub agent: &'a str,
+    pub token: &'a str,
+    pub idempotency_key: &'a str,
+    pub amount_sat: u64,
+}
+
+/// Read public frBTC facts, then file under the ordinary BTC grant. No
+/// transaction preparation or seed access. Repeated keys observe their
+/// existing receipt without provider I/O; new filings re-authenticate after
+/// discovery so revocation or replacement during network access takes effect.
+pub fn create_wrap(
+    store: &Store,
+    network: Network,
+    params: &CreateWrapParams,
+    resolve_services: impl FnOnce() -> Result<crate::provider::Services>,
+) -> Result<AgentRequest, CreateError> {
+    if !valid_agent_name(params.agent) {
+        return Err(CreateError::InvalidAgent);
+    }
+    if !valid_request_key(params.idempotency_key) {
+        return Err(CreateError::InvalidIdempotencyKey);
+    }
+    if params.amount_sat < 546 {
+        return Err(CreateError::InvalidAmount);
+    }
+    sats_core::network::ensure_test_network(network).map_err(|e| CreateError::Alkanes(e.into()))?;
+    let net_name = network_name(network);
+    {
+        let _lock = store.lock_grants(net_name)?;
+        let grant = store
+            .load_grant(net_name, params.agent)?
+            .ok_or(CreateError::NoGrant)?;
+        if !grant.authorizes(params.token) {
+            return Err(CreateError::Unauthorized);
+        }
+        let now = now_checked().map_err(|e| CreateError::ClockUnavailable(format!("{e:#}")))?;
+        if grant.is_expired(now) {
+            return Err(CreateError::NoGrant);
+        }
+        let id = keyed_request_id(&grant.grant_id, params.agent, params.idempotency_key);
+        if let Some(existing) = store.load_agent_request(net_name, params.agent, &id)? {
+            if existing.version_supported()
+                && matches!(existing.operation, RequestOperation::FrbtcWrap { .. })
+                && existing.grant_id == grant.grant_id
+                && existing.agent == params.agent
+                && existing.network == net_name
+                && existing.amount_sat == params.amount_sat
+                && existing.intent_digest == existing.expected_digest()
+            {
+                return Ok(existing);
+            }
+            return Err(CreateError::Conflict {
+                request_id: existing.id,
+            });
+        }
+    }
+    let services = resolve_services().map_err(CreateError::Provider)?;
+    if services.network() != network {
+        return Err(CreateError::Alkanes(anyhow::anyhow!(
+            "frBTC provider network does not match the request network"
+        )));
+    }
+    let contract = crate::alkanes::wrapping::info(&services).map_err(CreateError::Alkanes)?;
+    let address = contract.signer_address.clone();
+    create_inner(
+        store,
+        network,
+        &CreateParams {
+            agent: params.agent,
+            token: params.token,
+            idempotency_key: params.idempotency_key,
+            address: &address,
+            amount_sat: params.amount_sat,
+        },
+        RequestOperation::FrbtcWrap { contract },
+    )
+}
+
 pub fn create(
     store: &Store,
     network: Network,
     params: &CreateParams,
+) -> Result<AgentRequest, CreateError> {
+    create_inner(store, network, params, RequestOperation::Send)
+}
+
+fn create_inner(
+    store: &Store,
+    network: Network,
+    params: &CreateParams,
+    operation: RequestOperation,
 ) -> Result<AgentRequest, CreateError> {
     let net_name = network_name(network);
     // The agent name becomes a path component in every store lookup, so
@@ -203,14 +300,13 @@ pub fn create(
     // A draw orphaned by a crashed execution must not deny this
     // request: settle the ledger before any policy decision.
     reconcile_grant_locked(store, net_name, &mut grant)?;
-
     let digest = SendIntent {
         network: net_name.to_string(),
         agent: params.agent.to_string(),
         recipient: recipient.clone(),
         amount_sat: params.amount_sat,
     }
-    .digest();
+    .digest_for(&operation);
 
     // A repeated key answers from the record: same grant, same intent,
     // same request. The id already commits to the grant, so a record
@@ -247,7 +343,11 @@ pub fn create(
         },
     };
     let record = AgentRequest {
-        format_version: REQUEST_FORMAT_VERSION,
+        format_version: if !operation.is_send() {
+            sats_core::request::WRAP_REQUEST_FORMAT_VERSION
+        } else {
+            REQUEST_FORMAT_VERSION
+        },
         id,
         network: net_name.to_string(),
         agent: params.agent.to_string(),
@@ -255,6 +355,7 @@ pub fn create(
         idempotency_key: Some(params.idempotency_key.to_string()),
         recipient: recipient.clone(),
         amount_sat: params.amount_sat,
+        operation,
         intent_digest: digest,
         created_at: now,
         updated_at: now,
@@ -417,7 +518,8 @@ pub(crate) fn reconcile_grant_locked(
         else {
             continue;
         };
-        if never_reached_signer(&request.state)
+        if request.version_supported()
+            && never_reached_signer(&request.state)
             && let Some(spend) = grant.refund(&entry.request_id)
         {
             released.push((request, spend));

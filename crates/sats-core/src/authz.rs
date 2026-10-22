@@ -28,7 +28,7 @@ pub fn new_grant_id() -> Result<String, String> {
     Ok(hex::encode(bytes))
 }
 
-/// Current on-disk grant shape — the first released schema.
+/// Current on-disk standard BTC grant shape.
 ///
 /// Records from a newer sats are refused by `Store::load_grant`: they
 /// may carry restrictions this build cannot see, and ignoring them
@@ -839,7 +839,7 @@ mod tests {
         assert_eq!(back.budget_sat, 50_000);
         assert_eq!(back.spent_sat, 12_412);
         assert_eq!(back.remaining_sat(), 37_588);
-        assert_eq!(back.format_version, 1);
+        assert_eq!(back.format_version, GRANT_FORMAT_VERSION);
         assert_eq!(back.mode, GrantMode::Ask);
     }
 
@@ -1061,7 +1061,7 @@ mod tests {
         let mut g = grant(50_000, 0, Some(10_000), Some(1_000));
         g.allowed_recipients = Some(vec![RECIPIENT.to_string()]);
         let json = serde_json::to_value(&g).unwrap();
-        assert_eq!(json["format_version"], 1);
+        assert_eq!(json["format_version"], GRANT_FORMAT_VERSION);
         assert_eq!(json["mode"], "ask");
         assert_eq!(json["max_fee_sat"], 1_000);
         let back: Grant = serde_json::from_value(json).unwrap();

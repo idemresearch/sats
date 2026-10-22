@@ -31,12 +31,14 @@
 //! reaches the signer, and it is invoked only by a surface that has
 //! obtained the human's authorization.
 
+use crate::alkanes::wrapping::{self, WrapReview};
 use anyhow::{Context, Result, bail};
 use sats_core::authz::{
     Decision, DenyReason, Grant, ReserveError, Reserved, SpendRequest, evaluate_send,
 };
 use sats_core::bitcoin::Network;
 use sats_core::event::EventKind;
+use sats_core::intent::RequestOperation;
 use sats_core::plan::{PreparedSpend, TxOrigin};
 use sats_core::request::{AgentRequest, RequestState};
 use sats_core::signer::Signer;
@@ -78,6 +80,7 @@ pub struct Staged {
     ctx: WalletCtx,
     /// Resolved after the local prechecks; the same selection serves broadcast.
     services: Services,
+    wrap_review: Option<WrapReview>,
     _claim: RequestClaim,
 }
 
@@ -91,6 +94,11 @@ impl Staged {
     /// it under the lock.
     pub fn grant(&self) -> &Grant {
         &self.grant
+    }
+
+    /// The additional public facts a human reviews for a wrapping request.
+    pub fn wrap_review(&self) -> Option<&WrapReview> {
+        self.wrap_review.as_ref()
     }
 
     /// What the prepared transaction pays and costs, derived from the
@@ -159,6 +167,14 @@ pub fn stage(
     let net_name = network_name(network);
     let request = store.find_agent_request(net_name, id_or_prefix)?;
     let request = reconcile(store, network, request)?;
+    if request.expected_digest() != request.intent_digest {
+        bail!("request facts do not match its intent digest; refusing execution");
+    }
+    if let RequestOperation::FrbtcWrap { contract } = &request.operation
+        && contract.signer_address != request.recipient
+    {
+        bail!("frBTC signer does not match the request recipient; refusing execution");
+    }
     if !request.is_approvable() {
         bail!(
             "request {} is {} — nothing to approve",
@@ -203,15 +219,29 @@ pub fn stage(
     // Preparation: the shared pipeline, agent form — no dust bypass, and
     // a failed sync is a hard stop.
     let preparation = (|| -> Result<_> {
-        let mut ctx = walletd::open(store, network)?;
-        let prepare_request =
-            prepare::PrepareRequest::for_agent(&request.recipient, request.amount_sat);
         let services = resolve_services()?;
-        let prepared = prepare::build(&mut ctx, &services, &prepare_request)?;
-        ctx.persist()?;
-        Ok((ctx, services, prepared))
+        match &request.operation {
+            RequestOperation::Send => {
+                let mut ctx = walletd::open(store, network)?;
+                let prepare_request =
+                    prepare::PrepareRequest::for_agent(&request.recipient, request.amount_sat);
+                let prepared = prepare::build(&mut ctx, &services, &prepare_request)?;
+                ctx.persist()?;
+                Ok((ctx, services, prepared, None))
+            }
+            RequestOperation::FrbtcWrap { contract } => {
+                let wrap =
+                    wrapping::prepare(store, network, &services, contract, request.amount_sat)?;
+                Ok((
+                    wrap.ctx,
+                    services,
+                    wrap.prepared,
+                    Some((wrap.spend, wrap.review)),
+                ))
+            }
+        }
     })();
-    let (ctx, services, prepared) = match preparation {
+    let (ctx, services, prepared, wrap_stage) = match preparation {
         Ok(prepared) => prepared,
         Err(err) => {
             // The claim excludes another execution, but a human may dismiss
@@ -230,31 +260,37 @@ pub fn stage(
     // What this transaction actually does, per our own descriptors. The
     // recorded intent committed to one exact payment; a PSBT that pays
     // anything else is not this request.
-    let external = ctx
-        .wallet
-        .public_descriptor(sats_core::bdk_wallet::KeychainKind::External)
-        .clone();
-    let internal = ctx
-        .wallet
-        .public_descriptor(sats_core::bdk_wallet::KeychainKind::Internal)
-        .clone();
-    let derived = verify::derive_intent(prepared.psbt(), &external, &internal, network)
-        .map_err(|e| anyhow::anyhow!("refusing to sign: {e}"))?;
-    let (recipient, amount_sat) = derived
-        .sole_recipient()
-        .map_err(|e| anyhow::anyhow!("refusing to sign: {e}"))?;
-    if recipient != request.recipient || amount_sat != request.amount_sat {
-        bail!(
-            "refusing to sign: the prepared transaction pays {} sat to {recipient}, \
+    let (spend, wrap_review) = if let Some((spend, review)) = wrap_stage {
+        (spend, Some(review))
+    } else {
+        let external = ctx
+            .wallet
+            .public_descriptor(sats_core::bdk_wallet::KeychainKind::External)
+            .clone();
+        let internal = ctx
+            .wallet
+            .public_descriptor(sats_core::bdk_wallet::KeychainKind::Internal)
+            .clone();
+        let derived = verify::derive_intent(prepared.psbt(), &external, &internal, network)
+            .map_err(|e| anyhow::anyhow!("refusing to sign: {e}"))?;
+        let (recipient, amount_sat) = derived
+            .sole_recipient()
+            .map_err(|e| anyhow::anyhow!("refusing to sign: {e}"))?;
+        if recipient != request.recipient || amount_sat != request.amount_sat {
+            bail!(
+                "refusing to sign: the prepared transaction pays {} sat to {recipient}, \
              but this request is {} sat to {}",
-            amount_sat,
-            request.amount_sat,
-            request.recipient
-        );
-    }
-    let spend = SpendRequest {
-        amount_sat: derived.sats_out,
-        fee_sat: derived.fee_sat,
+                amount_sat,
+                request.amount_sat,
+                request.recipient
+            );
+        }
+        let spend = SpendRequest {
+            amount_sat: derived.sats_out,
+            fee_sat: derived.fee_sat,
+        };
+
+        (spend, None)
     };
 
     // The full ladder with the real fee. A refusal here is a grant
@@ -271,6 +307,7 @@ pub fn stage(
         prepared,
         ctx,
         services,
+        wrap_review,
         _claim: claim,
     })))
 }
@@ -327,6 +364,18 @@ fn commit_inner(
                 describe_settled(&fresh)
             );
         }
+        if !fresh.version_supported()
+            || fresh.expected_digest() != fresh.intent_digest
+            || fresh.intent_digest != request.intent_digest
+            || fresh.grant_id != request.grant_id
+            || fresh.agent != request.agent
+            || fresh.network != request.network
+            || fresh.recipient != request.recipient
+            || fresh.amount_sat != request.amount_sat
+            || fresh.operation != request.operation
+        {
+            bail!("request facts changed after review; refusing execution");
+        }
         request = fresh;
         let mut grant = match bound_grant(store, net_name, &request)? {
             Ok(grant) => grant,
@@ -343,6 +392,19 @@ fn commit_inner(
         // is never refused as a mismatch), and no other request's orphan
         // may deny this one.
         reconcile_grant_locked(store, net_name, &mut grant)?;
+        if let Decision::Deny(reason) = evaluate_send(&grant, &request.recipient, &spend, now) {
+            let denied = record_denied_locked(store, net_name, request, reason.clone(), now)?;
+            drop(grant_lock);
+            journal_denied(store, net_name, &denied, reason.clone());
+            return Ok(Outcome::Denied(reason));
+        }
+        if let RequestOperation::FrbtcWrap { contract } = &request.operation
+            && let Err(err) = wrapping::check_contract(&services, contract)
+        {
+            let message = format!("cannot re-verify frBTC contract: {err:#}");
+            record_failed_locked(store, net_name, &mut request, &message, now)?;
+            return Ok(Outcome::Failed { message });
+        }
         match grant.reserve_send(&request.id, &request.recipient, &spend, now) {
             Ok(Reserved::Drawn) => {}
             Ok(Reserved::AlreadyReserved) => {
@@ -628,6 +690,7 @@ fn record_preparation_failure(
         || fresh.intent_digest != request.intent_digest
         || fresh.recipient != request.recipient
         || fresh.amount_sat != request.amount_sat
+        || fresh.operation != request.operation
     {
         bail!("request changed during preparation; refusing to overwrite the record");
     }
@@ -732,6 +795,7 @@ mod tests {
             let store = Store::open(dir.path());
             let mockdata = dir.path().join("mockdata");
             std::fs::create_dir_all(&mockdata).unwrap();
+            std::fs::write(mockdata.join("alkanes-outpoints.json"), "{}").unwrap();
             std::fs::write(
                 dir.path().join("config.toml"),
                 format!(
@@ -1032,6 +1096,305 @@ mod tests {
         match outcome {
             Outcome::Sent { txid, fee_sat, .. } => (txid, fee_sat),
             other => panic!("expected sent, got {other:?}"),
+        }
+    }
+
+    fn wrap_fixture(fx: &Fixture) -> String {
+        let token = fx.grant(50_000, 2_000);
+        std::fs::write(
+            fx.mockdata.join("alkanes-bytecode.json"),
+            r#"{"32:0":"0x0061736d"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            fx.mockdata.join("alkanes-signer.hex"),
+            "0a241a22512030685674457c3eaa6d2904a1340ab80296625e8c7313f54c6ae7c51318f5860710e1fc02",
+        )
+        .unwrap();
+        std::fs::write(fx.mockdata.join("alkanes-wrap.hex"), "0a5e0a0d0a060a0208201200120308864e122b0a262f7365656e2fffdbcfe2faaab58dcfe6363d4cad67bf68ccae88d3e55e0a685a440e35a85f7412010112200a0c2f746f74616c737570706c7912107acbb22f0100000000000000000000001093880f").unwrap();
+        token
+    }
+
+    fn wrap_request(fx: &Fixture, token: &str) -> AgentRequest {
+        crate::request::create_wrap(
+            &fx.store,
+            Network::Signet,
+            &crate::request::CreateWrapParams {
+                agent: "claude",
+                token,
+                idempotency_key: "wrap-1",
+                amount_sat: 10_000,
+            },
+            || Ok(fx.services()),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn wrap_filing_uses_btc_limits_and_rechecks_authority_after_discovery() {
+        for boundary in ["observe", "amount", "budget", "recipient", "allowed"] {
+            let fx = Fixture::new(&[100_000]);
+            let token = wrap_fixture(&fx);
+            let mut grant = fx.grant_state();
+            match boundary {
+                "observe" => grant.mode = GrantMode::Observe,
+                "amount" => grant.max_tx_sat = Some(9_999),
+                "budget" => grant.budget_sat = 9_999,
+                "recipient" => grant.allowed_recipients = Some(vec![ADDRESS.into()]),
+                _ => {
+                    grant.allowed_recipients =
+                        Some(vec![wrapping::info(&fx.services()).unwrap().signer_address])
+                }
+            }
+            fx.store.save_grant("signet", &grant).unwrap();
+            let request = wrap_request(&fx, &token);
+            let reason = request.state.deny_reason().map(DenyReason::code);
+            assert_eq!(
+                reason,
+                match boundary {
+                    "observe" => Some("observe_only"),
+                    "amount" => Some("over_max_tx"),
+                    "budget" => Some("over_budget"),
+                    "recipient" => Some("recipient_not_allowed"),
+                    _ => None,
+                },
+                "{boundary}"
+            );
+            assert_eq!(fx.grant_state().spent_sat, 0);
+            assert_eq!(fx.transactions(), 0);
+        }
+        for action in ["revoke", "replace", "expire"] {
+            let fx = Fixture::new(&[100_000]);
+            let token = wrap_fixture(&fx);
+            let result = crate::request::create_wrap(
+                &fx.store,
+                Network::Signet,
+                &crate::request::CreateWrapParams {
+                    agent: "claude",
+                    token: &token,
+                    idempotency_key: "race",
+                    amount_sat: 10_000,
+                },
+                || {
+                    match action {
+                        "revoke" => fx.revoke(),
+                        "replace" => {
+                            fx.grant(50_000, 2_000);
+                        }
+                        _ => {
+                            let mut grant = fx.grant_state();
+                            grant.expires_at = 0;
+                            fx.store.save_grant("signet", &grant).unwrap();
+                        }
+                    }
+                    Ok(fx.services())
+                },
+            );
+            match action {
+                "revoke" => assert!(matches!(result, Err(CreateError::NoGrant))),
+                "replace" => assert!(matches!(result, Err(CreateError::Unauthorized))),
+                _ => assert_eq!(
+                    result.unwrap().state.deny_reason().unwrap().code(),
+                    "expired"
+                ),
+            }
+            assert_eq!(fx.transactions(), 0);
+        }
+    }
+
+    #[test]
+    fn wrap_request_recipient_cannot_disagree_with_its_actual_signer() {
+        let fx = Fixture::new(&[100_000]);
+        let token = wrap_fixture(&fx);
+        let mut request = wrap_request(&fx, &token);
+        request.recipient = ADDRESS.into();
+        request.intent_digest = request.expected_digest();
+        fx.store.save_agent_request("signet", &request).unwrap();
+        let result = stage(
+            &fx.store,
+            Network::Signet,
+            || panic!("must reject before provider I/O"),
+            &request.id,
+        );
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("signer does not match")
+        );
+        assert_eq!(fx.grant_state().spent_sat, 0);
+    }
+
+    #[test]
+    fn wrap_approval_verifies_outputs_and_draws_once_for_gross_btc_plus_fee() {
+        let fx = Fixture::new(&[100_000]);
+        let token = wrap_fixture(&fx);
+        let request = wrap_request(&fx, &token);
+        assert_eq!(request.status(), "pending_approval");
+        assert_eq!(
+            request.format_version,
+            sats_core::request::WRAP_REQUEST_FORMAT_VERSION
+        );
+        assert_ne!(
+            request.intent_digest,
+            sats_core::intent::SendIntent {
+                network: request.network.clone(),
+                agent: request.agent.clone(),
+                recipient: request.recipient.clone(),
+                amount_sat: request.amount_sat,
+            }
+            .digest()
+        );
+        let Stage::Ready(staged) = stage(
+            &fx.store,
+            Network::Signet,
+            || Ok(fx.services()),
+            &request.id,
+        )
+        .unwrap() else {
+            panic!("denied")
+        };
+        let review = staged.wrap_review().unwrap();
+        assert_eq!(review.predicted_frbtc, 9990);
+        assert_eq!(review.postage_sat, 546);
+        assert_eq!(
+            staged.prepared.psbt().unsigned_tx.output[0].value.to_sat(),
+            10_000
+        );
+        assert_eq!(fx.grant_state().spent_sat, 0);
+        assert_eq!(fx.transactions(), 0);
+        let probe = SignerProbe::default();
+        let (_, fee) = sent(commit(&fx.store, Network::Signet, *staged, probe.factory()).unwrap());
+        assert_eq!(probe.counts(), (1, 1));
+        assert_eq!(fx.grant_state().spent_sat, 10_000 + fee);
+        assert_eq!(fx.request(&request.id).operation, request.operation);
+        assert!(approve(&fx, &request.id, &probe).is_err());
+        assert_eq!(probe.counts(), (1, 1));
+        fx.assert_ledger_consistent();
+    }
+
+    #[test]
+    fn wrap_failures_before_signing_never_draw_and_changes_after_review_are_refused() {
+        for failure in [
+            "hash",
+            "signer",
+            "simulation",
+            "unknown-utxo",
+            "sync",
+            "asset-utxo",
+        ] {
+            let fx = Fixture::new(&[100_000]);
+            let token = wrap_fixture(&fx);
+            let request = wrap_request(&fx, &token);
+            match failure {
+                "hash" => std::fs::write(
+                    fx.mockdata.join("alkanes-bytecode.json"),
+                    r#"{"32:0":"0x00"}"#,
+                )
+                .unwrap(),
+                "signer" => std::fs::write(fx.mockdata.join("alkanes-signer.hex"), "0a00").unwrap(),
+                "simulation" => {
+                    std::fs::write(fx.mockdata.join("alkanes-wrap.hex"), "0a001a03626164").unwrap()
+                }
+                "sync" => std::fs::write(fx.mockdata.join("sync-error"), "offline").unwrap(),
+                _ => {
+                    let ctx = walletd::open(&fx.store, Network::Signet).unwrap();
+                    let outpoint = ctx
+                        .wallet
+                        .list_unspent()
+                        .next()
+                        .unwrap()
+                        .outpoint
+                        .to_string();
+                    let value = if failure == "unknown-utxo" {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::json!({"32:0":"1"})
+                    };
+                    std::fs::write(
+                        fx.mockdata.join("alkanes-outpoints.json"),
+                        serde_json::json!({outpoint:value}).to_string(),
+                    )
+                    .unwrap();
+                }
+            }
+            let probe = SignerProbe::default();
+            assert!(approve(&fx, &request.id, &probe).is_err(), "{failure}");
+            assert_eq!(probe.counts(), (0, 0), "{failure}");
+            assert_eq!(fx.request(&request.id).status(), "failed");
+            assert_eq!(fx.grant_state().spent_sat, 0);
+        }
+        for changed in ["allowlist", "request", "provider", "contract"] {
+            let fx = Fixture::new(&[100_000]);
+            let token = wrap_fixture(&fx);
+            let request = wrap_request(&fx, &token);
+            let Stage::Ready(staged) = stage(
+                &fx.store,
+                Network::Signet,
+                || Ok(fx.services()),
+                &request.id,
+            )
+            .unwrap() else {
+                panic!("denied")
+            };
+            match changed {
+                "allowlist" => {
+                    let mut grant = fx.grant_state();
+                    grant.allowed_recipients = Some(vec![ADDRESS.into()]);
+                    fx.store.save_grant("signet", &grant).unwrap();
+                }
+                "request" => {
+                    let mut changed = request.clone();
+                    changed.amount_sat += 1;
+                    changed.intent_digest = changed.expected_digest();
+                    fx.store.save_agent_request("signet", &changed).unwrap();
+                }
+                "contract" => std::fs::write(
+                    fx.mockdata.join("alkanes-bytecode.json"),
+                    r#"{"32:0":"0x00"}"#,
+                )
+                .unwrap(),
+                _ => std::fs::remove_file(fx.mockdata.join("alkanes-signer.hex")).unwrap(),
+            }
+            let probe = SignerProbe::default();
+            let result = commit(&fx.store, Network::Signet, *staged, probe.factory());
+            match changed {
+                "allowlist" => assert!(matches!(
+                    result.unwrap(),
+                    Outcome::Denied(DenyReason::RecipientNotAllowed { .. })
+                )),
+                "provider" | "contract" => {
+                    assert!(matches!(result.unwrap(), Outcome::Failed { .. }))
+                }
+                _ => assert!(result.is_err()),
+            }
+            assert_eq!(probe.counts(), (0, 0));
+            assert_eq!(fx.grant_state().spent_sat, 0);
+        }
+    }
+
+    #[test]
+    fn wrap_signer_errors_and_crashes_keep_the_draw_and_never_sign_again() {
+        for point in ["signer", "signing-saved"] {
+            let fx = Fixture::new(&[100_000]);
+            let token = wrap_fixture(&fx);
+            let request = wrap_request(&fx, &token);
+            let probe = SignerProbe::with(Fault::SignThenError);
+            if point == "signer" {
+                assert!(matches!(
+                    approve(&fx, &request.id, &probe).unwrap(),
+                    Outcome::Unresolved { .. }
+                ));
+                assert_eq!(probe.counts(), (1, 1));
+            } else {
+                assert!(approve_crashing_at(&fx, &request.id, &probe, point).is_err());
+                assert_eq!(probe.counts(), (0, 0));
+            }
+            assert!(fx.grant_state().spent_sat > 10_000);
+            assert!(approve(&fx, &request.id, &probe).is_err());
+            assert_eq!(fx.request(&request.id).status(), "unresolved");
+            fx.assert_ledger_consistent();
         }
     }
 
@@ -2272,6 +2635,45 @@ mod tests {
         assert_eq!(probe.counts(), (1, 1));
         drop(fx.dir);
     }
+    #[test]
+    fn alkanes_carriers_unknown_outputs_and_indexer_failures_never_reach_the_signer() {
+        for scenario in ["carrier", "unknown", "unavailable"] {
+            let fx = Fixture::new(&[100_000]);
+            let token = fx.grant(50_000, 5_000);
+            let id = fx.create(&token, "pay", 10_000).id;
+            let path = fx.mockdata.join("alkanes-outpoints.json");
+            if scenario == "unavailable" {
+                std::fs::remove_file(path).unwrap();
+            } else {
+                let ctx = walletd::open(&fx.store, Network::Signet).unwrap();
+                let answer = if scenario == "carrier" {
+                    serde_json::json!({"32:0": "1000"})
+                } else {
+                    serde_json::Value::Null
+                };
+                let outputs: serde_json::Map<String, serde_json::Value> = ctx
+                    .wallet
+                    .list_unspent()
+                    .map(|utxo| (utxo.outpoint.to_string(), answer.clone()))
+                    .collect();
+                std::fs::write(path, serde_json::to_vec(&outputs).unwrap()).unwrap();
+            }
+            let probe = SignerProbe::default();
+            let err = approve(&fx, &id, &probe).unwrap_err();
+            let expected = if scenario == "unavailable" {
+                "alkanes view failed"
+            } else {
+                "all 1 unspent outputs are excluded"
+            };
+            assert!(format!("{err:#}").contains(expected), "{scenario}: {err:#}");
+            assert_eq!(probe.counts(), (0, 0));
+            assert_eq!(fx.request(&id).status(), "failed");
+            assert_eq!(fx.grant_state().spent_sat, 0);
+            assert_eq!(fx.transactions(), 0);
+            assert!(!fx.mockdata.join("broadcasts.log").exists());
+        }
+    }
+
     #[test]
     fn fee_and_resolution_failures_are_observable_without_drawing_budget() {
         for failure in ["fee", "resolution"] {

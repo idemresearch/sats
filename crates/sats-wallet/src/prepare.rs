@@ -74,11 +74,23 @@ pub fn build(
         }
         unspendable.extend(dust);
     }
+    // Outputs carrying alkanes, or not yet indexed, where the provider
+    // serves Alkanes. No flag bypasses this: spending one burns its assets.
+    if let Some(assets) = crate::assets::excluded_for_send(ctx, services)? {
+        if !assets.is_empty() {
+            log::warn!(
+                "{} utxo{} excluded (carrying alkanes or not yet indexed)",
+                assets.len(),
+                if assets.len() == 1 { "" } else { "s" },
+            );
+        }
+        unspendable.extend(assets);
+    }
     if utxos.iter().all(|(op, _)| unspendable.contains(op)) {
         bail!(
             "Insufficient spendable funds: all {} unspent outputs are excluded by the dust \
-             heuristic (546 or 330 sats, possible inscriptions) — add funds in other outputs \
-             before retrying",
+             heuristic (546 or 330 sats, possible inscriptions) or as asset carriers — add \
+             funds in other outputs before retrying",
             utxos.len()
         );
     }
