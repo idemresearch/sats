@@ -31,6 +31,12 @@ exact options in your installed version.
 | `sats providers add <subfrost\|esplora>` | Add a provider, asking for its key, and use it |
 | `sats providers use <mempool\|subfrost\|esplora>` | Switch the network's provider |
 | `sats providers remove <subfrost\|esplora>` | Remove a provider and its stored key |
+| `sats alkanes balance` | Show indexed assets and unindexed outputs |
+| `sats alkanes inspect <ID>` | Show bytecode size and code hash |
+| `sats alkanes simulate <ID> <INPUTS>...` | Show an advisory simulation |
+| `sats alkanes execute <ID> <INPUTS>...` | Review and execute a human-operated contract call |
+| `sats alkanes send <ID> <AMOUNT> <ADDRESS>` | Transfer an asset in its base units |
+| `sats alkanes frbtc info` | Read the frBTC contract hash and BTC signer |
 | `sats network` | Show the active network and saved default |
 | `sats network use <signet\|testnet4\|regtest>` | Set the CLI's default network |
 

@@ -168,7 +168,7 @@ broadcast, so a failed broadcast leaves an exact retry.
 
 ## Agent request
 
-Filing happens in the MCP server and touches only the store:
+Plain BTC filing happens in the MCP server and touches only the store:
 
 ```mermaid
 sequenceDiagram
@@ -183,6 +183,12 @@ sequenceDiagram
     H->>H: sats agent approve selects the request for review
     A->>M: check_request until it settles
 ```
+
+A new `request_wrap_frbtc` filing authenticates and checks for an existing
+receipt, reads the frBTC code hash and BTC signer from Subfrost, then
+rechecks the grant and files the canonical request under the ordinary BTC
+ladder. Repeated calls return the stored receipt without provider access.
+Discovery reads public facts only; MCP never prepares a transaction.
 
 Execution happens in the human's process, once, with the password:
 

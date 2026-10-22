@@ -38,6 +38,11 @@ claude mcp add --transport stdio --scope local sats --env SATS_AGENT_TOKEN=<toke
 - **Restart ChatGPT desktop** after adding the server. ChatGPT on the web
   can't launch a local stdio server.
 - **Claude Code uses local scope** and writes no repository `.mcp.json`.
+  Run its setup command from the directory where you launch Claude. An
+  entry added in another directory is not available in that session.
+  Start a fresh Claude session after adding or replacing the entry; use
+  `/mcp` to check the connection. Replacing a grant issues a new token, so
+  replace the existing sats entry with the new printed connection command.
 - **The client stores the raw token** in its local configuration.
 - **The command is pinned.** It fixes the network and the wallet and
   configuration paths, with relative paths made absolute and arguments
@@ -234,6 +239,14 @@ t4 agent approve <request-id>
 t4 alkanes balance
 ```
 
+If approval returns `over_max_fee`, nothing was signed. Inspect the reported
+fee and cap before changing the grant. The provider's estimate uses your
+network's configured confirmation target; a longer target can select a
+lower estimate, with slower confirmation. See [Fee targets](providers.md#fee-targets).
+Changing the target does not change the grant or token. The denied request
+is terminal: after choosing the target, explicitly ask for a new request
+with a fresh idempotency key. The agent must not retry on its own.
+
 The `simulate` protobuf request and signer script handling are frozen
 against the alkanes-rs reference and a read-only testnet4 simulation; the
 standalone `alkanes_simulate` tool uses the separate generic view described
@@ -284,7 +297,7 @@ refusals. Alkanes input and provider failures also use that typed shape.
 | `invalid_idempotency_key` | The key is missing or isn't 1–64 characters of `A-Za-z0-9_-` |
 | `invalid_amount` | A wrap amount is below 546 sat |
 | `invalid_address` | The address doesn't parse or is for another network |
-| `idempotency_key_conflict` | The key was used for a different operation, amount, or pinned policy; `request_id` names it |
+| `idempotency_key_conflict` | The key was used for a different operation, recipient, or amount; `request_id` names it |
 | `no_grant` | No active grant: it was revoked or has expired. Nothing is read or written |
 | `unauthorized` | The token doesn't match this agent's grant, which was re-issued. Nothing is read or written |
 | `clock_unavailable` | The system clock can't be read, so expiry can't be checked |
@@ -292,8 +305,8 @@ refusals. Alkanes input and provider failures also use that typed shape.
 | `invalid_alkane_id` | An Alkanes id is not a decimal u128 `BLOCK:TX` pair |
 | `invalid_alkane_inputs` | A calldata word is not a decimal string in the u128 range |
 | `alkanes_unavailable` | The network's selected provider does not serve Alkanes |
-| `provider_error` | An Alkanes read could not load or resolve the configured provider |
-| `alkanes_error` | An Alkanes read failed network validation, sync, or the provider view |
+| `provider_error` | An Alkanes read or new frBTC filing could not resolve its provider |
+| `alkanes_error` | An Alkanes read or new frBTC filing failed its network, sync, or provider view |
 
 ## Denial reasons
 

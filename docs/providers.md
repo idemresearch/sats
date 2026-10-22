@@ -163,6 +163,20 @@ target applies to every send, including approved agent requests. A human
 `--fee-rate` overrides it for one command. Agents can't choose a target or
 rate, and their grant's fee cap still applies to the real fee.
 
+A target is a fee-estimation preference, not a confirmation guarantee.
+Test-network estimates can be high. Before increasing a grant's fee cap,
+inspect the reported fee and choose a longer confirmation target if you
+prefer a lower fee. Add the setting under the existing network section:
+
+```toml
+[testnet4]
+fee_target = 144
+```
+
+The selected estimate is rounded up to whole sat/vB with a 1 sat/vB floor.
+A longer target can still return a high estimate; the real fee must fit
+the grant's fee cap and total remaining budget.
+
 ## One-off overrides
 
 ```sh

@@ -81,8 +81,9 @@ The agent can call `get_balance`, `get_receive_address`, `get_grant`,
 `request_send`, and `check_request`. With Subfrost, it can also read Alkanes
 balances, inspect contracts, and run advisory simulations with
 `alkanes_balance`, `alkanes_inspect`, and `alkanes_simulate`. Alkanes reads
-provide no execution authority. A Bitcoin payment request comes back
-`pending_approval` and waits for you:
+provide no execution authority. It can propose BTC-to-frBTC wrapping with
+`request_wrap_frbtc` under the same BTC grant. A valid spend request comes
+back `pending_approval` and waits for you:
 
 ```sh
 sats agent requests --watch   # see new requests as they arrive

@@ -317,10 +317,11 @@ mode, including `--dry-run` and `--export-psbt`, and stops agent execution.
 Balance, status, and history may show cached state and say so.
 
 Coin selection excludes outputs of exactly 546 or 330 sats, common
-inscription postage. The check is local: no provider is asked which outputs
-carry assets, so an asset on any other value is not detected. Only a human
-CLI invocation can bypass the check, with `--allow-dust`, and only for that
-invocation.
+inscription postage. This heuristic is local and does not detect assets on
+other output values. An Alkanes provider adds the separate indexer-backed
+exclusion described under [Alkanes](#alkanes). Only a human CLI invocation
+can bypass the local heuristic with `--allow-dust`, for that invocation;
+it never bypasses the Alkanes exclusion.
 
 Provider data is untrusted. A fee rate that is non-finite, negative, or above
 10,000 sat/vB is a typed error. Malformed checkpoint data fails the sync,
@@ -413,7 +414,7 @@ to the recipient.
 | Inscription on a non-postage value | Not detected | Can be spent by accident |
 | Broadcast failure | Transaction saved first; request `broadcast_pending` | Retry with `sats tx broadcast` |
 | Wrong network | Address and provider network validation | Misconfigured third-party responses |
-| Malicious Alkanes view | Advisory display only | Can mislead inspection or simulation |
+| Malicious Alkanes view | Fixed transaction checks, request-bound facts, human review; simulations remain advisory | Can lie about contract identity and effects; an independent reference is needed |
 | Alkane on a wallet output (Alkanes provider) | Indexer-backed exclusion, failing closed | A lying indexer can hide it |
 
 ## Operational guidance
