@@ -22,6 +22,47 @@ pub struct FrbtcContract {
     pub code_hash: String,
 }
 
+/// A protocol-qualified identity. Protocol adapters normalize ids; the
+/// common request model does not interpret names or protocol encodings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetId {
+    pub protocol: String,
+    pub id: String,
+}
+
+/// Exact asset quantity, independently of any Bitcoin funding amount.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetTransfer {
+    pub asset: AssetId,
+    #[serde(with = "positive_decimal")]
+    pub amount: u128,
+}
+
+mod positive_decimal {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+    pub fn serialize<S: Serializer>(amount: &u128, serializer: S) -> Result<S::Ok, S::Error> {
+        if *amount == 0 {
+            return Err(serde::ser::Error::custom("asset amount must be positive"));
+        }
+        serializer.serialize_str(&amount.to_string())
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u128, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(D::Error::custom(
+                "asset amount must be a positive decimal u128 string",
+            ));
+        }
+        value
+            .parse::<u128>()
+            .ok()
+            .filter(|v| *v > 0)
+            .ok_or_else(|| D::Error::custom("asset amount must be a positive decimal u128 string"))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RequestOperation {
@@ -29,6 +70,9 @@ pub enum RequestOperation {
     Send,
     FrbtcWrap {
         contract: FrbtcContract,
+    },
+    AssetTransfer {
+        transfer: AssetTransfer,
     },
 }
 
@@ -40,6 +84,7 @@ impl RequestOperation {
         match self {
             Self::Send => "send",
             Self::FrbtcWrap { .. } => "frbtc_wrap",
+            Self::AssetTransfer { .. } => "asset_transfer",
         }
     }
 }
@@ -57,9 +102,21 @@ pub struct SendIntent {
 }
 
 impl SendIntent {
-    /// Distinguish wrapping from a plain payment even when amount and
-    /// recipient match. The recorded contract facts are part of the intent.
+    /// Bind operation-specific facts as well as the common BTC payment.
+    /// Asset identity/quantity and wrapping contract facts use separate domains.
     pub fn digest_for(&self, operation: &RequestOperation) -> String {
+        if let RequestOperation::AssetTransfer { transfer } = operation {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"sats-asset-transfer-v1\0");
+            encode_str(&mut bytes, &self.network);
+            encode_str(&mut bytes, &self.agent);
+            encode_str(&mut bytes, &self.recipient);
+            bytes.extend_from_slice(&self.amount_sat.to_le_bytes());
+            encode_str(&mut bytes, &transfer.asset.protocol);
+            encode_str(&mut bytes, &transfer.asset.id);
+            bytes.extend_from_slice(&transfer.amount.to_le_bytes());
+            return sha256::Hash::hash(&bytes).to_string();
+        }
         let RequestOperation::FrbtcWrap { contract } = operation else {
             return self.digest();
         };
@@ -202,5 +259,94 @@ mod tests {
             d.chars()
                 .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
         );
+    }
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::*;
+
+    fn intent() -> SendIntent {
+        SendIntent {
+            network: "testnet4".into(),
+            agent: "ai".into(),
+            recipient: "recipient".into(),
+            amount_sat: 546,
+        }
+    }
+    fn transfer() -> RequestOperation {
+        RequestOperation::AssetTransfer {
+            transfer: AssetTransfer {
+                asset: AssetId {
+                    protocol: "alkanes".into(),
+                    id: "32:0".into(),
+                },
+                amount: u128::MAX,
+            },
+        }
+    }
+
+    #[test]
+    fn asset_digest_binds_every_fact_and_is_separate_from_btc_and_wrap() {
+        let base = intent();
+        let op = transfer();
+        let digest = base.digest_for(&op);
+        assert_ne!(digest, base.digest());
+        assert_ne!(
+            digest,
+            base.digest_for(&RequestOperation::FrbtcWrap {
+                contract: FrbtcContract {
+                    signer_address: "recipient".into(),
+                    code_hash: "hash".into()
+                }
+            })
+        );
+        for field in ["network", "agent", "recipient", "postage"] {
+            let mut changed = base.clone();
+            match field {
+                "network" => changed.network = "signet".into(),
+                "agent" => changed.agent = "other".into(),
+                "recipient" => changed.recipient = "other".into(),
+                _ => changed.amount_sat += 1,
+            }
+            assert_ne!(digest, changed.digest_for(&op), "{field}");
+        }
+        for field in ["protocol", "id", "quantity"] {
+            let mut changed = op.clone();
+            let RequestOperation::AssetTransfer { transfer } = &mut changed else {
+                unreachable!()
+            };
+            match field {
+                "protocol" => transfer.asset.protocol = "other".into(),
+                "id" => transfer.asset.id = "2:0".into(),
+                _ => transfer.amount -= 1,
+            }
+            assert_ne!(digest, base.digest_for(&changed), "{field}");
+        }
+    }
+
+    #[test]
+    fn exact_asset_quantity_is_a_positive_decimal_string() {
+        let op = transfer();
+        let json = serde_json::to_value(&op).unwrap();
+        assert_eq!(json["transfer"]["amount"], u128::MAX.to_string());
+        assert_eq!(
+            serde_json::from_value::<RequestOperation>(json.clone()).unwrap(),
+            op
+        );
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!(1),
+            serde_json::json!("0"),
+            serde_json::json!("-1"),
+            serde_json::json!("+1"),
+            serde_json::json!("1.5"),
+            serde_json::json!(""),
+            serde_json::json!("340282366920938463463374607431768211456"),
+        ] {
+            let mut changed = json.clone();
+            changed["transfer"]["amount"] = bad;
+            assert!(serde_json::from_value::<RequestOperation>(changed).is_err());
+        }
     }
 }

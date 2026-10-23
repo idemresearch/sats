@@ -21,7 +21,7 @@ const features = [
     body: (
       <>
         Agents connect over <Link href="/docs/mcp">MCP</Link> to read the
-        wallet and file Bitcoin payment or frBTC wrapping requests. None
+        wallet and file Bitcoin payment, frBTC wrapping, or Alkanes transfer requests. None
         of these tools approve, sign, or broadcast.
       </>
     ),

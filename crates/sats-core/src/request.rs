@@ -30,6 +30,8 @@ use crate::authz::DenyReason;
 pub const REQUEST_FORMAT_VERSION: u32 = 1;
 /// Older builds must never reinterpret a wrapping request as a BTC send.
 pub const WRAP_REQUEST_FORMAT_VERSION: u32 = 3;
+/// Asset transfers cannot be interpreted as BTC payments by older builds.
+pub const ASSET_TRANSFER_REQUEST_FORMAT_VERSION: u32 = 4;
 
 const fn request_format_version() -> u32 {
     REQUEST_FORMAT_VERSION
@@ -181,6 +183,9 @@ impl AgentRequest {
     pub fn version_supported(&self) -> bool {
         match self.operation {
             crate::intent::RequestOperation::Send => self.format_version == REQUEST_FORMAT_VERSION,
+            crate::intent::RequestOperation::AssetTransfer { .. } => {
+                self.format_version == ASSET_TRANSFER_REQUEST_FORMAT_VERSION
+            }
             crate::intent::RequestOperation::FrbtcWrap { .. } => {
                 self.format_version == WRAP_REQUEST_FORMAT_VERSION
             }

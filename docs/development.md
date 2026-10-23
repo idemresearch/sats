@@ -31,7 +31,7 @@ screenshot.
 | Build | Command |
 |---|---|
 | Without MCP | `cargo install --locked --path crates/sats-cli --no-default-features` |
-| Standard build (MCP and human Alkanes commands) | `cargo install --locked --path crates/sats-cli` |
+| Standard build (MCP and Alkanes commands) | `cargo install --locked --path crates/sats-cli` |
 
 ## Verification gate
 
@@ -143,6 +143,15 @@ and `direction.md` are also published on the website. Keep them lean:
 
 CLI help, MCP schemas, tests, and typed contracts are authoritative. When
 prose disagrees with them, fix it in the same change.
+
+Alkanes transfer requests are covered at three layers: pure intent/version
+and transfer-output checks, native executor tests with a signer probe, and the
+served MCP → human CLI approval → observed receipt integration. Tests cover
+full-u128 quantities, idempotency across operations, local keyless filing,
+ordinary grant limits, changed indexed inputs, revocation/replacement, and
+post-signature uncertainty. Terminal tests verify that exact asset effects
+and BTC costs are visible before password entry in text, JSON, and `--yes`
+modes. All use disposable wallets and deterministic mock providers.
 
 ## Release builds
 

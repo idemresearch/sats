@@ -244,7 +244,7 @@ pub fn send(
     args: &SendArgs,
     json: bool,
 ) -> Result<()> {
-    let request = human::TransferRequest {
+    let request = alkanes::transfer::TransferRequest {
         asset: parse_id(args.id)?,
         amount: args.amount,
         address: args.address.to_string(),

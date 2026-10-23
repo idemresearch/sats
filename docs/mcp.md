@@ -1,13 +1,13 @@
 # MCP and agent grants
 
 Connect an AI agent to sats over MCP. The agent can read the wallet and file
-payment requests; only you can approve them.
+Bitcoin payments, frBTC wraps, and Alkanes transfers; only you can approve them.
 
 `sats agent serve <name>` runs a stdio MCP server for one named agent, under
 the grant its token names. The server holds no key material and never
 prepares, signs, or broadcasts. The flow:
 
-1. The agent calls `request_send`, or `request_wrap_frbtc` under the ordinary BTC grant. sats records the request as
+1. The agent calls `request_send`, `request_wrap_frbtc`, or `request_alkanes_send` under the existing grant. sats records the request as
    `pending_approval`, or `denied` if it crosses a grant limit.
 2. You run `sats agent approve`, review the payment, and enter your password.
    That command signs and broadcasts, in your process.
@@ -59,7 +59,7 @@ At startup the server checks that the grant exists and hasn't expired, that
 `SATS_AGENT_TOKEN` matches it, that a wallet exists on the network, and that
 the configuration parses. Provider selection is deferred until a Bitcoin or Alkanes read, or a new
 frBTC wrap filing, needs it. Existing request observation and ordinary BTC
-request filing do not depend on provider access.
+and Alkanes transfer request filing do not depend on provider access.
 
 ## Tools
 
@@ -69,6 +69,7 @@ request filing do not depend on provider access.
 | `get_receive_address` | Reveal and persist the next receive address | No |
 | `get_grant` | Return the agent's own grant | No |
 | `request_send` | File a payment request | No |
+| `request_alkanes_send` | File an exact Alkanes transfer proposal | No |
 | `request_wrap_frbtc` | Read public contract facts and file a BTC-to-frBTC wrap request | Yes (new filings) |
 | `check_request` | Read one of the agent's own requests | No |
 | `alkanes_balance` | Sync and report indexed Alkanes balances and unknown outputs | Yes |
@@ -107,7 +108,7 @@ For a manual AI test, issue an observe-only grant on your selected network,
 run the generated connection command for your client, and reload its MCP
 connection. Ask it to call `get_grant`, `alkanes_balance`, and
 `alkanes_inspect` for a specific id. Supply verified calldata before asking
-for `alkanes_simulate`. Arbitrary Alkanes execution and token transfer requests are unavailable.
+for `alkanes_simulate`. Arbitrary Alkanes execution requests are unavailable. Transfers use `request_alkanes_send` below and require an ask grant and human approval.
 
 ### `get_balance`
 
@@ -180,6 +181,69 @@ A proposal outside a limit is recorded as `denied`, with a `reason`:
 agents. Humans approve and dismiss by it, and the agent observes by it. It is
 not an idempotency key. Passing it back as one files a new request.
 
+### `request_alkanes_send`
+
+```json
+{ "id": "32:0", "amount": "1000", "address": "tb1p...", "idempotency_key": "transfer-1" }
+```
+
+Files an exact asset-transfer proposal on the connection's pinned network.
+The id is a decimal `BLOCK:TX` pair, never a provider name or symbol.
+`amount` is a **positive decimal u128 string in base units**, not satoshis.
+Leading zeros in the id and amount are normalized. Numeric JSON amounts,
+zero, negatives, overflow, and unknown arguments are rejected. The agent
+cannot supply postage, fee rates, calldata, a PSBT, or signing inputs.
+
+No new grant or protocol flag is needed. The current ask grant applies its
+recipient allowlist, expiry, amount cap, fee cap, and budget.
+**BTC caps cover the fixed 546-sat recipient postage plus actual miner fee;
+they do not limit the asset quantity or its value.** Every quantity needs
+human review and approval; an observe grant records `observe_only`.
+
+Filing is local: no provider access, wallet sync, transaction preparation,
+seed access, or signature. The receipt includes:
+
+```json
+{
+  "operation": "asset_transfer",
+  "asset_transfer": { "protocol": "alkanes", "id": "32:0", "amount": "1000" },
+  "status": "pending_approval",
+  "request_id": "r-8c1f0a2b9d3e4f57a1b2c3d4e5f60718",
+  "recipient": "tb1p...",
+  "amount_sat": 546
+}
+```
+
+All filing tools share the idempotency-key namespace. The same canonical
+intent returns its existing receipt; changing the operation, asset, quantity,
+or destination with the same key returns `idempotency_key_conflict`.
+
+On `sats agent approve`, the shared native transfer workflow syncs,
+requires indexed asset inputs, and excludes unrelated asset-bearing, unknown,
+and dust outputs from BTC funding. It checks the exact asset quantity and
+recipient, returns all remaining indexed Alkanes to the wallet, rejects extra
+external BTC outputs, and derives input values and fee from the wallet.
+Human review shows the protocol, id, base-unit quantity, recipient, returned
+assets, BTC postage, actual fee, total, and remaining budget before the password.
+JSON mode keeps this review on stderr. The executor rechecks indexed input
+balances and the live grant before budget reservation and signing.
+
+Transfers use the same reservation ledger and signature boundary as BTC sends.
+A `sent` receipt means broadcast; confirmation and indexing must be observed
+separately with `alkanes_balance`. After filing, the agent only observes
+`check_request`. It must never refile to make a transfer complete.
+
+For a manual test with your existing `t4` alias and ask grant:
+
+```sh
+t4 alkanes balance --json
+# Ask the agent to call request_alkanes_send with a verified id, base-unit amount,
+# another wallet's address, and a fresh idempotency_key.
+t4 agent requests
+t4 agent approve <request-id>
+# After confirmation/indexing, inspect the recipient wallet's Alkanes balance.
+```
+
 ### `request_wrap_frbtc`
 
 ```json
@@ -223,8 +287,7 @@ charge a protocol fee, so the predicted amount can be below the BTC paid.
 
 A `sent` receipt means the transaction was broadcast. Wait for confirmation
 and indexing, then call `alkanes_balance` to observe frBTC. Never file a
-second request to make the first one complete. Generic execution and token
-transfer requests remain unavailable.
+second request to make the first one complete. Generic contract execution requests remain unavailable.
 
 For a testnet4 manual test (using an existing `t4` alias):
 
@@ -286,7 +349,7 @@ What each state means for signing and budget is in
 ## Errors
 
 An error is a failed call, not a request state. It never files a request.
-`request_send`, `request_wrap_frbtc`, and `check_request` return it as `status: "error"` with an
+`request_send`, `request_alkanes_send`, `request_wrap_frbtc`, and `check_request` return it as `status: "error"` with an
 `error_code`. `get_balance`, `get_receive_address`, and the Alkanes read
 tools return `status`, `error_code`, and `message` as an `isError` result for authorization
 refusals. Alkanes input and provider failures also use that typed shape.
@@ -300,6 +363,7 @@ refusals. Alkanes input and provider failures also use that typed shape.
 | `idempotency_key_conflict` | The key was used for a different operation, recipient, or amount; `request_id` names it |
 | `no_grant` | No active grant: it was revoked or has expired. Nothing is read or written |
 | `unauthorized` | The token doesn't match this agent's grant, which was re-issued. Nothing is read or written |
+| `invalid_asset_amount` | Quantity is not a positive decimal u128 string |
 | `clock_unavailable` | The system clock can't be read, so expiry can't be checked |
 | `store_error` | The request store couldn't be read or written |
 | `invalid_alkane_id` | An Alkanes id is not a decimal u128 `BLOCK:TX` pair |

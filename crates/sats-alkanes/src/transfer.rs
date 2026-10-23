@@ -305,7 +305,12 @@ pub fn summarize(
             .checked_add(value)
             .ok_or_else(|| refused("output values overflow"))?;
         if !out.script_pubkey.is_op_return() && !wallet_owned(vout as u32) {
-            external_sat += value;
+            if vout as u32 != *recipient_vout {
+                return Err(refused("an extra output pays BTC outside the wallet"));
+            }
+            external_sat = external_sat
+                .checked_add(value)
+                .ok_or_else(|| refused("external BTC overflow"))?;
         }
     }
     let fee_sat = total_in
@@ -400,6 +405,26 @@ mod tests {
         assert_eq!(summary.external_sat, 546);
         assert_eq!(summary.fee_sat, 20_546 - 11_092);
         assert_eq!(summary.returned, sheet(&[(FRBTC, 60_000), (OTHER, 7)]));
+    }
+
+    #[test]
+    fn extra_external_btc_output_without_assets_is_refused() {
+        let mut tx = tx_with(&[transfer_stone(FRBTC, 5)], 1);
+        tx.output.push(TxOut {
+            value: Amount::from_sat(1000),
+            script_pubkey: script(0xaa),
+        });
+        let err = summarize(
+            &tx,
+            &[20_000],
+            &[sheet(&[(FRBTC, 10)])],
+            FRBTC,
+            5,
+            &recipient(),
+            mine,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("extra output pays BTC"), "{err}");
     }
 
     #[test]

@@ -31,7 +31,10 @@
 //! reaches the signer, and it is invoked only by a surface that has
 //! obtained the human's authorization.
 
-use crate::alkanes::wrapping::{self, WrapReview};
+use crate::alkanes::{
+    transfer::{self, TransferRequest, TransferReview},
+    wrapping::{self, WrapReview},
+};
 use anyhow::{Context, Result, bail};
 use sats_core::authz::{
     Decision, DenyReason, Grant, ReserveError, Reserved, SpendRequest, evaluate_send,
@@ -81,6 +84,7 @@ pub struct Staged {
     /// Resolved after the local prechecks; the same selection serves broadcast.
     services: Services,
     wrap_review: Option<WrapReview>,
+    asset_transfer_review: Option<TransferReview>,
     _claim: RequestClaim,
 }
 
@@ -99,6 +103,11 @@ impl Staged {
     /// The additional public facts a human reviews for a wrapping request.
     pub fn wrap_review(&self) -> Option<&WrapReview> {
         self.wrap_review.as_ref()
+    }
+
+    /// Indexed asset effects bound to this exact reviewed transaction.
+    pub fn asset_transfer_review(&self) -> Option<&TransferReview> {
+        self.asset_transfer_review.as_ref()
     }
 
     /// What the prepared transaction pays and costs, derived from the
@@ -175,6 +184,22 @@ pub fn stage(
     {
         bail!("frBTC signer does not match the request recipient; refusing execution");
     }
+    if let RequestOperation::AssetTransfer { transfer } = &request.operation {
+        if transfer.asset.protocol != "alkanes" {
+            bail!("unsupported asset protocol; refusing execution");
+        }
+        let id = transfer
+            .asset
+            .id
+            .parse::<sats_alkanes::id::AlkaneId>()
+            .map_err(|e| anyhow::anyhow!(e))?;
+        if id.to_string() != transfer.asset.id
+            || transfer.amount == 0
+            || request.amount_sat != sats_alkanes::build::DEFAULT_POSTAGE_SAT
+        {
+            bail!("invalid asset transfer facts; refusing execution");
+        }
+    }
     if !request.is_approvable() {
         bail!(
             "request {} is {} — nothing to approve",
@@ -227,7 +252,7 @@ pub fn stage(
                     prepare::PrepareRequest::for_agent(&request.recipient, request.amount_sat);
                 let prepared = prepare::build(&mut ctx, &services, &prepare_request)?;
                 ctx.persist()?;
-                Ok((ctx, services, prepared, None))
+                Ok((ctx, services, prepared, None, None))
             }
             RequestOperation::FrbtcWrap { contract } => {
                 let wrap =
@@ -237,11 +262,40 @@ pub fn stage(
                     services,
                     wrap.prepared,
                     Some((wrap.spend, wrap.review)),
+                    None,
+                ))
+            }
+            RequestOperation::AssetTransfer { transfer: intent } => {
+                let args = TransferRequest {
+                    asset: intent
+                        .asset
+                        .id
+                        .parse()
+                        .map_err(|e| anyhow::anyhow!("{e}"))?,
+                    amount: intent.amount,
+                    address: request.recipient.clone(),
+                    fee_rate: None,
+                    postage_sat: request.amount_sat,
+                };
+                let transfer = transfer::prepare(store, network, &services, &args)?;
+                if transfer.review.asset.to_string() != intent.asset.id
+                    || transfer.review.amount != intent.amount
+                    || transfer.review.recipient != request.recipient
+                    || transfer.review.summary.recipient_sat != request.amount_sat
+                {
+                    bail!("prepared asset transfer disagrees with the request");
+                }
+                Ok((
+                    transfer.ctx,
+                    services,
+                    transfer.prepared,
+                    None,
+                    Some(transfer.review),
                 ))
             }
         }
     })();
-    let (ctx, services, prepared, wrap_stage) = match preparation {
+    let (ctx, services, prepared, wrap_stage, asset_transfer_review) = match preparation {
         Ok(prepared) => prepared,
         Err(err) => {
             // The claim excludes another execution, but a human may dismiss
@@ -262,6 +316,14 @@ pub fn stage(
     // anything else is not this request.
     let (spend, wrap_review) = if let Some((spend, review)) = wrap_stage {
         (spend, Some(review))
+    } else if let Some(review) = &asset_transfer_review {
+        (
+            SpendRequest {
+                amount_sat: review.summary.recipient_sat,
+                fee_sat: review.summary.fee_sat,
+            },
+            None,
+        )
     } else {
         let external = ctx
             .wallet
@@ -308,6 +370,7 @@ pub fn stage(
         ctx,
         services,
         wrap_review,
+        asset_transfer_review,
         _claim: claim,
     })))
 }
@@ -345,6 +408,7 @@ fn commit_inner(
         prepared,
         mut ctx,
         services,
+        asset_transfer_review,
         _claim,
         ..
     } = staged;
@@ -405,6 +469,15 @@ fn commit_inner(
             record_failed_locked(store, net_name, &mut request, &message, now)?;
             return Ok(Outcome::Failed { message });
         }
+        if let Some(review) = &asset_transfer_review
+            && let Err(err) = transfer::recheck(&ctx, &services, prepared.psbt(), review)
+        {
+            let message = format!("cannot re-verify asset transfer: {err:#}");
+            record_failed_locked(store, net_name, &mut request, &message, now)?;
+            return Ok(Outcome::Failed { message });
+        }
+        // Provider rechecks can take time: expiry must still hold at reservation.
+        let now = now_checked()?;
         match grant.reserve_send(&request.id, &request.recipient, &spend, now) {
             Ok(Reserved::Drawn) => {}
             Ok(Reserved::AlreadyReserved) => {
@@ -1096,6 +1169,410 @@ mod tests {
         match outcome {
             Outcome::Sent { txid, fee_sat, .. } => (txid, fee_sat),
             other => panic!("expected sent, got {other:?}"),
+        }
+    }
+
+    fn asset_fixture(fx: &Fixture) -> String {
+        let token = fx.grant(50_000, 2_000);
+        let ctx = walletd::open(&fx.store, Network::Signet).unwrap();
+        let asset = ctx
+            .wallet
+            .list_unspent()
+            .find(|u| u.txout.value.to_sat() == 546)
+            .unwrap()
+            .outpoint;
+        std::fs::write(
+            fx.mockdata.join("alkanes-outpoints.json"),
+            serde_json::json!({asset.to_string(): {"32:0":"5000", "2:0":"50"}}).to_string(),
+        )
+        .unwrap();
+        token
+    }
+
+    fn asset_request(
+        fx: &Fixture,
+        token: &str,
+        key: &str,
+        id: &str,
+        amount: &str,
+    ) -> Result<AgentRequest, CreateError> {
+        crate::request::create_alkanes_send(
+            &fx.store,
+            Network::Signet,
+            &crate::request::CreateAlkanesSendParams {
+                agent: "claude",
+                token,
+                idempotency_key: key,
+                id,
+                amount,
+                address: ADDRESS,
+            },
+        )
+    }
+
+    #[test]
+    fn asset_filing_is_local_exact_idempotent_and_uses_btc_grant_boundaries() {
+        for boundary in [
+            "observe",
+            "amount",
+            "budget",
+            "recipient",
+            "expiry",
+            "allowed",
+        ] {
+            let fx = Fixture::new(&[546, 100_000]);
+            let token = asset_fixture(&fx);
+            let mut grant = fx.grant_state();
+            match boundary {
+                "observe" => grant.mode = GrantMode::Observe,
+                "amount" => grant.max_tx_sat = Some(545),
+                "budget" => grant.budget_sat = 545,
+                "recipient" => grant.allowed_recipients = Some(vec![]),
+                "expiry" => grant.expires_at = 0,
+                _ => grant.allowed_recipients = Some(vec![ADDRESS.into()]),
+            }
+            fx.store.save_grant("signet", &grant).unwrap();
+            // No provider configuration or wallet is needed to file.
+            std::fs::remove_file(fx.dir.path().join("config.toml")).unwrap();
+            std::fs::remove_file(fx.store.wallet_db_path("signet")).unwrap();
+            let request =
+                asset_request(&fx, &token, "asset", "032:00", &u128::MAX.to_string()).unwrap();
+            assert_eq!(
+                request.format_version,
+                sats_core::request::ASSET_TRANSFER_REQUEST_FORMAT_VERSION
+            );
+            assert!(request.version_supported());
+            let mut wrong_version = request.clone();
+            wrong_version.format_version = sats_core::request::REQUEST_FORMAT_VERSION;
+            assert!(!wrong_version.version_supported());
+            assert_eq!(request.amount_sat, 546);
+            assert_eq!(
+                request.state.deny_reason().map(DenyReason::code),
+                match boundary {
+                    "observe" => Some("observe_only"),
+                    "amount" => Some("over_max_tx"),
+                    "budget" => Some("over_budget"),
+                    "recipient" => Some("recipient_not_allowed"),
+                    "expiry" => Some("expired"),
+                    _ => None,
+                }
+            );
+            let repeated =
+                asset_request(&fx, &token, "asset", "32:0", &u128::MAX.to_string()).unwrap();
+            assert_eq!(request.id, repeated.id);
+            assert!(matches!(
+                asset_request(&fx, &token, "asset", "32:0", "1000"),
+                Err(CreateError::Conflict { .. })
+            ));
+            assert!(matches!(
+                fx.create_as("claude", &token, "asset", 546),
+                Err(CreateError::Conflict { .. })
+            ));
+            assert_eq!(fx.grant_state().spent_sat, 0);
+            assert_eq!(fx.transactions(), 0);
+        }
+    }
+
+    #[test]
+    fn asset_inputs_reject_bad_quantities_ids_and_unauthorized_tokens() {
+        let fx = Fixture::new(&[546, 100_000]);
+        let token = asset_fixture(&fx);
+        for amount in [
+            "",
+            "0",
+            "-1",
+            "+1",
+            "1.5",
+            "340282366920938463463374607431768211456",
+        ] {
+            assert_eq!(
+                asset_request(&fx, &token, "asset", "32:0", amount)
+                    .unwrap_err()
+                    .code(),
+                "invalid_asset_amount"
+            );
+        }
+        assert_eq!(
+            asset_request(&fx, &token, "asset", "frBTC", "1")
+                .unwrap_err()
+                .code(),
+            "invalid_alkane_id"
+        );
+        assert_eq!(
+            asset_request(&fx, "wrong", "asset", "32:0", "1")
+                .unwrap_err()
+                .code(),
+            "unauthorized"
+        );
+        assert!(fx.store.list_agent_requests("signet").unwrap().is_empty());
+    }
+
+    #[test]
+    fn asset_approval_preserves_other_assets_and_draws_btc_postage_plus_fee_once() {
+        let fx = Fixture::new(&[546, 100_000]);
+        let token = asset_fixture(&fx);
+        let request = asset_request(&fx, &token, "asset", "32:0", "1000").unwrap();
+        let probe = SignerProbe::default();
+        let Stage::Ready(staged) = stage(
+            &fx.store,
+            Network::Signet,
+            || Ok(fx.services()),
+            &request.id,
+        )
+        .unwrap() else {
+            panic!("denied")
+        };
+        let review = staged.asset_transfer_review().unwrap();
+        assert_eq!(review.amount, 1000);
+        assert_eq!(review.summary.recipient_sat, 546);
+        assert_eq!(
+            review.summary.returned.get(&"32:0".parse().unwrap()),
+            Some(&4000)
+        );
+        assert_eq!(
+            review.summary.returned.get(&"2:0".parse().unwrap()),
+            Some(&50)
+        );
+        let fee = staged.spend().fee_sat;
+        assert_eq!(fx.grant_state().spent_sat, 0);
+        assert_eq!(probe.counts(), (0, 0));
+        let (_, actual_fee) =
+            sent(commit(&fx.store, Network::Signet, *staged, probe.factory()).unwrap());
+        assert_eq!(actual_fee, fee);
+        assert_eq!(fx.grant_state().spent_sat, 546 + fee);
+        assert_eq!(fx.grant_state().tx_count, 1);
+        assert_eq!(probe.counts(), (1, 1));
+        assert!(approve(&fx, &request.id, &probe).is_err());
+        assert_eq!(probe.counts(), (1, 1));
+        fx.assert_ledger_consistent();
+    }
+
+    #[test]
+    fn asset_approval_fails_closed_before_signing_on_provider_and_asset_changes() {
+        for failure in [
+            "unindexed",
+            "missing",
+            "insufficient",
+            "sync",
+            "changed",
+            "fee",
+            "revoked",
+            "replaced",
+        ] {
+            let fx = Fixture::new(&[546, 100_000]);
+            let token = asset_fixture(&fx);
+            let request = asset_request(&fx, &token, "asset", "32:0", "1000").unwrap();
+            let probe = SignerProbe::default();
+            match failure {
+                "unindexed" => {
+                    let ctx = walletd::open(&fx.store, Network::Signet).unwrap();
+                    let points: serde_json::Map<String, serde_json::Value> = ctx
+                        .wallet
+                        .list_unspent()
+                        .map(|u| (u.outpoint.to_string(), serde_json::Value::Null))
+                        .collect();
+                    std::fs::write(
+                        fx.mockdata.join("alkanes-outpoints.json"),
+                        serde_json::to_string(&points).unwrap(),
+                    )
+                    .unwrap();
+                }
+                "missing" => {
+                    std::fs::remove_file(fx.mockdata.join("alkanes-outpoints.json")).unwrap();
+                }
+                "insufficient" => {}
+                "sync" => {
+                    std::fs::write(fx.mockdata.join("sync-error"), "offline").unwrap();
+                }
+                _ => {}
+            }
+            if failure == "insufficient" {
+                let mut r = request.clone();
+                let RequestOperation::AssetTransfer { transfer } = &mut r.operation else {
+                    unreachable!()
+                };
+                transfer.amount = 5001;
+                r.intent_digest = r.expected_digest();
+                fx.store.save_agent_request("signet", &r).unwrap();
+            }
+            if ["changed", "fee", "revoked", "replaced"].contains(&failure) {
+                let Stage::Ready(staged) = stage(
+                    &fx.store,
+                    Network::Signet,
+                    || Ok(fx.services()),
+                    &request.id,
+                )
+                .unwrap() else {
+                    panic!("denied")
+                };
+                match failure {
+                    "changed" => {
+                        std::fs::write(fx.mockdata.join("alkanes-outpoints.json"), "{}").unwrap();
+                    }
+                    "fee" => {
+                        let mut grant = fx.grant_state();
+                        grant.max_fee_sat = 0;
+                        fx.store.save_grant("signet", &grant).unwrap();
+                    }
+                    "revoked" => fx.revoke(),
+                    _ => {
+                        fx.grant(50_000, 2_000);
+                    }
+                }
+                assert!(!matches!(
+                    commit(&fx.store, Network::Signet, *staged, probe.factory()).unwrap(),
+                    Outcome::Sent { .. }
+                ));
+            } else {
+                assert!(approve(&fx, &request.id, &probe).is_err());
+                assert_eq!(fx.request(&request.id).status(), "failed");
+            }
+            assert_eq!(probe.counts(), (0, 0), "{failure}");
+            assert_eq!(fx.transactions(), 0);
+            if failure != "revoked" {
+                assert_eq!(fx.grant_state().spent_sat, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn asset_unknown_protocol_and_tampered_facts_stop_before_provider_access() {
+        for field in ["protocol", "id", "quantity", "postage", "digest"] {
+            let fx = Fixture::new(&[546, 100_000]);
+            let token = asset_fixture(&fx);
+            let mut request = asset_request(&fx, &token, "asset", "32:0", "1000").unwrap();
+            let RequestOperation::AssetTransfer { transfer } = &mut request.operation else {
+                unreachable!()
+            };
+            match field {
+                "protocol" => transfer.asset.protocol = "unknown".into(),
+                "id" => transfer.asset.id = "032:0".into(),
+                "quantity" => transfer.amount = 1001,
+                "postage" => request.amount_sat = 547,
+                _ => request.recipient = "tampered".into(),
+            }
+            if !["quantity", "digest"].contains(&field) {
+                request.intent_digest = request.expected_digest();
+            }
+            fx.store.save_agent_request("signet", &request).unwrap();
+            assert!(
+                stage(
+                    &fx.store,
+                    Network::Signet,
+                    || panic!("must reject before I/O"),
+                    &request.id
+                )
+                .is_err()
+            );
+            assert_eq!(fx.grant_state().spent_sat, 0);
+        }
+    }
+
+    #[test]
+    fn asset_signer_uncertainty_never_refunds_or_signs_again() {
+        for fault in [Fault::Error, Fault::SignThenError, Fault::Unfinalized] {
+            let fx = Fixture::new(&[546, 100_000]);
+            let token = asset_fixture(&fx);
+            let request = asset_request(&fx, &token, "asset", "32:0", "1000").unwrap();
+            let probe = SignerProbe::with(fault);
+            assert!(matches!(
+                approve(&fx, &request.id, &probe).unwrap(),
+                Outcome::Unresolved { .. }
+            ));
+            assert!(fx.grant_state().spent_sat > 546);
+            assert_eq!(probe.counts(), (1, 1));
+            assert!(approve(&fx, &request.id, &probe).is_err());
+            assert_eq!(probe.counts(), (1, 1));
+            fx.assert_ledger_consistent();
+        }
+    }
+
+    #[test]
+    fn asset_review_cannot_be_replaced_and_real_fee_can_deny_before_signing() {
+        for change in ["asset", "quantity", "recipient", "fee"] {
+            let fx = Fixture::new(&[546, 100_000]);
+            let token = asset_fixture(&fx);
+            let mut request = asset_request(&fx, &token, "asset", "32:0", "1000").unwrap();
+            let Stage::Ready(staged) = stage(
+                &fx.store,
+                Network::Signet,
+                || Ok(fx.services()),
+                &request.id,
+            )
+            .unwrap() else {
+                panic!("denied")
+            };
+            if change == "fee" {
+                drop(staged);
+                let mut grant = fx.grant_state();
+                grant.max_fee_sat = 1;
+                fx.store.save_grant("signet", &grant).unwrap();
+                let Stage::Denied(_, reason) = stage(
+                    &fx.store,
+                    Network::Signet,
+                    || Ok(fx.services()),
+                    &request.id,
+                )
+                .unwrap() else {
+                    panic!("not denied")
+                };
+                assert!(matches!(reason, DenyReason::OverMaxFee { .. }));
+            } else {
+                let RequestOperation::AssetTransfer { transfer } = &mut request.operation else {
+                    unreachable!()
+                };
+                match change {
+                    "asset" => transfer.asset.id = "2:0".into(),
+                    "quantity" => transfer.amount += 1,
+                    _ => {
+                        request.recipient = staged
+                            .ctx
+                            .wallet
+                            .peek_address(sats_core::bdk_wallet::KeychainKind::External, 1)
+                            .address
+                            .to_string()
+                    }
+                }
+                request.intent_digest = request.expected_digest();
+                fx.store.save_agent_request("signet", &request).unwrap();
+                let probe = SignerProbe::default();
+                assert!(commit(&fx.store, Network::Signet, *staged, probe.factory()).is_err());
+                assert_eq!(probe.counts(), (0, 0));
+            }
+            assert_eq!(fx.grant_state().spent_sat, 0);
+        }
+    }
+
+    #[test]
+    fn asset_crash_and_broadcast_failure_preserve_the_existing_recovery_boundary() {
+        for failure in ["signing-saved", "broadcast"] {
+            let fx = Fixture::new(&[546, 100_000]);
+            let token = asset_fixture(&fx);
+            let request = asset_request(&fx, &token, "asset", "32:0", "1000").unwrap();
+            let probe = SignerProbe::default();
+            if failure == "signing-saved" {
+                assert!(approve_crashing_at(&fx, &request.id, &probe, failure).is_err());
+                assert!(fx.grant_state().spent_sat > 546);
+                assert!(approve(&fx, &request.id, &probe).is_err());
+                assert_eq!(fx.request(&request.id).status(), "unresolved");
+                assert_eq!(probe.counts(), (0, 0));
+            } else {
+                std::fs::write(fx.mockdata.join("broadcast-fail"), "offline").unwrap();
+                let Outcome::BroadcastPending { txid, .. } =
+                    approve(&fx, &request.id, &probe).unwrap()
+                else {
+                    panic!("not pending")
+                };
+                let spent = fx.grant_state().spent_sat;
+                assert!(spent > 546);
+                assert!(approve(&fx, &request.id, &probe).is_err());
+                std::fs::remove_file(fx.mockdata.join("broadcast-fail")).unwrap();
+                crate::spend::rebroadcast(&fx.store, Network::Signet, || Ok(fx.services()), &txid)
+                    .unwrap();
+                assert_eq!(probe.counts(), (1, 1));
+                assert_eq!(fx.grant_state().spent_sat, spent);
+            }
+            fx.assert_ledger_consistent();
         }
     }
 

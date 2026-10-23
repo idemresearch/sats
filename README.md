@@ -82,7 +82,9 @@ The agent can call `get_balance`, `get_receive_address`, `get_grant`,
 balances, inspect contracts, and run advisory simulations with
 `alkanes_balance`, `alkanes_inspect`, and `alkanes_simulate`. Alkanes reads
 provide no execution authority. It can propose BTC-to-frBTC wrapping with
-`request_wrap_frbtc` under the same BTC grant. A valid spend request comes
+`request_wrap_frbtc` and exact Alkanes transfers with `request_alkanes_send`
+under the same grant. BTC limits cover postage and fees, not asset quantities;
+every transfer requires your approval. A valid spend request comes
 back `pending_approval` and waits for you:
 
 ```sh
@@ -115,8 +117,8 @@ won't spend on out-of-date Bitcoin data, and by default it never spends 546- or
 
 Alkanes commands are included: `sats alkanes balance`, `inspect`, `simulate`,
 `execute`, and `send`. They require Subfrost; execution and transfers are
-human-operated. Agents can propose BTC-to-frBTC wrapping within their normal
-BTC grant; you review and approve each request. With
+human-authorized. Agents can propose BTC-to-frBTC wraps and Alkanes transfers
+within their existing grant; you review and approve each request. With
 Subfrost selected, ordinary sends also exclude outputs
 carrying alkanes or not yet indexed. See [Alkanes](docs/cli.md#alkanes).
 
