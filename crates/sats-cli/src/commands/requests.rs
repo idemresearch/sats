@@ -6,6 +6,7 @@ use std::io::{IsTerminal, Write};
 use anyhow::{Context, Result, bail};
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
+use sats_core::intent::RequestOperation;
 use sats_core::request::{AgentRequest, RequestState};
 use sats_wallet::config::network_name;
 use sats_wallet::request::list_reconciled;
@@ -57,12 +58,14 @@ pub fn run(store: &Store, network: Network, all: bool, watch: bool, json: bool) 
             [
                 request.id.clone(),
                 request.agent.clone(),
-                if request.operation.is_send() {
-                    elide(&request.recipient)
-                } else {
-                    format!("frBTC wrap → {}", elide(&request.recipient))
+                match &request.operation {
+                    RequestOperation::Send => elide(&request.recipient),
+                    RequestOperation::FrbtcWrap { .. } => {
+                        format!("frBTC wrap → {}", elide(&request.recipient))
+                    }
+                    RequestOperation::AssetTransfer { .. } => elide(&request.recipient),
                 },
-                format_sats(request.amount_sat),
+                request_amount(request),
                 status_cell(request),
                 format!(
                     "{} ago",
@@ -168,10 +171,10 @@ fn render_selection<'a>(
     for (index, request) in eligible.iter().enumerate() {
         writeln!(
             out,
-            "{}. {}  {} sat → {}  [{}]  {}",
+            "{}. {}  {} → {}  [{}]  {}",
             index + 1,
             request.agent,
-            format_sats(request.amount_sat),
+            request_quantity(request),
             request.recipient,
             request.id,
             next_step(request),
@@ -277,16 +280,34 @@ fn watch_loop(store: &Store, network: Network, json: bool) -> Result<()> {
 /// command that approves it.
 fn watch_line(request: &AgentRequest, now: u64) -> String {
     format!(
-        "{age:>10}  {agent}  {amount} sat → {recipient}  pending_approval  approve: sats agent approve {id}",
+        "{age:>10}  {agent}  {amount} → {recipient}  pending_approval  approve: sats agent approve {id}",
         age = format!(
             "{} ago",
             ui::human_duration(now.saturating_sub(request.created_at))
         ),
         agent = request.agent,
-        amount = format_sats(request.amount_sat),
+        amount = request_quantity(request),
         recipient = elide(&request.recipient),
         id = request.id,
     )
+}
+
+fn request_amount(request: &AgentRequest) -> String {
+    match &request.operation {
+        RequestOperation::AssetTransfer { transfer } => format!(
+            "{} {}:{} (+{} sat postage)",
+            transfer.amount, transfer.asset.protocol, transfer.asset.id, request.amount_sat
+        ),
+        _ => format_sats(request.amount_sat),
+    }
+}
+
+fn request_quantity(request: &AgentRequest) -> String {
+    if matches!(request.operation, RequestOperation::AssetTransfer { .. }) {
+        request_amount(request)
+    } else {
+        format!("{} sat", format_sats(request.amount_sat))
+    }
 }
 
 /// Middle-elide a long address so the table stays scannable; the full

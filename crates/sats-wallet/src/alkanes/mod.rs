@@ -17,6 +17,7 @@ use crate::store::Store;
 use crate::walletd::{self, WalletCtx};
 
 pub mod human;
+pub mod transfer;
 pub mod wrapping;
 
 pub struct Inspection {

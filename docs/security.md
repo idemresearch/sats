@@ -127,12 +127,15 @@ expiries short, and revoke grants you don't need.
 ### Grant format
 
 Grants retain the standard BTC `format_version: 1` shape. Wrapping uses the
-same limits and requires no protocol-specific permission. The obsolete
+same limits as asset transfers and requires no protocol-specific permission. The obsolete
 pre-release format-2 grants are refused with re-issue guidance; their
 restrictions are never silently discarded. BTC send requests retain
 version 1; frBTC wrapping requests use version 3, binding their recorded
 contract facts and operation so an older binary cannot reinterpret them as
-plain payments. Stored records are never silently migrated. Unsupported
+plain payments. Asset-transfer requests use version 4 and a separate digest
+binding protocol, asset id, quantity, recipient, network, agent, and BTC
+postage. Older binaries refuse them. Stored records are never silently
+migrated. Unsupported
 development shapes fail with recreate guidance, and newer grants are
 refused because they may carry restrictions this build cannot see.
 
@@ -355,8 +358,7 @@ provider, which must be Subfrost. MCP exposes Alkanes balance, inspection,
 and advisory simulation, authenticated against the pinned network's grant
 on every call. These reads never prepare, execute, sign, or broadcast.
 The separate fixed `request_wrap_frbtc` capability files a request under
-the ordinary BTC grant for human approval; generic
-contract execution and token transfer proposals remain unavailable.
+the ordinary BTC grant for human approval. `request_alkanes_send` files an exact asset transfer under the same grant; generic contract execution proposals remain unavailable.
 Provider text is untrusted data, and asset quantities use decimal strings
 to preserve u128 precision. The generic simulation request format has not been
 verified against a live endpoint. Wrapping uses a separate exact-transaction
@@ -468,3 +470,35 @@ signed-transaction persistence, unresolved recovery, and rebroadcast-only
 handling as ordinary agent payments. Budget counts gross BTC paid plus miner
 fees, without treating predicted frBTC as a refund. A broadcast receipt does
 not prove minting: confirmation and indexing must be observed separately.
+
+
+### Agent asset-transfer boundary
+
+`request_alkanes_send` files a local proposal without provider or seed access.
+The core request is a generic `AssetTransfer` with a protocol-qualified asset
+id and exact positive u128 quantity serialized as a decimal string.
+The native executor currently accepts only canonical Alkanes transfers;
+unknown protocols fail before provider access. Names and symbols never
+select assets or grant authority. Request format 4 prevents older binaries
+from interpreting an asset transfer as an ordinary BTC payment.
+
+No protocol grant flags are added. The existing grant authorizes proposals;
+its recipient allowlist applies to the destination and its satoshi limits
+cover fixed 546-sat recipient postage plus actual fee. **The grant does not cap
+asset quantity or value.** The human must review the asset id and exact
+base-unit quantity as well as recipient, returned assets, postage, fee, total,
+and budget before authorizing that request.
+
+The shared CLI/native transfer builder syncs successfully, selects indexed
+asset inputs, and excludes unrelated assets, unknown outputs, and dust from
+BTC funding. Independent verification checks exact recipient assets, returns
+all other indexed Alkanes to wallet-owned outputs, and rejects additional
+external BTC outputs. Input BTC values come from the wallet. Fresh indexed
+input balances are checked against the reviewed transaction before reservation
+and signing; changes or unavailable data stop before the signer.
+
+The existing ledger, exact-request recheck, revocation rules, persisted
+`signing` boundary, signature persistence, and unresolved/rebroadcast recovery
+apply without a parallel execution path. A broadcast receipt proves neither
+confirmation nor indexing. Indexer claims remain trusted inputs; these checks
+do not model other asset protocols carried by the same outputs.

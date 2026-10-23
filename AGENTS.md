@@ -81,7 +81,7 @@ advice for exactly that file.
 | `crates/sats-core/src/engine.rs` | Pure transaction planning and conservative UTXO exclusion |
 | `crates/sats-core/src/authz.rs` | Pure grant decisions (the verdict ladder), reservation, and refund rules |
 | `crates/sats-core/src/request.rs` | The request record and its state machine |
-| `crates/sats-core/src/intent.rs` | The canonical send intent and its digest |
+| `crates/sats-core/src/intent.rs` | Canonical BTC and protocol-qualified asset-transfer intents and digests |
 | `crates/sats-core/src/network.rs` | The network policy: test networks only, mainnet refused |
 | `crates/sats-core/src/event.rs` | The causal event kinds appended per request transition |
 | `crates/sats-core/src/token.rs` | Agent capability tokens: mint, hash, constant-time verify |

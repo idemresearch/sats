@@ -32,7 +32,7 @@ use sats_core::authz::{
 use sats_core::bitcoin::hashes::{Hash, sha256};
 use sats_core::bitcoin::{Address, Network};
 use sats_core::event::{AgentEvent, EVENT_FORMAT_VERSION, EventKind};
-use sats_core::intent::{RequestOperation, SendIntent};
+use sats_core::intent::{AssetId, AssetTransfer, RequestOperation, SendIntent};
 use sats_core::plan::{TransactionRecord, TransactionStatus};
 use sats_core::request::{AgentRequest, REQUEST_FORMAT_VERSION, RequestState};
 
@@ -97,6 +97,8 @@ pub enum CreateError {
     InvalidIdempotencyKey,
     InvalidAddress(String),
     InvalidAmount,
+    InvalidAlkaneId(String),
+    InvalidAssetAmount,
     ClockUnavailable(String),
     /// No grant on file for this agent: nothing can be authenticated,
     /// so nothing is written.
@@ -119,6 +121,8 @@ impl CreateError {
             CreateError::InvalidIdempotencyKey => "invalid_idempotency_key",
             CreateError::InvalidAddress(_) => "invalid_address",
             CreateError::InvalidAmount => "invalid_amount",
+            CreateError::InvalidAlkaneId(_) => "invalid_alkane_id",
+            CreateError::InvalidAssetAmount => "invalid_asset_amount",
             CreateError::ClockUnavailable(_) => "clock_unavailable",
             CreateError::NoGrant => "no_grant",
             CreateError::Unauthorized => "unauthorized",
@@ -135,6 +139,10 @@ impl CreateError {
             CreateError::InvalidIdempotencyKey => REQUEST_KEY_RULE.to_string(),
             CreateError::InvalidAddress(message) => message.clone(),
             CreateError::InvalidAmount => "wrap amount must be at least 546 sat".into(),
+            CreateError::InvalidAlkaneId(message) => message.clone(),
+            CreateError::InvalidAssetAmount => {
+                "asset amount must be a positive decimal u128 string in base units".into()
+            }
             CreateError::ClockUnavailable(message) => message.clone(),
             CreateError::NoGrant => format!(
                 "no active grant — ask the human to run: sats agent grant {agent} --budget <sats>"
@@ -253,6 +261,58 @@ pub fn create_wrap(
     )
 }
 
+/// A local, keyless proposal to transfer an exact Alkanes quantity.
+pub struct CreateAlkanesSendParams<'a> {
+    pub agent: &'a str,
+    pub token: &'a str,
+    pub idempotency_key: &'a str,
+    pub id: &'a str,
+    pub amount: &'a str,
+    pub address: &'a str,
+}
+
+/// File without resolving providers, preparing a transaction, or reading keys.
+/// The existing BTC grant bounds the fixed recipient postage and eventual fee;
+/// the asset quantity is separate and always requires exact human approval.
+pub fn create_alkanes_send(
+    store: &Store,
+    network: Network,
+    params: &CreateAlkanesSendParams,
+) -> Result<AgentRequest, CreateError> {
+    sats_core::network::ensure_test_network(network).map_err(|e| CreateError::Alkanes(e.into()))?;
+    let id = params
+        .id
+        .parse::<sats_alkanes::id::AlkaneId>()
+        .map_err(CreateError::InvalidAlkaneId)?;
+    let amount =
+        if params.amount.is_empty() || !params.amount.bytes().all(|b| b.is_ascii_digit()) {
+            None
+        } else {
+            params.amount.parse::<u128>().ok().filter(|v| *v > 0)
+        }
+        .ok_or(CreateError::InvalidAssetAmount)?;
+    create_inner(
+        store,
+        network,
+        &CreateParams {
+            agent: params.agent,
+            token: params.token,
+            idempotency_key: params.idempotency_key,
+            address: params.address,
+            amount_sat: sats_alkanes::build::DEFAULT_POSTAGE_SAT,
+        },
+        RequestOperation::AssetTransfer {
+            transfer: AssetTransfer {
+                asset: AssetId {
+                    protocol: "alkanes".into(),
+                    id: id.to_string(),
+                },
+                amount,
+            },
+        },
+    )
+}
+
 pub fn create(
     store: &Store,
     network: Network,
@@ -343,10 +403,12 @@ fn create_inner(
         },
     };
     let record = AgentRequest {
-        format_version: if !operation.is_send() {
-            sats_core::request::WRAP_REQUEST_FORMAT_VERSION
-        } else {
-            REQUEST_FORMAT_VERSION
+        format_version: match operation {
+            RequestOperation::Send => REQUEST_FORMAT_VERSION,
+            RequestOperation::FrbtcWrap { .. } => sats_core::request::WRAP_REQUEST_FORMAT_VERSION,
+            RequestOperation::AssetTransfer { .. } => {
+                sats_core::request::ASSET_TRANSFER_REQUEST_FORMAT_VERSION
+            }
         },
         id,
         network: net_name.to_string(),

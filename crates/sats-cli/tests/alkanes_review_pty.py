@@ -10,6 +10,7 @@ import termios
 import time
 
 binary, root = sys.argv[1], Path(sys.argv[2])
+request_id = sys.argv[3] if len(sys.argv) > 3 else None
 
 for json_mode, yes, cancel in [(False, False, False), (True, False, False),
                                (True, True, False), (True, False, True)]:
@@ -21,7 +22,9 @@ for json_mode, yes, cancel in [(False, False, False), (True, False, False),
         os.setsid()
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
 
-    args = [binary, "alkanes", "execute", "2:1", "77"]
+    args = ([binary, "agent", "approve", request_id] if request_id else
+            [binary, "alkanes", "execute", "2:1", "77"])
+    confirmation = "Approve and sign?" if request_id else "Sign?"
     if json_mode:
         args.append("--json")
     if yes:
@@ -55,7 +58,7 @@ for json_mode, yes, cancel in [(False, False, False), (True, False, False),
 
     try:
         if not yes:
-            wait_for("Sign?")
+            wait_for(confirmation)
             assert "password:" not in transcript(), transcript()
             if not cancel:
                 os.write(master, b"y\n")
@@ -63,13 +66,17 @@ for json_mode, yes, cancel in [(False, False, False), (True, False, False),
             wait_for("password:")
         review_fd = proc.stderr.fileno() if json_mode else proc.stdout.fileno()
         review = buffers[review_fd].decode(errors="replace")
-        for text in ["Wallet", "Network", "signet", "Execute", "2:1", "Inputs", "77",
-                     "advisory", "Postage", "Fee", "Total", "leave the wallet"]:
+        fields = (["Wallet", "Network", "signet", "Approve", request_id, "Asset transfer",
+                   "alkanes:32:0", "1000 base units", "Returned assets", "32:0: 4000",
+                   "2:0: 50", "546", "Fee", "Total", "Budget"] if request_id else
+                  ["Wallet", "Network", "signet", "Execute", "2:1", "Inputs", "77",
+                   "advisory", "Postage", "Fee", "Total", "leave the wallet"])
+        for text in fields:
             assert text in review, (text, transcript())
         if json_mode:
             assert buffers[proc.stdout.fileno()] == b"", transcript()
             if not yes:
-                assert "Sign?" in review, review
+                assert confirmation in review, review
         # The review is already visible while unlock is waiting. An incorrect
         # password proves none of these review paths signs or broadcasts.
         os.write(master, b"n\n" if cancel else b"wrong-password\n")

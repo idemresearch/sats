@@ -7,6 +7,13 @@ Notable changes to sats, newest first. Versions follow
 
 ### Alkanes
 
+- MCP `request_alkanes_send` files exact Alkanes transfers under existing
+  grants, without new flags. Human approval reviews asset quantity and change
+  separately from BTC postage and fees, rechecks indexed input balances,
+  and shares the existing reservation/signing/recovery flow. BTC caps do not
+  cap asset quantities. The reusable protocol-qualified asset intent uses
+  request format 4; older binaries refuse it.
+
 - MCP `request_wrap_frbtc` files a fixed BTC-to-frBTC proposal under the
   ordinary BTC grant, with no protocol-specific flag. The request records
   the contract code hash and BTC signer; approval verifies and simulates

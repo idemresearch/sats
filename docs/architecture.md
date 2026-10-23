@@ -114,6 +114,17 @@ output checking live in `sats-alkanes::wrap`. The typed contract facts and
 intent digest live in `sats-core`; the ordinary BTC authorization ladder
 applies without protocol permissions.
 
+The shared `alkanes::transfer` module prepares and independently verifies
+unsigned transfers for human CLI sends and agent approvals. MCP
+`request_alkanes_send` only canonicalizes and files the request locally.
+`sats-core::intent::AssetTransfer` stores a protocol-qualified asset id and
+positive u128 quantity separately from the common BTC postage and fee facts.
+The digest binds both. Protocol-specific composition and checking stay in
+`sats-alkanes`, and native dispatch in `sats-wallet` refuses unsupported
+protocols. The common request executor reviews, rechecks indexed balances,
+and uses the same grant ladder, ledger, and signing boundary as BTC sends.
+No protocol grant fields or agent-facing execution primitive are added.
+
 ### `sats-playground`
 
 `sats-core` compiled to WebAssembly for the website playground. Only the

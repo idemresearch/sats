@@ -302,12 +302,20 @@ spending budget again.
 
 ## Alkanes
 
+Agent transfer proposals use `request_alkanes_send`. The approval queue shows
+the protocol-qualified asset id and quantity separately from BTC postage.
+`sats agent approve` reviews the exact base-unit quantity, recipient, returned
+assets, 546-sat recipient postage, real fee, total, and remaining budget before
+the password, including with `--json` (review on stderr). Existing grants
+apply: BTC limits count postage and fees, not asset quantities.
+See [transfer requests](mcp.md#request_alkanes_send).
+
 `sats alkanes` is included in standard builds for the supported test networks.
 It needs Subfrost as the network's provider (`sats providers add subfrost`),
-and there is no fallback. Generic execution and token transfers require
-human operation. MCP can propose the fixed BTC-to-frBTC wrap under the
-ordinary BTC grant, without a separate protocol permission; `sats agent approve`
-is its only execution path. See [wrapping requests](mcp.md#request_wrap_frbtc). The corresponding
+and there is no fallback. Generic execution requires human operation.
+MCP can propose fixed BTC-to-frBTC wraps or exact Alkanes transfers under
+the existing grant, without a separate protocol permission; `sats agent approve`
+is their execution path. See [wrapping requests](mcp.md#request_wrap_frbtc). The corresponding
 [MCP reads](mcp.md#alkanes-reads) expose balance, inspection, and advisory
 simulation.
 

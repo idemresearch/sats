@@ -107,6 +107,28 @@ pub fn run(
         ));
         rows.push(("Excluded outputs", wrap.excluded_utxos.to_string()));
     }
+    if let Some(transfer) = staged.asset_transfer_review() {
+        rows.push(("Operation", "Asset transfer".into()));
+        rows.push(("Asset", format!("alkanes:{}", transfer.asset)));
+        rows.push(("Asset amount", format!("{} base units", transfer.amount)));
+        rows.push((
+            "BTC postage",
+            format!(
+                "{} sat to recipient (included in Amount)",
+                transfer.summary.recipient_sat
+            ),
+        ));
+        rows.push((
+            "Returned assets",
+            transfer
+                .summary
+                .returned
+                .iter()
+                .map(|(id, amount)| format!("{id}: {amount} base units"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+    }
     if json {
         ui::kv_rows_stderr(&rows);
         if confirm && !ui::confirm_stderr("Approve and sign?", selected.is_none())? {

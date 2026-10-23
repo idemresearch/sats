@@ -6,14 +6,12 @@
 //! must use request::execute; this module provides no grant authority.
 
 use std::collections::BTreeSet;
-use std::str::FromStr;
 
+use super::transfer::{TransferRequest, TransferReview};
 use anyhow::{Context, Result, anyhow, bail};
 use sats_alkanes::build::build_execute_plan;
 use sats_alkanes::call::AlkaneCall;
 use sats_alkanes::delta::SimulationView;
-use sats_alkanes::id::AlkaneId;
-use sats_alkanes::transfer::{Sheet, TransferSummary, build_transfer_plan, summarize};
 use sats_core::bdk_wallet::KeychainKind;
 use sats_core::bitcoin::{Address, Amount, FeeRate, Network, OutPoint, Psbt};
 use sats_core::engine;
@@ -26,18 +24,10 @@ use crate::spend;
 use crate::store::{Store, unix_now};
 use crate::walletd::{self, WalletCtx};
 
-use super::{check_services, scan_wallet, simulate};
+use super::{check_services, simulate};
 
 pub struct ExecuteRequest {
     pub call: AlkaneCall,
-    pub fee_rate: Option<u64>,
-    pub postage_sat: u64,
-}
-
-pub struct TransferRequest {
-    pub asset: AlkaneId,
-    pub amount: u128,
-    pub address: String,
     pub fee_rate: Option<u64>,
     pub postage_sat: u64,
 }
@@ -52,17 +42,6 @@ pub struct ExecuteReview {
     /// Postage stays in the wallet; only the fee leaves it.
     pub external_sat: u64,
     pub excluded_utxos: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct TransferReview {
-    pub asset: AlkaneId,
-    pub amount: u128,
-    pub recipient: String,
-    /// Untrusted, informational provider labels.
-    pub name: String,
-    pub symbol: String,
-    pub summary: TransferSummary,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +90,9 @@ impl StagedOperation<'_> {
         surface: &str,
         signer_factory: impl FnOnce() -> Result<S>,
     ) -> Result<ExecutionOutcome> {
+        if let OperationReview::Transfer(review) = &self.review {
+            super::transfer::recheck(&self.ctx, self.services, self.prepared.psbt(), review)?;
+        }
         let mut record = {
             let mut signer = signer_factory()?;
             spend::sign_with(self.prepared, &mut signer)
@@ -133,7 +115,7 @@ impl StagedOperation<'_> {
     }
 }
 
-fn fee_rate(services: &Services, requested: Option<u64>) -> Result<FeeRate> {
+pub(crate) fn fee_rate(services: &Services, requested: Option<u64>) -> Result<FeeRate> {
     match requested {
         Some(rate) => Ok(FeeRate::from_sat_per_vb_u32(
             u32::try_from(rate).unwrap_or(u32::MAX).max(1),
@@ -237,133 +219,13 @@ pub fn stage_transfer<'a>(
     services: &'a Services,
     args: &TransferRequest,
 ) -> Result<StagedOperation<'a>> {
-    check_services(network, services)?;
-    let asset = args.asset;
-    if args.amount == 0 {
-        bail!("amount must be positive");
-    }
-    let recipient = Address::from_str(&args.address)
-        .map_err(|e| anyhow!("invalid address: {e}"))?
-        .require_network(network)
-        .map_err(|_| anyhow!("address is not valid for this network"))?;
-
-    let (mut ctx, scanned) = scan_wallet(store, network, services)?;
-
-    // Asset inputs: indexed outputs holding the asset, largest first,
-    // until they cover the amount.
-    let mut holders: Vec<(&assets::ScannedOutput, u128)> = scanned
-        .outputs
-        .iter()
-        .filter(|o| o.known)
-        .filter_map(|o| {
-            let held: u128 = o
-                .balances
-                .iter()
-                .filter(|b| b.id == asset)
-                .map(|b| b.amount)
-                .sum();
-            (held > 0).then_some((o, held))
-        })
-        .collect();
-    holders.sort_by_key(|h| std::cmp::Reverse(h.1));
-    let held_total: u128 = holders.iter().map(|(_, held)| held).sum();
-    if held_total < args.amount {
-        bail!(
-            "this wallet holds {held_total} of {asset} in indexed outputs, less than {}",
-            args.amount
-        );
-    }
-    let mut selected = Vec::new();
-    let mut covered = 0u128;
-    for (output, held) in holders {
-        if covered >= args.amount {
-            break;
-        }
-        selected.push(output.outpoint);
-        covered += held;
-    }
-
-    // Everything else that isn't provably clean, and the dust heuristic,
-    // stays out of the BTC funding.
-    let utxos: Vec<(OutPoint, Amount)> = ctx
-        .wallet
-        .list_unspent()
-        .map(|u| (u.outpoint, u.txout.value))
-        .collect();
-    let mut unspendable: BTreeSet<OutPoint> = engine::dust_suspects(utxos.iter().copied())
-        .into_iter()
-        .collect();
-    unspendable.extend(scanned.not_clean().map(|o| o.outpoint));
-    let unspendable: Vec<OutPoint> = unspendable.into_iter().collect();
-
-    let rate = fee_rate(services, args.fee_rate)?;
-    let wallet_address = ctx.wallet.reveal_next_address(KeychainKind::External);
-    let prepared = build_transfer_plan(
-        &mut ctx.wallet,
-        asset,
-        args.amount,
-        &recipient,
-        &wallet_address.address,
-        &selected,
-        args.postage_sat,
-        rate,
-        &unspendable,
-        ctx.net_name,
-        unix_now(),
-    )?;
-    ctx.persist()?;
-
-    // Check the transaction itself.
-    let psbt = prepared.psbt();
-    let tx = &psbt.unsigned_tx;
-    let input_sat = input_values(&ctx, psbt)?;
-    let mut input_sheets = Vec::new();
-    for txin in &tx.input {
-        let scanned_output = scanned
-            .get(&txin.previous_output)
-            .filter(|o| o.known)
-            .ok_or_else(|| anyhow!("input {} was not indexed", txin.previous_output))?;
-        let mut sheet = Sheet::new();
-        for b in &scanned_output.balances {
-            *sheet.entry(b.id).or_default() += b.amount;
-        }
-        input_sheets.push(sheet);
-    }
-    let summary = summarize(
-        tx,
-        &input_sat,
-        &input_sheets,
-        asset,
-        args.amount,
-        &recipient.script_pubkey(),
-        |vout| {
-            ctx.wallet
-                .is_mine(tx.output[vout as usize].script_pubkey.clone())
-        },
-    )?;
-    if summary.fee_sat != prepared.fee_sat || summary.recipient_sat != prepared.amount_sat {
-        bail!("prepared transfer disagrees with the verified transaction");
-    }
-    let (name, symbol) = scanned
-        .totals()
-        .get(&asset)
-        .map(|(_, name, symbol)| (name.clone(), symbol.clone()))
-        .unwrap_or_default();
-
-    let review = TransferReview {
-        asset,
-        amount: args.amount,
-        recipient: recipient.to_string(),
-        name,
-        symbol,
-        summary,
-    };
+    let transfer = super::transfer::prepare(store, network, services, args)?;
     Ok(StagedOperation {
         store,
         services,
-        ctx,
-        prepared,
-        review: OperationReview::Transfer(review),
+        ctx: transfer.ctx,
+        prepared: transfer.prepared,
+        review: OperationReview::Transfer(transfer.review),
     })
 }
 
@@ -371,6 +233,7 @@ pub fn stage_transfer<'a>(
 mod tests {
     use super::*;
     use crate::config::{ChainChoice, Config, EsploraConfig, RedactedUrl};
+    use sats_alkanes::id::AlkaneId;
     use sats_core::bdk_wallet::chain::{BlockId, ConfirmationBlockTime};
     use sats_core::bdk_wallet::test_utils::{insert_checkpoint, receive_output};
     use sats_core::bitcoin::hashes::Hash;
@@ -524,6 +387,31 @@ mod tests {
             .unwrap();
         assert_eq!(stored.tx_hex, outcome.transaction.tx_hex);
         assert!(fx.mockdata.join("broadcasts.log").exists());
+    }
+
+    #[test]
+    fn transfer_index_changes_stop_before_the_human_signer_factory() {
+        let fx = Fixture::new();
+        let ctx = walletd::open(&fx.store, Network::Signet).unwrap();
+        let outpoint = ctx.wallet.list_unspent().next().unwrap().outpoint;
+        std::fs::write(
+            fx.mockdata.join("alkanes-outpoints.json"),
+            serde_json::json!({outpoint.to_string(): {"32:0":"5000","2:0":"50"}}).to_string(),
+        )
+        .unwrap();
+        drop(ctx);
+        let args = TransferRequest {
+            asset: "32:0".parse().unwrap(),
+            amount: 1000,
+            address: "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n".into(),
+            fee_rate: Some(1),
+            postage_sat: 546,
+        };
+        let staged = stage_transfer(&fx.store, Network::Signet, &fx.services, &args).unwrap();
+        std::fs::write(fx.mockdata.join("alkanes-outpoints.json"), "{}").unwrap();
+        let result = staged.commit::<LocalSigner>("test", || panic!("must not construct signer"));
+        assert!(result.is_err());
+        fx.assert_no_spend();
     }
 
     #[test]
