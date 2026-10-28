@@ -218,10 +218,17 @@ pub fn request_record(dir: &TempDir, agent: &str, id: &str) -> serde_json::Value
     )
 }
 
-pub fn spent_sat(dir: &TempDir) -> u64 {
-    read_json(&dir.path().join("signet/grants/claude.json"))["spent_sat"]
-        .as_u64()
-        .unwrap()
+/// Signed transactions on disk. sats persists every signature before
+/// broadcast, so this counts what was signed.
+pub fn saved_transactions(dir: &TempDir) -> usize {
+    std::fs::read_dir(dir.path().join("signet/transactions"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 pub fn event_kinds(dir: &TempDir) -> Vec<String> {

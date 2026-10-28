@@ -12,7 +12,6 @@ mod server;
 use anyhow::{Context, Result, bail};
 use rmcp::ServiceExt;
 use sats_core::bitcoin::Network;
-use sats_core::fmt::format_sats;
 use sats_wallet::config::network_name;
 use sats_wallet::store::{Store, now_checked, unix_now};
 use sats_wallet::walletd;
@@ -34,20 +33,20 @@ pub fn run(
     // Order matters: "no grant" names the step a human has not done yet,
     // so it outranks a missing token, which is only meaningful once a
     // grant exists to hold one.
-    let grant = store.load_grant(net_name, agent)?.with_context(|| {
-        format!("no grant for {agent:?} — run: sats agent grant {agent} --budget <sats>")
-    })?;
+    let grant = store
+        .load_grant(net_name, agent)?
+        .with_context(|| format!("no grant for {agent:?} — run: sats agent grant {agent}"))?;
     // Fail-closed clock: a broken clock refuses to serve rather than
     // treating every grant as unexpired.
     if grant.is_expired(now_checked()?) {
         store.delete_grant(net_name, agent)?;
-        bail!("grant for {agent:?} has expired — run: sats agent grant {agent} --budget <sats>");
+        bail!("grant for {agent:?} has expired — run: sats agent grant {agent}");
     }
     let token = Zeroizing::new(std::env::var(TOKEN_ENV).ok().unwrap_or_default());
     if token.is_empty() {
         bail!(
             "no {TOKEN_ENV} in the environment — the token is emitted when you run \
-             `sats agent grant {agent} --budget <sats>`; copy one of the local MCP \
+             `sats agent grant {agent}`; copy one of the local MCP \
              setup commands printed by that grant"
         );
     }
@@ -55,7 +54,7 @@ pub fn run(
         bail!(
             "{TOKEN_ENV} does not match the active grant for {agent:?} — a grant issued or \
              replaced later has a different token; re-issue it with: \
-             sats agent grant {agent} --budget <sats>"
+             sats agent grant {agent}"
         );
     }
     // The wallet must exist. Provider selection belongs to chain-reading tools;
@@ -63,8 +62,8 @@ pub fn run(
     walletd::open(store, network)?;
     // stdout is the MCP transport; all logging goes to stderr.
     eprintln!(
-        "sats agent serve: agent {agent:?} on {net_name} — {} sat remaining, expires in {}",
-        format_sats(grant.remaining_sat()),
+        "sats agent serve: agent {agent:?} on {net_name} — {} grant, expires in {}",
+        grant.mode.as_str(),
         ui::human_duration(grant.expires_at.saturating_sub(unix_now())),
     );
 

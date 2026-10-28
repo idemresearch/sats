@@ -15,13 +15,9 @@ pub fn run(
     json: bool,
 ) -> Result<()> {
     let agent = args.name.as_str();
-    let budget = args.budget;
     validate_agent_name(agent)?;
     let mode: sats_core::authz::GrantMode =
         args.mode.parse().map_err(|e: String| anyhow::anyhow!(e))?;
-    if budget == 0 {
-        bail!("budget must be greater than 0");
-    }
     let lifetime = humantime::parse_duration(&args.duration)
         .with_context(|| format!("invalid --for {:?} (try 24h, 7d)", args.duration))?
         .as_secs();
@@ -53,13 +49,6 @@ pub fn run(
         }
         Some(list)
     };
-    // A grant with no fee cap would let one bad fee estimate burn the
-    // whole budget as miner fees, so every grant carries one: chosen
-    // with --max-fee, defaulted otherwise.
-    let defaulted_fee = args.max_fee.is_none();
-    let max_fee = args
-        .max_fee
-        .unwrap_or_else(|| sats_core::authz::default_max_fee_sat(budget));
     let net_name = network_name(network);
     let replacing = store.load_grant(net_name, agent)?.is_some();
     // Resolve the launch context before issuing a token, so a path that
@@ -71,15 +60,12 @@ pub fn run(
     };
 
     if !json {
-        let mut rows = vec![
-            ("Grant", agent.to_string()),
-            ("Budget", format!("{} sat", format_sats(budget))),
-        ];
+        let mut rows = vec![("Grant", agent.to_string())];
         rows.push((
             "Mode",
             match mode {
                 sats_core::authz::GrantMode::Ask => {
-                    "ask — every send needs your approval".to_string()
+                    "ask — every request needs your approval".to_string()
                 }
                 sats_core::authz::GrantMode::Observe => "observe — read-only".to_string(),
             },
@@ -92,15 +78,6 @@ pub fn run(
         if let Some(max_tx) = args.max_tx {
             rows.push(("Max tx", format!("{} sat", format_sats(max_tx))));
         }
-        let fee_row = if defaulted_fee {
-            format!(
-                "{} sat (default — choose with --max-fee)",
-                format_sats(max_fee)
-            )
-        } else {
-            format!("{} sat", format_sats(max_fee))
-        };
-        rows.push(("Max fee", fee_row));
         rows.push(("For", ui::human_duration(lifetime)));
         ui::kv_rows(&rows);
     }
@@ -116,13 +93,9 @@ pub fn run(
         format_version: GRANT_FORMAT_VERSION,
         agent: agent.to_string(),
         network: net_name.to_string(),
-        budget_sat: budget,
-        spent_sat: 0,
         max_tx_sat: args.max_tx,
-        max_fee_sat: max_fee,
         created_at: now,
         expires_at: now.saturating_add(lifetime),
-        tx_count: 0,
         token_id: issued.token_id.clone(),
         token_hash: issued.token_hash.clone(),
         mode,
@@ -130,10 +103,9 @@ pub fn run(
         // The identity every request filed under this grant binds to:
         // 128 random bits, never reused by a re-issue.
         grant_id: new_grant_id().map_err(|e| anyhow::anyhow!(e))?,
-        reservations: Vec::new(),
     };
-    // Under the grant lock so an in-flight agent send cannot interleave
-    // its budget write with this replacement.
+    // Under the grant lock so an in-flight request creation or approval
+    // cannot interleave with this replacement.
     {
         let _lock = store.lock_grants(net_name)?;
         store.save_grant(net_name, &grant)?;
@@ -148,9 +120,7 @@ pub fn run(
                 "agent": grant.agent,
                 "mode": grant.mode.as_str(),
                 "allowed_recipients": grant.allowed_recipients,
-                "budget_sat": grant.budget_sat,
                 "max_tx_sat": grant.max_tx_sat,
-                "max_fee_sat": grant.max_fee_sat,
                 "expires_at": grant.expires_at,
                 "replaced": replacing,
                 "grant_id": grant.grant_id,

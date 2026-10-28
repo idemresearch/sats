@@ -5,24 +5,44 @@ Notable changes to sats, newest first. Versions follow
 
 ## Unreleased
 
+### Agent grants
+
+- Grants no longer carry a budget, spending ledger, or fee cap. Every agent
+  request already waits for a human who reviews its real amount and fee, so
+  a grant is now a credential and a scope: expiry, mode, an optional
+  per-request amount cap (`--max-tx`), and an optional recipient allowlist
+  (`--to`). `sats agent grant` drops `--budget` and `--max-fee`.
+- Removed from JSON surfaces: `budget_sat`, `spent_sat`, `remaining_sat`,
+  `max_fee_sat`, and `tx_count` from MCP `get_grant`, `sats agent list
+  --json`, and `sats agent grant --json`; `remaining_budget_sat` from
+  `sats agent approve --json`; the denial reasons `over_budget`,
+  `over_max_fee`, and `amount_overflow`; and the `reserved` and `refunded`
+  events. Older log lines still show raw in `sats agent log`.
+- Grants use format version 4. Grants from earlier builds carried a budget
+  and are refused with the recreate step: `sats agent revoke <name> &&
+  sats agent grant <name>`. Requests filed under them can't be approved.
+- Approval re-checks the grant under the lock immediately before signing.
+  An audit log that can't record the approval stops it before the signer
+  exists, leaving the request `failed` and re-approvable.
+
 ### Alkanes
 
 - MCP `request_alkanes_send` files exact Alkanes transfers under existing
   grants, without new flags. Human approval reviews asset quantity and change
   separately from BTC postage and fees, rechecks indexed input balances,
-  and shares the existing reservation/signing/recovery flow. BTC caps do not
-  cap asset quantities. The reusable protocol-qualified asset intent uses
-  request format 4; older binaries refuse it.
+  and shares the existing signing and recovery flow. The grant's amount cap
+  checks the BTC postage; asset quantities are not capped. The reusable
+  protocol-qualified asset intent uses request format 4; older binaries
+  refuse it.
 
 - MCP `request_wrap_frbtc` files a fixed BTC-to-frBTC proposal under the
   ordinary BTC grant, with no protocol-specific flag. The request records
   the contract code hash and BTC signer; approval verifies and simulates
   the transaction, shows its review before authorization, and uses the
-  shared request ledger and signing boundary. The agent supplies no
+  shared request workflow and signing boundary. The agent supplies no
   destination or calldata and only observes after filing.
 - `sats alkanes frbtc info` reads the frBTC contract hash and signer.
-  Grants retain the standard version-1 BTC shape; frBTC requests use
-  version 3 so older binaries refuse them. Unsupported pre-release state
+  frBTC requests use version 3 so older binaries refuse them. Unsupported pre-release state
   is refused without silent migration.
 - Printed MCP setup commands pin the currently running executable as well
   as the wallet and network, avoiding an older `sats` earlier on PATH.

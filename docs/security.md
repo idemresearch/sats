@@ -85,14 +85,18 @@ grant and can never exceed it.
 | A grant holds | Effect |
 |---|---|
 | Mode | `ask` (default): every request waits for you. `observe`: read-only. There is no autonomous mode. |
-| Budget | Total for amounts plus fees |
-| `--max-tx` | Per-transaction amount cap; above it is `over_max_tx` |
-| `--max-fee` | Per-transaction fee cap, always present. Default: 2% of the budget, at least 1,000 sats, never above the budget |
+| `--max-tx` | Optional per-request amount cap, fee excluded; above it is `over_max_tx` |
 | `--to` allowlist | Optional; any other recipient is `recipient_not_allowed` |
 | Expiry | `--for`, default 24h |
 | Network | The one network the grant authorizes |
-| Accounting | Spend, transaction count, and a per-request reservation ledger |
 | Token hash | SHA-256 of the agent's bearer token |
+
+A grant is a credential and a scope, not an account. It holds no budget,
+spending ledger, or fee cap: every execution waits for you, and you review
+its real amount and fee, so cumulative accounting would only repeat that
+review. The limits that remain guard what a review catches poorly. The
+allowlist stops a substituted address, which nobody verifies by eye, and the
+amount cap keeps absurd proposals out of your queue.
 
 Changing a grant follows one rule: reducing authority is cheap and widening
 it needs the password. Switching `ask` to `observe` or removing an allowlist
@@ -121,15 +125,17 @@ The cost: the MCP client stores the raw token in its configuration, where the
 agent can read it. A stolen token grants the authority to *ask*. Its holder
 can file proposals you will see in `sats agent requests`, bounded by the grant
 until it expires, and can use the grant's read tools. It can't cause a
-signature, touch the seed, or reach another network. Keep budgets small and
-expiries short, and revoke grants you don't need.
+signature, touch the seed, or reach another network. Keep expiries short,
+set an amount cap and an allowlist where you can, and revoke grants you don't
+need.
 
 ### Grant format
 
-Grants retain the standard BTC `format_version: 1` shape. Wrapping uses the
-same limits as asset transfers and requires no protocol-specific permission. The obsolete
-pre-release format-2 grants are refused with re-issue guidance; their
-restrictions are never silently discarded. BTC send requests retain
+Grants use `format_version: 4`, a credential and scope with no budget.
+Wrapping uses the same limits as asset transfers and requires no
+protocol-specific permission. Grants of versions 1 through 3 carried a
+budget, so they are refused with re-issue guidance; their limits are never
+silently discarded. BTC send requests retain
 version 1; frBTC wrapping requests use version 3, binding their recorded
 contract facts and operation so an older binary cannot reinterpret them as
 plain payments. Asset-transfer requests use version 4 and a separate digest
@@ -153,34 +159,31 @@ checks, in order:
 
 1. expiry (`expired`);
 2. observe mode (`observe_only`);
-3. arithmetic: an amount plus fee that overflows is `amount_overflow`,
-   never a saturated value that could pass a budget check;
-4. the recipient allowlist (`recipient_not_allowed`);
-5. the amount cap (`over_max_tx`);
-6. the fee cap (`over_max_fee`);
-7. the remaining budget (`over_budget`);
-8. otherwise **ask**: the request is `pending_approval`.
+3. the recipient allowlist (`recipient_not_allowed`);
+4. the amount cap (`over_max_tx`);
+5. otherwise **ask**: the request is `pending_approval`.
 
 Ask is the only outcome that isn't a denial, so "no unapproved request
 reaches the signer" is a structural property of the ladder, not a setting.
 Every denial is a grant boundary and none of them is approvable. Tests freeze
 the order so a refusal names the specific boundary it crossed.
 
-The ladder runs twice:
+The fee is not a rung: sats computes it, not the agent, and you review it.
+The ladder runs at every step that could act on a stale grant:
 
-- **At filing**, with the fee unknown, before any network access. A proposal
-  outside the grant is recorded as `denied`.
-- **At execution**, with the real fee, under the grant lock and before the
-  budget reservation. A draw can never exceed the remaining budget, and a fee
-  above the cap is `over_max_fee` even after you have authorized the request.
+- **At filing**, before any network access. A proposal outside the grant is
+  recorded as `denied`.
+- **At execution**, on the amount derived from the PSBT, before your review
+  and again under the grant lock right before `signing` is persisted. A
+  grant revoked, expired, or tightened after your review still refuses.
 
-A denied or pending request consumes no budget. The engine takes the current
-time as input. If the system clock can't be read, filing and execution fail
-with `clock_unavailable` rather than treating every grant as live.
+The engine takes the current time as input. If the system clock can't be
+read, filing and execution fail with `clock_unavailable` rather than treating
+every grant as live.
 
-An advisory per-network grant lock serializes decisions, reservations, grant
-creation, and revocation across processes. Concurrent requests can't
-double-draw, and an in-flight request can't undo a revocation.
+An advisory per-network grant lock serializes decisions, request writes,
+grant creation, and revocation across processes, so an in-flight request
+can't undo a revocation.
 
 ## Agent requests and the audit log
 
@@ -201,11 +204,11 @@ of the grant instance that created it.
   grant lock from the grant read through the record write, and appends the
   audit event before the record, so no request exists without its event.
 
-Every transition (received, denied, approved, dismissed, reserved, signed,
-broadcast, refunded, failed) appends to `<network>/events/log.jsonl`, linked
-by request id and intent digest. Filing requires its event write to succeed;
-some later writes are best-effort and warn on failure. Recovery relies on
-request, grant, and transaction records, never on the log being complete. The
+Every transition (received, denied, approved, dismissed, signed, broadcast,
+failed, unresolved) appends to `<network>/events/log.jsonl`, linked by
+request id and intent digest. Filing and approval require their event write
+to succeed; later writes are best-effort and warn on failure. Recovery relies
+on request and transaction records, never on the log being complete. The
 log is append-only and never pruned. Lines this build doesn't understand are
 shown raw by `sats agent log`, never hidden. Finalized transactions carry an
 `origin` naming the surface, agent, request, and intent digest.
@@ -220,21 +223,20 @@ no grant writes, no events.
 place an agent request reaches the signer.
 
 1. **Claim.** sats locks the request and checks that the grant on file is
-   the instance that created it, then re-runs the ladder with the fee
-   unknown. A revoked or re-issued grant makes the request `denied` with
+   the instance that created it, then re-runs the ladder. A revoked or re-issued grant makes the request `denied` with
    reason `revoked`. A new grant never inherits old requests.
 2. **Prepare.** sats builds the transaction on fresh chain state through the
    same pipeline as a human send. Approval has no `--allow-dust` option.
 3. **Verify.** sats derives what the PSBT pays from the wallet's own
    descriptors and refuses unless it matches the recorded recipient and
    amount. A foreign input is refused outright.
-4. **Re-check.** The ladder runs again with the real fee.
+4. **Re-check.** The ladder runs again on the derived amount.
 5. **Review.** You see wallet, network, full recipient, amount, real fee,
-   total, and remaining budget, then confirm and enter your password. With
-   `--json`, the review goes to stderr. It is never skipped.
-6. **Reserve.** Under the grant lock, sats re-reads the grant, draws amount
-   plus fee on the grant's ledger under the request id, and persists the
-   request as `signing`.
+   and total, then confirm and enter your password. With `--json`, the
+   review goes to stderr. It is never skipped.
+6. **Commit.** Under the grant lock, sats re-reads the request and the
+   grant, re-runs the ladder, persists the request as `signing`, and
+   records the approval in the audit log.
 7. **Sign.** Only now is the signer constructed. It signs, and sats saves
    the finalized transaction.
 8. **Broadcast.** The request becomes `sent`, or `broadcast_pending` if the
@@ -253,50 +255,36 @@ afterwards. Before that call, a failure is provably unsigned. From that call
 on, nothing the signer reports counts as proof of "no signature", because a
 signer can sign, or leak a signature, and still return an error.
 
-| State | Signer invoked? | Budget draw | Next step |
-|---|---|---|---|
-| `pending_approval` | No | None | Approve or dismiss |
-| `denied` | No | None | Terminal |
-| `failed` | Provably not | Returned once | You may approve again |
-| `signing` | Maybe | Kept | Reconciled, see below |
-| `unresolved` | Maybe | Kept, never refunded | Never signed again; check `sats status`, then dismiss |
-| `broadcast_pending` | Yes, transaction saved | Kept | `sats tx broadcast <txid>` |
-| `sent` | Yes, broadcast | Kept | Done |
-| `dismissed` | As in the prior state | Kept if one was held | Terminal |
+| State | Signer invoked? | Next step |
+|---|---|---|
+| `pending_approval` | No | Approve or dismiss |
+| `denied` | No | Terminal |
+| `failed` | Provably not | You may approve again |
+| `signing` | Maybe | Reconciled, see below |
+| `unresolved` | Maybe | Never signed again; check `sats status`, then dismiss |
+| `broadcast_pending` | Yes, transaction saved | `sats tx broadcast <txid>` |
+| `sent` | Yes, broadcast | Done |
+| `dismissed` | As in the prior state | Terminal |
 
 A failure before signing, such as an unwritable audit log or a signer that
-can't be constructed, returns the draw and leaves the request `failed`. Sync,
-fee, and provider failures during preparation also leave it `failed`.
-They happen before any draw. A signer error, an unfinalized result, or a failure to
-finalize or save leaves the request `unresolved`. A `failed` record never
-overwrites a settled or uncertain one.
-
-### Budget reservations
-
-The draw is an entry in the grant's ledger, keyed by request id and written in
-the same atomic update as the grant's totals. A request holds at most one
-draw. Repeating the same amount and fee draws nothing; a different amount or
-fee fails closed. A draw is returned exactly once, and only while the request
-record is `pending_approval`, `failed`, or `denied`, the states that prove the
-signer never ran. A request that signed keeps its entry, so the ledger doubles
-as the grant's spend history.
+can't be constructed, leaves the request `failed`. Sync, fee, and provider
+failures during preparation also leave it `failed`. A signer error, an
+unfinalized result, or a failure to finalize or save leaves the request
+`unresolved`. A `failed` record never overwrites a settled or uncertain one.
 
 ### Crash recovery
 
 Recovery is a function of the durable records and is never guessed:
 
-- **Crash before the draw.** Nothing was written.
-- **Crash after the draw, before `signing`.** The draw is an orphan. The next
-  listing, approve, or dismiss of that request returns it.
+- **Crash before `signing`.** Nothing was written; the request is still
+  approvable.
 - **Crash after `signing`.** If a saved transaction is attributed to the
   request (same agent, request id, and intent digest), the request becomes
-  `broadcast_pending` or `sent`. Otherwise it becomes `unresolved` and
-  nothing is refunded.
-- **Crash after `failed`, before the refund.** The orphaned draw is
-  returned once.
+  `broadcast_pending` or `sent`. Otherwise it becomes `unresolved` and is
+  never signed again.
 
 Under the durability assumptions above, a crash can't produce a second
-signature for one approval, or a refund after a signature may exist.
+signature for one approval.
 
 ## The MCP boundary
 
@@ -309,7 +297,7 @@ The token authenticates every tool call, never execution. Each call re-reads
 the grant, so revocation, re-issue, or expiry cuts a running session off at
 its next call, reads included, and approvals under a revoked grant stop
 immediately. `check_request`
-never syncs, mutates records, reconciles, refunds, signs, or broadcasts. An
+never syncs, mutates records, reconciles, signs, or broadcasts. An
 absent execution lock never proves a request is unsigned. The full contract
 is in [MCP](mcp.md).
 
@@ -405,9 +393,10 @@ to the recipient.
 |---|---|---|
 | Stolen wallet database | No private descriptors in SQLite | Addresses and balances exposed |
 | Stolen sealed seed | Argon2id plus authenticated encryption | Password strength; offline guessing |
-| Read grant file | Budget and token hash only | Reveals amounts and expiry |
-| Stolen agent token | Every request waits for your password; caps and expiry enforced at filing and execution | Can file and read within the grant until it is revoked or expires |
-| Lied-about amount or fee | Recomputed from the PSBT against the wallet's descriptors | An understated input wastes the agent's own budget on an unrelayable transaction |
+| Read grant file | Limits and token hash only | Reveals limits and expiry |
+| Stolen agent token | Every request waits for your password; the amount cap, allowlist, and expiry are enforced at filing and execution | Can file and read within the grant until it is revoked or expires |
+| Lied-about amount or fee | Recomputed from the PSBT against the wallet's descriptors | An understated input yields an unrelayable transaction |
+| Inflated fee estimate | The real fee is in every approval review | Approving a high fee without reading it |
 | Compromised MCP process | Holds a token, never a key; forged approvals need the password | Same as a stolen token |
 | Debugger on an approving process | Key material lives only for one approval | Seed recoverable in that window where ptrace is allowed |
 | Pre-daemon wrapped-seed grant | Reported and refused | The file is a seed disclosure until the wallet is rotated |
@@ -425,12 +414,13 @@ to the recipient.
 - Back up the mnemonic and verify recovery independently.
 - Use a strong, unique wallet password.
 - Run sats only on a machine and user account you trust.
-- Keep grant budgets small, set fee caps, and prefer short expiries.
+- Prefer short expiries, and set an amount cap and a `--to` allowlist when
+  you know the recipients.
 - Before entering your password in `sats agent approve`, check the wallet,
   network, recipient, amount, and real fee.
 - Review `sats agent list` regularly and revoke unused grants.
-- Treat an agent token like the budget it unlocks: re-issue to rotate it, and
-  never commit it.
+- Treat an agent token like the authority to ask you for payments: re-issue
+  to rotate it, and never commit it.
 - Treat providers and their responses as part of your trust model.
 - Never paste a real mnemonic into issues, logs, screenshots, tests, or agent
   conversations.
@@ -442,8 +432,8 @@ The request records the frBTC `32:0` code hash and BTC signer address, and
 its digest commits to those facts, the fixed operation, network, agent, and
 gross BTC amount. The agent chooses neither calldata nor destination.
 There is no protocol-specific grant flag. The single `evaluate_send`
-ladder applies the normal BTC mode, expiry, recipient, amount, fee, and
-budget boundaries at filing and execution; the recipient is the actual
+ladder applies the normal BTC mode, expiry, recipient, and amount
+boundaries at filing and execution; the recipient is the actual
 BTC signer address. The request's recipient must agree with its recorded
 signer. Public discovery authenticates before I/O and creation rechecks the
 grant afterwards. An old or revoked token cannot file under a replacement
@@ -462,13 +452,13 @@ from the wallet, not caller PSBT hints. The executor excludes asset-bearing,
 unknown, and dust outputs and refuses failed sync or unrecognized/failed
 simulation. Human review includes the wallet receive address, contract hash,
 BTC payment, postage, actual fee, total, and advisory net frBTC prediction.
-The contract's code hash and signer are rechecked before budget reservation.
+The contract's code hash and signer are rechecked before signing.
 Provider claims and simulations do not prove future contract effects.
 
-Wrapping uses the same reservation ledger, persisted `signing` boundary,
-signed-transaction persistence, unresolved recovery, and rebroadcast-only
-handling as ordinary agent payments. Budget counts gross BTC paid plus miner
-fees, without treating predicted frBTC as a refund. A broadcast receipt does
+Wrapping uses the same persisted `signing` boundary, signed-transaction
+persistence, unresolved recovery, and rebroadcast-only handling as ordinary
+agent payments. The amount cap checks the gross BTC paid; predicted frBTC
+never offsets it. A broadcast receipt does
 not prove minting: confirmation and indexing must be observed separately.
 
 
@@ -483,21 +473,20 @@ select assets or grant authority. Request format 4 prevents older binaries
 from interpreting an asset transfer as an ordinary BTC payment.
 
 No protocol grant flags are added. The existing grant authorizes proposals;
-its recipient allowlist applies to the destination and its satoshi limits
-cover fixed 546-sat recipient postage plus actual fee. **The grant does not cap
-asset quantity or value.** The human must review the asset id and exact
-base-unit quantity as well as recipient, returned assets, postage, fee, total,
-and budget before authorizing that request.
+its recipient allowlist applies to the destination and its amount cap checks
+the fixed 546-sat recipient postage. **The grant does not cap asset quantity
+or value.** The human must review the asset id and exact base-unit quantity
+as well as recipient, returned assets, postage, fee, and total before
+authorizing that request.
 
 The shared CLI/native transfer builder syncs successfully, selects indexed
 asset inputs, and excludes unrelated assets, unknown outputs, and dust from
 BTC funding. Independent verification checks exact recipient assets, returns
 all other indexed Alkanes to wallet-owned outputs, and rejects additional
 external BTC outputs. Input BTC values come from the wallet. Fresh indexed
-input balances are checked against the reviewed transaction before reservation
-and signing; changes or unavailable data stop before the signer.
+input balances are checked against the reviewed transaction before signing; changes or unavailable data stop before the signer.
 
-The existing ledger, exact-request recheck, revocation rules, persisted
+The existing exact-request recheck, revocation rules, persisted
 `signing` boundary, signature persistence, and unresolved/rebroadcast recovery
 apply without a parallel execution path. A broadcast receipt proves neither
 confirmation nor indexing. Indexer claims remain trusted inputs; these checks

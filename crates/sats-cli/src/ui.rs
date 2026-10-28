@@ -183,7 +183,7 @@ pub fn confirm_stderr(prompt: &str, default_yes: bool) -> anyhow::Result<bool> {
 fn confirm_via(prompt: &str, default_yes: bool, stderr: bool) -> anyhow::Result<bool> {
     if !std::io::stdin().is_terminal() {
         anyhow::bail!(
-            "cannot confirm: stdin is not a terminal (use --yes, or give an agent a budget: sats agent grant)"
+            "cannot confirm: stdin is not a terminal (use --yes, or let an agent file requests: sats agent grant)"
         );
     }
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };

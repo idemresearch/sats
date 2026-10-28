@@ -31,8 +31,9 @@ payment, once. AI asks. You approve. Keys stay yours.
 - **Maker-checker for agents:** the agent makes a request and you check it.
   The MCP server holds no key material and has no tool to approve, sign, or
   broadcast, so a leaked agent token can only file requests you will see.
-- **Hard limits per agent:** a budget, a per-payment cap, a fee cap, an
-  optional recipient allowlist, and an expiry. Approval can't override them.
+- **Hard limits per agent:** an expiry, an optional per-payment cap, and an
+  optional recipient allowlist. Approval can't override them, and nothing
+  moves without your approval, so there is no budget to track.
 - **Verified execution:** sats recomputes what the transaction pays and signs
   only if it matches what you approved, and only once. Every signed
   transaction is saved before broadcast, so a failed broadcast can be retried
@@ -68,10 +69,10 @@ JSON output are in the [CLI reference](docs/cli.md).
 
 ## Let an agent ask
 
-Grant the agent a budget:
+Grant the agent permission to ask:
 
 ```sh
-sats agent grant claude --budget 50k --for 24h --max-tx 10k
+sats agent grant claude --for 24h --max-tx 10k
 ```
 
 sats prints a setup command for Claude Code and one for ChatGPT desktop/Codex.
@@ -83,8 +84,8 @@ balances, inspect contracts, and run advisory simulations with
 `alkanes_balance`, `alkanes_inspect`, and `alkanes_simulate`. Alkanes reads
 provide no execution authority. It can propose BTC-to-frBTC wrapping with
 `request_wrap_frbtc` and exact Alkanes transfers with `request_alkanes_send`
-under the same grant. BTC limits cover postage and fees, not asset quantities;
-every transfer requires your approval. A valid spend request comes
+under the same grant. The per-payment cap applies to BTC amounts, not asset
+quantities; every transfer requires your approval. A valid spend request comes
 back `pending_approval` and waits for you:
 
 ```sh
@@ -97,8 +98,8 @@ through `check_request`. Use `sats agent dismiss <id>` to decline a request
 and `sats agent revoke claude` to cut the agent off.
 
 sats refuses a request outright, with no approval path, if it is over
-`--max-tx`, over the fee cap, over the remaining budget, or to a recipient
-outside a `--to` allowlist. Revoking a grant cuts the agent off at its next call
+`--max-tx`, to a recipient outside a `--to` allowlist, or filed after the
+grant expired. Revoking a grant cuts the agent off at its next call
 and stops approvals of its pending requests. See [MCP and agent grants](docs/mcp.md) for the full tool
 contract.
 

@@ -13,15 +13,15 @@
 //! create ─► pending_approval ─approve─► signing ─► sent
 //!                 │                        ├─► broadcast_pending  (signed; never signs again)
 //!                 │                        ├─► unresolved         (a signature may exist; a human resolves)
-//!                 │                        ├─► failed             (signer never invoked; refunded)
-//!                 │                        └─► denied             (real-fee ladder, or the grant is gone)
+//!                 │                        ├─► failed             (signer never invoked; re-approvable)
+//!                 │                        └─► denied             (re-checked ladder, or the grant is gone)
 //!                 ├─dismiss─► dismissed
 //!                 └─(hard boundary at creation)─► denied
 //! ```
 //!
 //! `signing` is persisted *before* the signer is invoked. Observing it on
-//! disk therefore means the signer may have run: recovery never refunds
-//! and never signs again from that state.
+//! disk therefore means the signer may have run: recovery never signs
+//! again from that state.
 
 use serde::{Deserialize, Serialize};
 
@@ -80,27 +80,27 @@ pub struct AgentRequest {
 /// The lifecycle states. Whether a signed transaction exists is
 /// structural: only `Sent` and `BroadcastPending` carry a txid, and a
 /// request in either state must never be signed again. `Signing` and
-/// `Unresolved` mean a signature *may* exist; they are never refunded and
-/// never signed again automatically either.
+/// `Unresolved` mean a signature *may* exist; they are never signed again
+/// automatically either.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum RequestState {
     /// Inside every grant boundary; awaiting a human decision.
     PendingApproval,
-    /// A grant boundary refused it — at creation (fee unknown), at
-    /// execution (real fee), or because the grant that created it is
-    /// gone. Terminal: no approval lifts a boundary.
+    /// A grant boundary refused it — at creation, at the re-check under
+    /// the grant lock at execution, or because the grant that created it
+    /// is gone. Terminal: no approval lifts a boundary.
     Denied { deny: DenyReason, at: u64 },
     /// The human declined. Terminal.
     Dismissed { at: u64 },
-    /// A human authorized it, the budget is reserved, and the signer is
-    /// about to be — or has been — invoked. Persisted before the signer
-    /// runs, so on disk it is the irreversible boundary. Carries the fee
-    /// the reservation was made with (amount is on the record).
+    /// A human authorized it and the signer is about to be — or has
+    /// been — invoked. Persisted before the signer runs, so on disk it is
+    /// the irreversible boundary. Carries the fee the human reviewed
+    /// (amount is on the record).
     Signing { approved_at: u64, fee_sat: u64 },
     /// Execution stopped at or after the signer and no persisted
-    /// transaction settled it: a signature may exist. sats never refunds
-    /// and never signs again from here; a human resolves it. Carries the
+    /// transaction settled it: a signature may exist. sats never signs
+    /// again from here; a human resolves it. Carries the
     /// transaction id when it was known.
     Unresolved {
         at: u64,
@@ -110,13 +110,13 @@ pub enum RequestState {
     },
     /// Signed and broadcast. Terminal.
     Sent { txid: String, fee_sat: u64, at: u64 },
-    /// Signed, persisted, not broadcast. The reservation is final and
-    /// the signer is never invoked again; only rebroadcasting the
+    /// Signed, persisted, not broadcast. The signer is never invoked
+    /// again; only rebroadcasting the
     /// existing transaction settles it to `Sent`.
     BroadcastPending { txid: String, fee_sat: u64, at: u64 },
     /// Execution stopped before `Signer::sign` was invoked — the audit
     /// log could not be written, or the signer could not be constructed
-    /// — and the draw was returned. Re-approvable only because it is
+    /// Re-approvable only because it is
     /// provable that the signer never ran: nothing reported after the
     /// invocation is trusted to mean "no signature"; that is
     /// `Unresolved`. A human may authorize again or dismiss.
@@ -139,8 +139,7 @@ impl RequestState {
     }
 
     /// Whether a signed transaction is known to exist for this request.
-    /// Once true it stays true: such a request is never signed again and
-    /// its reservation is never refunded.
+    /// Once true it stays true: such a request is never signed again.
     pub fn has_signature(&self) -> bool {
         matches!(
             self,
@@ -149,8 +148,8 @@ impl RequestState {
     }
 
     /// Whether a signature may exist: the signer may have been invoked
-    /// and nothing durable settled the outcome. Never refund, never sign
-    /// again, automatically.
+    /// and nothing durable settled the outcome. Never sign again,
+    /// automatically.
     pub fn may_have_signature(&self) -> bool {
         self.has_signature()
             || matches!(
@@ -219,8 +218,8 @@ impl AgentRequest {
 
     /// Whether a human may dismiss it: anything awaiting a decision,
     /// re-approvable, or unresolved. Dismissing an unresolved request
-    /// closes it without a refund — the budget stays drawn, because a
-    /// signature may exist.
+    /// only closes the record: a signature may still exist, and the
+    /// human checks the wallet for it.
     pub fn is_dismissable(&self) -> bool {
         self.is_approvable() || matches!(self.state, RequestState::Unresolved { .. })
     }
@@ -342,8 +341,8 @@ mod tests {
         assert!(!signing.has_signature());
         assert!(!unresolved.has_signature());
         assert!(!denied().has_signature());
-        // Signing and unresolved may carry a signature: never refunded,
-        // never signed again automatically.
+        // Signing and unresolved may carry a signature: never signed
+        // again automatically.
         assert!(signing.may_have_signature());
         assert!(unresolved.may_have_signature());
         assert!(sent.may_have_signature());

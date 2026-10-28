@@ -165,15 +165,7 @@ fn mainnet_is_refused_everywhere() {
     for args in [
         &["--network", "bitcoin", "balance", "--offline"][..],
         &["--network", "mainnet", "receive"],
-        &[
-            "--network",
-            "mainnet",
-            "agent",
-            "grant",
-            "claude",
-            "--budget",
-            "1000",
-        ],
+        &["--network", "mainnet", "agent", "grant", "claude"],
         &["--network", "mainnet", "agent", "approve"],
         &["--network", "mainnet", "agent", "serve", "claude"],
     ] {
@@ -284,7 +276,7 @@ fn network_use_selects_wallet_and_preserves_provider_settings_and_grants() {
         .assert()
         .success();
     sats(&dir)
-        .args(["agent", "grant", "claude", "--budget", "50000"])
+        .args(["agent", "grant", "claude"])
         .assert()
         .success()
         .stdout(predicate::str::contains("sats --network signet --dir"));
@@ -490,7 +482,7 @@ fn provider_resolution_is_only_required_for_online_commands() {
     let txid = common::fund_wallet(&dir, &[100_000])[0].txid.to_string();
     let servers = common::write_unresolvable_providers(&dir);
     sats(&dir)
-        .args(["agent", "grant", "claude", "--budget", "50000"])
+        .args(["agent", "grant", "claude"])
         .assert()
         .success();
     let grants = json_stdout(
@@ -580,7 +572,7 @@ fn provider_resolution_follows_settled_and_revoked_approval_checks() {
     write_mock_provider(&dir);
     common::fund_wallet(&dir, &[100_000]);
     sats(&dir)
-        .args(["agent", "grant", "claude", "--budget", "50000"])
+        .args(["agent", "grant", "claude"])
         .assert()
         .success();
     fabricate_pending_request(&dir, "claude", "r-sent");
@@ -755,7 +747,7 @@ fn old_command_names_are_gone() {
         vec!["plan", "tb1qexample", "1000"],
         vec!["sign"],
         vec!["broadcast"],
-        vec!["grant", "claude", "--budget", "1000"],
+        vec!["grant", "claude"],
         vec!["grants"],
         vec!["revoke", "claude"],
         vec!["mcp", "--agent", "claude"],
@@ -776,17 +768,7 @@ fn grant_list_revoke_lifecycle() {
 
     // Amount shorthand works on every sat-valued flag.
     sats(&dir)
-        .args([
-            "agent",
-            "grant",
-            "claude",
-            "--budget",
-            "50k",
-            "--max-tx",
-            "10k",
-            "--max-fee",
-            "1000",
-        ])
+        .args(["agent", "grant", "claude", "--max-tx", "10k"])
         .assert()
         .success()
         .stdout(predicate::str::contains("granted  claude"));
@@ -807,9 +789,10 @@ fn grant_list_revoke_lifecycle() {
         .success();
     let json: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
     assert_eq!(json[0]["agent"], "claude");
-    assert_eq!(json[0]["budget_sat"], 50000);
-    assert_eq!(json[0]["remaining_sat"], 50000);
     assert_eq!(json[0]["max_tx_sat"], 10000);
+    // A grant is a credential and a scope: no budget, no spending ledger.
+    assert!(json[0].get("budget_sat").is_none());
+    assert!(json[0].get("spent_sat").is_none());
     // Key material must never appear on a read surface.
     assert!(json[0].get("grant_key").is_none());
     assert!(json[0].get("wrapped_seed").is_none());
@@ -831,49 +814,38 @@ fn grant_list_revoke_lifecycle() {
         .stderr(predicate::str::contains("no grant"));
 }
 
-/// Every grant carries a hard fee cap: without one, a bad fee estimate
-/// can burn the whole budget as miner fees. The default is max(2% of
-/// budget, 1000 sat), clamped to the budget; there is no way to issue a
-/// grant without one.
+/// A grant holds no budget and no fee cap: the human reviews the real
+/// amount and fee of every execution. The removed flags stay removed.
 #[test]
-fn grant_always_carries_a_fee_cap() {
+fn grant_has_no_budget_or_fee_cap() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
 
-    let granted_fee = |args: &[&str]| -> serde_json::Value {
-        let mut cmd_args = vec!["--json", "agent", "grant", "claude"];
-        cmd_args.extend_from_slice(args);
-        let out = sats(&dir).args(&cmd_args).assert().success();
-        let grant: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
-        grant["max_fee_sat"].clone()
-    };
-
-    assert_eq!(granted_fee(&["--budget", "50k"]), 1_000, "floor");
-    assert_eq!(granted_fee(&["--budget", "200k"]), 4_000, "2% of budget");
-    assert_eq!(granted_fee(&["--budget", "500"]), 500, "clamped to budget");
-    assert_eq!(granted_fee(&["--budget", "50k", "--max-fee", "250"]), 250);
-
-    // The removed opt-out stays removed.
-    sats(&dir)
-        .args([
-            "agent",
-            "grant",
-            "claude",
-            "--budget",
-            "50k",
-            "--no-max-fee",
-        ])
+    for removed in [["--budget", "50000"], ["--max-fee", "1000"]] {
+        sats(&dir)
+            .args(["agent", "grant", "claude"])
+            .args(removed)
+            .assert()
+            .code(2);
+    }
+    let out = sats(&dir)
+        .args(["--json", "agent", "grant", "claude"])
         .assert()
-        .code(2);
+        .success();
+    let grant: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(grant["mode"], "ask");
+    assert!(grant["max_tx_sat"].is_null());
+    assert!(grant.get("budget_sat").is_none(), "{grant}");
+    assert!(grant.get("max_fee_sat").is_none(), "{grant}");
 
-    // The human output names the default and how to choose one.
-    sats(&dir)
-        .args(["agent", "grant", "claude", "--budget", "50k"])
+    // The human output names no budget or fee cap.
+    let out = sats(&dir)
+        .args(["agent", "grant", "claude"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Max fee"))
-        .stdout(predicate::str::contains("default"))
-        .stdout(predicate::str::contains("--max-fee"));
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout);
+    assert!(!stdout.contains("Budget"), "{stdout}");
+    assert!(!stdout.contains("Max fee"), "{stdout}");
 }
 
 #[test]
@@ -881,7 +853,7 @@ fn grant_requires_correct_password() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
-        .args(["agent", "grant", "claude", "--budget", "1000"])
+        .args(["agent", "grant", "claude"])
         .env("SATS_PASSWORD", "not-the-password")
         .assert()
         .failure()
@@ -893,39 +865,24 @@ fn grant_rejects_bad_inputs() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
-        .args(["agent", "grant", "Bad Name!", "--budget", "1000"])
+        .args(["agent", "grant", "Bad Name!"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("agent name"));
     sats(&dir)
-        .args(["agent", "grant", "claude", "--budget", "0"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("budget"));
-    sats(&dir)
-        .args([
-            "agent", "grant", "claude", "--budget", "1000", "--for", "soon",
-        ])
+        .args(["agent", "grant", "claude", "--for", "soon"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("invalid --for"));
     // Shorthand must land on whole sats.
     sats(&dir)
-        .args(["agent", "grant", "claude", "--budget", "1.2345k"])
+        .args(["agent", "grant", "claude", "--max-tx", "1.2345k"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("whole number"));
     // --expires still works as an alias for --for.
     sats(&dir)
-        .args([
-            "agent",
-            "grant",
-            "claude",
-            "--budget",
-            "1000",
-            "--expires",
-            "2h",
-        ])
+        .args(["agent", "grant", "claude", "--expires", "2h"])
         .assert()
         .success()
         .stdout(predicate::str::contains("granted  claude"));
@@ -1154,8 +1111,6 @@ fn grant_writes_the_current_format() {
             "agent",
             "grant",
             "claude",
-            "--budget",
-            "50000",
             "--max-tx",
             "10000",
             "--ask-max-tx",
@@ -1170,9 +1125,7 @@ fn grant_writes_the_current_format() {
 
     let issued = json_stdout(
         sats(&dir)
-            .args([
-                "--json", "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
-            ])
+            .args(["--json", "agent", "grant", "claude", "--max-tx", "10000"])
             .assert()
             .success(),
     );
@@ -1202,9 +1155,7 @@ fn agent_requests_watch_streams_newly_pending_requests() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
-        .args([
-            "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
-        ])
+        .args(["agent", "grant", "claude", "--max-tx", "10000"])
         .assert()
         .success();
 
@@ -1342,9 +1293,7 @@ fn agent_mode_transitions_gate_on_widening() {
     init_wallet(&dir);
     let issued = json_stdout(
         sats(&dir)
-            .args([
-                "--json", "agent", "grant", "claude", "--budget", "50000", "--mode", "ask",
-            ])
+            .args(["--json", "agent", "grant", "claude", "--mode", "ask"])
             .assert()
             .success(),
     );
@@ -1441,14 +1390,12 @@ fn unreleased_auto_state_fails_closed_and_is_recreated() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
-        .args([
-            "agent", "grant", "claude", "--budget", "50000", "--mode", "auto",
-        ])
+        .args(["agent", "grant", "claude", "--mode", "auto"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown mode"));
     sats(&dir)
-        .args(["agent", "grant", "claude", "--budget", "50000"])
+        .args(["agent", "grant", "claude"])
         .assert()
         .success();
     let grant_path = dir.path().join("signet/grants/claude.json");
@@ -1482,7 +1429,7 @@ fn unreleased_auto_state_fails_closed_and_is_recreated() {
         .assert()
         .success();
     sats(&dir)
-        .args(["agent", "grant", "claude", "--budget", "50000"])
+        .args(["agent", "grant", "claude"])
         .assert()
         .success();
     let grant: serde_json::Value =
@@ -1512,8 +1459,6 @@ fn agent_allowlist_edits_gate_on_widening() {
             "agent",
             "grant",
             "claude",
-            "--budget",
-            "50000",
             "--to",
             "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr",
         ])
@@ -1528,8 +1473,6 @@ fn agent_allowlist_edits_gate_on_widening() {
                 "agent",
                 "grant",
                 "claude",
-                "--budget",
-                "50000",
                 "--to",
                 &upper,
                 "--to",
@@ -1598,7 +1541,7 @@ fn agent_allowlist_edits_gate_on_widening() {
     // A grant with no allowlist: allow is an informative no-op, disallow
     // refuses — an allowlist cannot express "all except".
     sats(&dir)
-        .args(["agent", "grant", "ghost", "--budget", "1000"])
+        .args(["agent", "grant", "ghost"])
         .assert()
         .success();
     sats(&dir)
@@ -1703,9 +1646,7 @@ fn approve_executes_with_the_password() {
         .failure()
         .stderr(predicate::str::contains("revoked"));
     sats(&dir)
-        .args([
-            "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
-        ])
+        .args(["agent", "grant", "claude", "--max-tx", "10000"])
         .assert()
         .success();
     assert_eq!(request_json(&dir, "r-orphan")["status"], "denied");
@@ -1799,9 +1740,7 @@ fn approve_honors_a_policy_change_that_lands_while_it_waits_for_the_lock() {
     write_mock_provider(&dir);
     common::fund_wallet(&dir, &[100_000]);
     sats(&dir)
-        .args([
-            "agent", "grant", "claude", "--budget", "50000", "--mode", "ask",
-        ])
+        .args(["agent", "grant", "claude", "--mode", "ask"])
         .assert()
         .success();
     fabricate_pending_request(&dir, "claude", "r-race-1");
@@ -1852,9 +1791,6 @@ fn approve_honors_a_policy_change_that_lands_while_it_waits_for_the_lock() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("observe_only"));
     assert_eq!(request_json(&dir, "r-race-1")["status"], "denied");
-    let grant: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&grant_path).unwrap()).unwrap();
-    assert_eq!(grant["spent_sat"], 0, "nothing drawn");
     assert!(
         !dir.path().join("signet/transactions").exists(),
         "nothing signed"
@@ -1866,9 +1802,7 @@ fn dismiss_declines_a_pending_request() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     sats(&dir)
-        .args([
-            "agent", "grant", "claude", "--budget", "50000", "--max-tx", "10000",
-        ])
+        .args(["agent", "grant", "claude", "--max-tx", "10000"])
         .assert()
         .success();
     fabricate_pending_request(&dir, "claude", "r-pay-1");

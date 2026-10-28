@@ -24,8 +24,8 @@
 //! creates: the BIP-341 sighash commits to every input's amount and
 //! script, so understating an input to fake a small fee yields a
 //! signature that is invalid against the real UTXO. The transaction
-//! cannot relay, so the attack reduces to burning the caller's own
-//! reserved budget rather than evading the fee cap.
+//! cannot relay, so the attack cannot understate the fee the human
+//! reviews.
 
 use bdk_wallet::bitcoin::bip32::{ChildNumber, DerivationPath};
 use bdk_wallet::bitcoin::{Address, Network, Psbt, ScriptBuf};
@@ -64,7 +64,7 @@ pub struct DerivedIntent {
 }
 
 impl DerivedIntent {
-    /// What this transaction draws from a budget: sats out plus fee.
+    /// What this transaction costs the wallet: sats out plus fee.
     pub fn total_sat(&self) -> u64 {
         self.sats_out.saturating_add(self.fee_sat)
     }
@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(
             stripped.sats_out,
             honest.sats_out + honest.change_sat,
-            "unhinted change counts against the budget, never for it"
+            "unhinted change counts as a payment, never as change"
         );
         assert!(stripped.sats_out > honest.sats_out);
     }

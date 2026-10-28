@@ -2,8 +2,9 @@
 //!
 //! A token is the bearer credential an agent presents to the signing
 //! daemon. It is **not** key material: it names a policy the daemon
-//! enforces, and it opens nothing on its own. Compromising a token costs
-//! the grant's remaining budget until its expiry, never the seed.
+//! enforces, and it opens nothing on its own. Compromising a token lets
+//! its holder file requests a human must still approve, until the
+//! grant's expiry — never the seed, and never a signature.
 //!
 //! Only the SHA-256 of a token is persisted, so reading a grant file
 //! yields neither a seed nor a usable token. The secret is shown to the

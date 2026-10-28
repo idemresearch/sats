@@ -16,11 +16,11 @@ exact options in your installed version.
 | `sats psbt inspect <FILE>` | Decode a PSBT offline: outputs, fee, signing state |
 | `sats psbt sign <FILE> [--out FILE]` | Sign a PSBT file |
 | `sats tx broadcast <FILE\|TXID>` | Broadcast a raw hex file or a saved transaction |
-| `sats agent grant <name>` | Give an agent a budget to propose sends |
+| `sats agent grant <name>` | Let an agent file requests you approve |
 | `sats agent mode <name> <ask\|observe>` | Switch a grant's mode |
 | `sats agent allow <name> <address>` | Add a recipient to a grant's allowlist |
 | `sats agent disallow <name> <address>` | Remove a recipient from a grant's allowlist |
-| `sats agent list` | List active grants and remaining budgets |
+| `sats agent list` | List active grants and their limits |
 | `sats agent revoke <name>` | Delete a grant immediately |
 | `sats agent requests [--all\|--watch]` | List requests that need attention, or stream new ones |
 | `sats agent approve [ID] [--yes]` | Review, authorize, sign, and broadcast one request |
@@ -81,7 +81,7 @@ sats --network signet balance  # use signet for just this command
 ```
 
 Switching updates only the saved default in `config.toml`. Each network keeps
-its wallet, provider settings, grants, requests, and budgets. It needs no
+its wallet, provider settings, grants, and requests. It needs no
 password or provider connection and does not initialize a wallet. Existing
 MCP connections stay on their pinned network, including after restart; an
 agent needs a separate grant and token to use another network.
@@ -177,16 +177,14 @@ saved bytes, without signing again.
 ## Agent grants
 
 ```sh
-sats agent grant <name> --budget <SATS> [--for <DURATION>] [--max-tx <SATS>]
-                 [--max-fee <SATS>] [--mode ask|observe] [--to <ADDRESS>]...
+sats agent grant <name> [--for <DURATION>] [--max-tx <SATS>]
+                 [--mode ask|observe] [--to <ADDRESS>]...
 ```
 
 | Option | Meaning |
 |---|---|
-| `--budget` | Required. Total for amounts plus fees. |
 | `--for` | Lifetime, such as `30m`, `24h`, or `7d`. Default `24h`. |
-| `--max-tx` | Per-transaction amount cap. Anything above is refused outright. |
-| `--max-fee` | Per-transaction fee cap. Default: 2% of the budget, at least 1,000 sats, never above the budget. |
+| `--max-tx` | Per-request amount cap, fee excluded. Anything above is refused outright. Without it, you review every amount. |
 | `--mode` | `ask` (default): every request waits for your approval. `observe`: read-only, and every request is refused. |
 | `--to` | Repeatable. Restricts recipients to this list; anyone else is refused. |
 
@@ -196,7 +194,8 @@ a token hash, never key material.
 
 Every grant limit is hard. Approval can't lift one; only changing the grant
 can. Within the limits, every request waits for you, however small. There is
-no autonomous mode.
+no autonomous mode, so a grant has no budget or fee cap: you see the real
+amount and fee of every payment before you approve it.
 
 The output includes a one-time token and two setup commands, one for Claude
 Code and one for ChatGPT desktop/Codex. See
@@ -244,7 +243,7 @@ you; `--all` shows them. With `--json` the output is JSONL. Press Ctrl-C to
 stop.
 
 `log` shows one line per event: received, denied, approved, dismissed,
-reserved, signed, broadcast, refunded, or failed. It reads local files only,
+signed, broadcast, failed, or unresolved. It reads local files only,
 and skips unreadable lines with a warning.
 
 ## Approving a request
@@ -266,11 +265,11 @@ To approve, sats:
 
 1. prepares the transaction on fresh chain state;
 2. checks that it pays exactly the recipient and amount the agent requested;
-3. re-checks the grant with the real fee;
-4. shows wallet, network, full recipient, amount, fee, total, and remaining
-   budget;
+3. re-checks the grant;
+4. shows wallet, network, full recipient, amount, fee, and total;
 5. asks you to confirm, then asks for your password;
-6. reserves the budget, signs, saves the transaction, and broadcasts.
+6. re-checks the grant once more, signs, saves the transaction, and
+   broadcasts.
 
 `--yes` skips the confirmation, but only with an explicit id, and never skips
 the password. With `--json`, the review and prompts go to stderr and the
@@ -282,7 +281,8 @@ expired, or re-issued, is refused before the password prompt and recorded as
 has no `--fee-rate`. If fee estimation fails, fix the configured provider.
 
 `dismiss` declines a pending, failed, or unresolved request. It needs no
-password and never refunds an unresolved request's budget. Both commands
+password. Dismissing an unresolved request only closes the record: a
+signature may still exist. Both commands
 accept an id or unique prefix.
 
 ### When an approval doesn't finish
@@ -297,17 +297,17 @@ accept an id or unique prefix.
 The rules behind these states are in
 [Security](security.md#the-signing-boundary). If a broadcast succeeded but
 its receipt wasn't recorded, `sats agent requests` or
-`sats tx broadcast <txid>` repairs it without broadcasting, signing, or
-spending budget again.
+`sats tx broadcast <txid>` repairs it without broadcasting or signing
+again.
 
 ## Alkanes
 
 Agent transfer proposals use `request_alkanes_send`. The approval queue shows
 the protocol-qualified asset id and quantity separately from BTC postage.
 `sats agent approve` reviews the exact base-unit quantity, recipient, returned
-assets, 546-sat recipient postage, real fee, total, and remaining budget before
-the password, including with `--json` (review on stderr). Existing grants
-apply: BTC limits count postage and fees, not asset quantities.
+assets, 546-sat recipient postage, real fee, and total before the password,
+including with `--json` (review on stderr). Existing grants apply: the
+per-request cap checks the BTC postage, not asset quantities.
 See [transfer requests](mcp.md#request_alkanes_send).
 
 `sats alkanes` is included in standard builds for the supported test networks.

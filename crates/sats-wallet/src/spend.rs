@@ -16,7 +16,7 @@ use crate::walletd::{self, WalletCtx};
 
 /// Sign a prepared spend's PSBT to finality. An error means this call
 /// returned no finalized transaction, not that no signature exists: the
-/// signer ran. Nothing that holds a budget reservation may refund on it;
+/// signer ran. Nothing may treat it as proof that no signature exists;
 /// agent requests sign only through `request::execute`, which treats any
 /// failure from the signer on as unresolved.
 fn sign_psbt(prepared: &PreparedSpend, signer: &mut dyn Signer) -> Result<Psbt> {
@@ -40,7 +40,7 @@ pub fn sign_to_record(
 }
 
 /// Internal human-execution tail through the Signer boundary. Agent requests
-/// keep their own reservation/state ordering in request::execute.
+/// keep their own state ordering in request::execute.
 pub(crate) fn sign_with(
     prepared: PreparedSpend,
     signer: &mut dyn Signer,

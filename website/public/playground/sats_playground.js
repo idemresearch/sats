@@ -221,43 +221,37 @@ export class Playground {
     }
     /**
      * @param {string} agent
-     * @param {string} budget
      * @param {string | null | undefined} max_tx
-     * @param {string | null | undefined} max_fee
      * @param {number} lifetime_secs
      * @param {number} now
      * @returns {string}
      */
-    grant(agent, budget, max_tx, max_fee, lifetime_secs, now) {
-        let deferred6_0;
-        let deferred6_1;
+    grant(agent, max_tx, lifetime_secs, now) {
+        let deferred4_0;
+        let deferred4_1;
         try {
             const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
             const ptr0 = passStringToWasm0(agent, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
             const len0 = WASM_VECTOR_LEN;
-            const ptr1 = passStringToWasm0(budget, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
-            const len1 = WASM_VECTOR_LEN;
-            var ptr2 = isLikeNone(max_tx) ? 0 : passStringToWasm0(max_tx, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
-            var len2 = WASM_VECTOR_LEN;
-            var ptr3 = isLikeNone(max_fee) ? 0 : passStringToWasm0(max_fee, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
-            var len3 = WASM_VECTOR_LEN;
-            wasm.playground_grant(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, lifetime_secs, now);
+            var ptr1 = isLikeNone(max_tx) ? 0 : passStringToWasm0(max_tx, wasm.__wbindgen_export2, wasm.__wbindgen_export3);
+            var len1 = WASM_VECTOR_LEN;
+            wasm.playground_grant(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, lifetime_secs, now);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
             var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
-            var ptr5 = r0;
-            var len5 = r1;
+            var ptr3 = r0;
+            var len3 = r1;
             if (r3) {
-                ptr5 = 0; len5 = 0;
+                ptr3 = 0; len3 = 0;
                 throw takeObject(r2);
             }
-            deferred6_0 = ptr5;
-            deferred6_1 = len5;
-            return getStringFromWasm0(ptr5, len5);
+            deferred4_0 = ptr3;
+            deferred4_1 = len3;
+            return getStringFromWasm0(ptr3, len3);
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
-            wasm.__wbindgen_export4(deferred6_0, deferred6_1, 1);
+            wasm.__wbindgen_export4(deferred4_0, deferred4_1, 1);
         }
     }
     /**

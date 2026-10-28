@@ -57,7 +57,7 @@ fn mcp_demo() {
     println!("sats MCP demo: agents create requests, humans authorize them, sats executes.");
 
     scene("1. Approval: the agent asks, the human approves, sats signs and broadcasts");
-    let (dir, _fx, mut mcp, id) = filed(&["--budget", "50000"]);
+    let (dir, _fx, mut mcp, id) = filed(&[]);
     let approved = approve(&dir, &id);
     human("agent approve", approved["status"].as_str().unwrap());
     assert_eq!(approved["status"], "sent", "{approved}");
@@ -68,7 +68,7 @@ fn mcp_demo() {
 
     scene("2. Denial: a proposal over the grant's cap is never approvable");
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(&dir, &["--budget", "50000", "--max-tx", "5000"], &[100_000]);
+    let fx = funded_setup(&dir, &["--max-tx", "5000"], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     let view = mcp.request_send(2, AMOUNT, "too-big");
@@ -78,10 +78,10 @@ fn mcp_demo() {
     let output = sats_output(&dir, &["agent", "approve", &id_of(&view), "--yes"]);
     human("agent approve", &stderr_of(&output));
     assert!(!output.status.success());
-    assert_eq!(spent_sat(&dir), 0);
+    assert_eq!(saved_transactions(&dir), 0);
 
     scene("3. Expiry: a request pending when its grant expires is denied at approval");
-    let (dir, _fx, mut mcp, id) = filed(&["--budget", "50000"]);
+    let (dir, _fx, mut mcp, id) = filed(&[]);
     let grant_path = dir.path().join("signet/grants/claude.json");
     let mut grant = read_json(&grant_path);
     grant["expires_at"] = serde_json::json!(1);
@@ -95,10 +95,10 @@ fn mcp_demo() {
     assert!(!output.status.success());
     assert!(stderr_of(&output).contains("expired"));
     assert_eq!(request_record(&dir, "claude", &id)["status"], "denied");
-    assert_eq!(spent_sat(&dir), 0);
+    assert_eq!(saved_transactions(&dir), 0);
 
     scene("4. Revocation: the human revokes mid-session; every tool is cut off");
-    let (dir, _fx, mut mcp, id) = filed(&["--budget", "50000"]);
+    let (dir, _fx, mut mcp, id) = filed(&[]);
     run_sats(&dir, &["agent", "revoke", "claude"]);
     human("agent revoke", "revoked");
     let view = mcp.request_send(3, AMOUNT, "after-revoke");
@@ -111,7 +111,7 @@ fn mcp_demo() {
     assert_eq!(request_record(&dir, "claude", &id)["status"], "denied");
 
     scene("5. Failed broadcast: the signed transaction is kept and never signed again");
-    let (dir, fx, mut mcp, id) = filed(&["--budget", "50000"]);
+    let (dir, fx, mut mcp, id) = filed(&[]);
     std::fs::write(fx.mockdata.join("broadcast-fail"), "provider down").unwrap();
     let approved = approve(&dir, &id);
     human("agent approve", approved["status"].as_str().unwrap());
@@ -120,7 +120,6 @@ fn mcp_demo() {
     let view = mcp.check_request(3, &id);
     agent("check_request", &view);
     assert_eq!(view["status"], "broadcast_pending");
-    let spent = spent_sat(&dir);
     std::fs::remove_file(fx.mockdata.join("broadcast-fail")).unwrap();
     run_sats(&dir, &["tx", "broadcast", &txid]);
     human("tx broadcast", "sent");
@@ -128,7 +127,7 @@ fn mcp_demo() {
     agent("check_request", &view);
     assert_eq!(view["status"], "sent");
     assert_eq!(view["txid"], txid.as_str());
-    assert_eq!(spent_sat(&dir), spent, "one signature, one draw");
+    assert_eq!(saved_transactions(&dir), 1, "one signature");
 
     println!("\nAll five scenes behaved as specified.");
 }

@@ -15,9 +15,7 @@ type WasmWallet = {
   cancel(id: string): string;
   grant(
     agent: string,
-    budget: string,
     maxTx: string | undefined,
-    maxFee: string | undefined,
     lifetimeSecs: number,
     now: number
   ): string;
@@ -140,7 +138,7 @@ const HELP: Line[] = [
   ["t-dim", "the agent surface — what an AI can do:"],
   ["t-o", "  sats agent request <name> <addr> <amt>  file a request (it waits for you)"],
   ["t-dim", "your control plane — the agent cannot call these:"],
-  ["t-o", "  sats agent grant <name> --budget <sats> [--for 24h]"],
+  ["t-o", "  sats agent grant <name> [--for 24h] [--max-tx n]"],
   ["t-o", "  sats agent requests          review pending requests"],
   ["t-o", "  sats agent approve <id>      authorize one request: it signs and sends"],
   ["t-o", "  sats agent dismiss <id>      decline a request"],
@@ -497,13 +495,10 @@ export default function Playground() {
     const sub = args[0];
     if (sub === "grant") {
       const name = args[1];
-      const budget = flags.get("budget");
-      if (!name || !budget) {
+      if (!name) {
         push({
           cls: "t-r",
-          text:
-            "usage: sats agent grant <name> --budget <sats> " +
-            "[--for 24h] [--max-tx n] [--max-fee n]",
+          text: "usage: sats agent grant <name> [--for 24h] [--max-tx n]",
         });
         return;
       }
@@ -516,24 +511,11 @@ export default function Playground() {
         return;
       }
       const grant = JSON.parse(
-        wallet.grant(
-          name,
-          budget,
-          flags.get("max-tx"),
-          flags.get("max-fee"),
-          lifetime,
-          now()
-        )
+        wallet.grant(name, flags.get("max-tx"), lifetime, now())
       );
-      const rows: [string, string][] = [
-        ["Grant", grant.agent],
-        ["Budget", fmt(grant.budget_sat) + " sat"],
-      ];
+      const rows: [string, string][] = [["Grant", grant.agent]];
       if (grant.max_tx_sat != null) {
         rows.push(["Max tx", fmt(grant.max_tx_sat) + " sat"]);
-      }
-      if (grant.max_fee_sat != null) {
-        rows.push(["Max fee", fmt(grant.max_fee_sat) + " sat"]);
       }
       rows.push(["For", humanDuration(lifetime)]);
       push(...kv(rows));
@@ -564,9 +546,7 @@ export default function Playground() {
       const rows = JSON.parse(wallet.grants(now())) as {
         agent: string;
         mode: string;
-        remaining_sat: number;
-        budget_sat: number;
-        tx_count: number;
+        max_tx_sat: number | null;
         expired: boolean;
       }[];
       if (rows.length === 0) {
@@ -580,12 +560,9 @@ export default function Playground() {
             grant.agent.padEnd(12) +
             " " +
             grant.mode.padEnd(8) +
-            fmt(grant.remaining_sat) +
-            "/" +
-            fmt(grant.budget_sat) +
-            " sat remaining · " +
-            grant.tx_count +
-            " tx" +
+            (grant.max_tx_sat != null
+              ? "max " + fmt(grant.max_tx_sat) + " sat per request"
+              : "no amount cap — you review every amount") +
             (grant.expired ? " · expired" : ""),
         });
       }
@@ -643,12 +620,7 @@ export default function Playground() {
         },
         {
           cls: "t-dim",
-          text:
-            "budget remaining " +
-            fmt(sent.grant_remaining_sat) +
-            " sat · txid " +
-            String(sent.txid).slice(0, 16) +
-            "…",
+          text: "txid " + String(sent.txid).slice(0, 16) + "…",
         }
       );
       return;

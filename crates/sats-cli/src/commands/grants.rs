@@ -27,12 +27,7 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
                     "agent": g.agent,
                     "mode": g.mode.as_str(),
                     "allowed_recipients": g.allowed_recipients,
-                    "budget_sat": g.budget_sat,
-                    "spent_sat": g.spent_sat,
-                    "remaining_sat": g.remaining_sat(),
                     "max_tx_sat": g.max_tx_sat,
-                    "max_fee_sat": g.max_fee_sat,
-                    "tx_count": g.tx_count,
                     "expires_at": g.expires_at,
                 })
             })
@@ -59,19 +54,8 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let header = [
-        "Agent",
-        "Mode",
-        "To",
-        "Budget",
-        "Spent",
-        "Remaining",
-        "Max-tx",
-        "Max-fee",
-        "Txs",
-        "Expires",
-    ];
-    let rows: Vec<[String; 10]> = grants
+    let header = ["Agent", "Mode", "To", "Max-tx", "Expires"];
+    let rows: Vec<[String; 5]> = grants
         .iter()
         .map(|g| {
             [
@@ -81,12 +65,7 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
                     None => "any".to_string(),
                     Some(list) => list.len().to_string(),
                 },
-                format_sats(g.budget_sat),
-                format_sats(g.spent_sat),
-                format_sats(g.remaining_sat()),
                 g.max_tx_sat.map(format_sats).unwrap_or_else(|| "—".into()),
-                format_sats(g.max_fee_sat),
-                g.tx_count.to_string(),
                 format!(
                     "in {}",
                     ui::human_duration(g.expires_at.saturating_sub(now))
@@ -123,6 +102,6 @@ pub fn run(store: &Store, network: Network, json: bool) -> Result<()> {
 fn reissue_notice(agent: &str) -> String {
     format!(
         "grant for {agent:?} is a pre-daemon record and cannot sign — re-issue it: \
-         sats agent revoke {agent} && sats agent grant {agent} --budget <sats>"
+         sats agent revoke {agent} && sats agent grant {agent}"
     )
 }

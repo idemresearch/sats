@@ -58,7 +58,7 @@ impl Fixture {
 
     fn pending_request(&self) -> &'static str {
         sats(&self.dir)
-            .args(["agent", "grant", "claude", "--budget", "50000", "--json"])
+            .args(["agent", "grant", "claude", "--json"])
             .assert()
             .success();
         let grant: serde_json::Value = serde_json::from_slice(
