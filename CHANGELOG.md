@@ -3,72 +3,74 @@
 Notable changes to sats, newest first. Versions follow
 `workspace.package.version` in `Cargo.toml`.
 
-## Unreleased
+## 0.0.4 (2026-10-28)
 
-### Sending
+0.0.4 adds Alkanes and narrows what sats will sign. Agents can propose
+frBTC wraps and exact Alkanes transfers for your approval, a grant becomes a
+credential and a scope with no budget, and sats signs only transactions it
+built and checked itself. Agent grants from earlier builds must be
+re-issued: `sats agent revoke <name> && sats agent grant <name>`. sats still
+runs on test networks only.
 
-- Removed `sats send --export-psbt`, `sats psbt inspect`, and
-  `sats psbt sign`. sats signs only transactions it prepared on fresh chain
-  state with its postage and Alkanes exclusions; signing a PSBT built
-  elsewhere bypassed both.
-- Removed `sats alkanes execute`. It called any contract with any calldata,
-  gated only by a provider's simulation; sats now signs only Alkanes
-  operations it composes and verifies (`alkanes send`, agent frBTC wraps
-  and transfers).
-- `sats tx broadcast` rebroadcasts only transactions sats signed and saved;
-  it no longer broadcasts raw hex files.
+### Alkanes
 
-### Agent grants
+- Standard builds include `sats alkanes balance`, `inspect`, `simulate`,
+  `send`, and `frbtc info`, with no separate Cargo feature flags. They need
+  Subfrost as the network's provider. `simulate` is advisory and never
+  prepares a spend.
+- `sats alkanes send` transfers an exact amount of one alkane. It spends
+  only indexed outputs holding the asset, returns every other alkane to the
+  wallet, and shows its review before the password.
+- With an Alkanes provider, plain BTC sends exclude asset-bearing and
+  unindexed outputs, and stop if the indexer is unavailable.
+- MCP `request_alkanes_send` files an exact transfer under the agent's
+  existing grant. Approval reviews the asset quantity and what stays in the
+  wallet separately from BTC postage and fee, and rechecks indexed balances
+  before signing. The grant's amount cap checks the BTC postage; asset
+  quantities are not capped, so read the quantity in every review.
+- MCP `request_wrap_frbtc` files a fixed BTC-to-frBTC wrap under the
+  ordinary grant. The request records the contract's code hash and BTC
+  signer; approval verifies and simulates the exact transaction before your
+  review. The agent supplies no destination or calldata.
+- MCP `alkanes_balance`, `alkanes_inspect`, and `alkanes_simulate` read
+  under the connection's pinned network and live grant. Asset amounts and
+  calldata use decimal strings.
+- frBTC requests use request format 3 and asset transfers format 4, so
+  older binaries refuse them rather than read them as BTC payments.
+
+### Agents
 
 - Grants no longer carry a budget, spending ledger, or fee cap. Every agent
-  request already waits for a human who reviews its real amount and fee, so
-  a grant is now a credential and a scope: expiry, mode, an optional
-  per-request amount cap (`--max-tx`), and an optional recipient allowlist
-  (`--to`). `sats agent grant` drops `--budget` and `--max-fee`.
-- Removed from JSON surfaces: `budget_sat`, `spent_sat`, `remaining_sat`,
+  request already waits for you, with its real amount and fee in the
+  review, so a grant is now a credential and a scope: expiry, mode, an
+  optional per-request amount cap (`--max-tx`), and an optional recipient
+  allowlist (`--to`). `sats agent grant` drops `--budget` and `--max-fee`.
+- Removed from JSON: `budget_sat`, `spent_sat`, `remaining_sat`,
   `max_fee_sat`, and `tx_count` from MCP `get_grant`, `sats agent list
   --json`, and `sats agent grant --json`; `remaining_budget_sat` from
   `sats agent approve --json`; the denial reasons `over_budget`,
   `over_max_fee`, and `amount_overflow`; and the `reserved` and `refunded`
   events. Older log lines still show raw in `sats agent log`.
 - Grants use format version 4. Grants from earlier builds carried a budget
-  and are refused with the recreate step: `sats agent revoke <name> &&
-  sats agent grant <name>`. Requests filed under them can't be approved.
+  and are refused with the recreate step; requests filed under them can't
+  be approved.
 - Approval re-checks the grant under the lock immediately before signing.
   An audit log that can't record the approval stops it before the signer
   exists, leaving the request `failed` and re-approvable.
+- Printed MCP setup commands pin the running executable as well as the
+  wallet and network, so an older `sats` earlier on PATH can't serve them.
 
-### Alkanes
+### Signing
 
-- MCP `request_alkanes_send` files exact Alkanes transfers under existing
-  grants, without new flags. Human approval reviews asset quantity and change
-  separately from BTC postage and fees, rechecks indexed input balances,
-  and shares the existing signing and recovery flow. The grant's amount cap
-  checks the BTC postage; asset quantities are not capped. The reusable
-  protocol-qualified asset intent uses request format 4; older binaries
-  refuse it.
-
-- MCP `request_wrap_frbtc` files a fixed BTC-to-frBTC proposal under the
-  ordinary BTC grant, with no protocol-specific flag. The request records
-  the contract code hash and BTC signer; approval verifies and simulates
-  the transaction, shows its review before authorization, and uses the
-  shared request workflow and signing boundary. The agent supplies no
-  destination or calldata and only observes after filing.
-- `sats alkanes frbtc info` reads the frBTC contract hash and signer.
-  frBTC requests use version 3 so older binaries refuse them. Unsupported pre-release state
-  is refused without silent migration.
-- Printed MCP setup commands pin the currently running executable as well
-  as the wallet and network, avoiding an older `sats` earlier on PATH.
-
-- Standard builds include `sats alkanes balance`, `inspect`, `simulate`,
-  and `send`, with no separate Cargo feature flags. Transfers require human
-  authorization; MCP never executes spends.
-- MCP provides `alkanes_balance`, `alkanes_inspect`, and `alkanes_simulate`
-  under the connection's pinned network and live grant. Asset amounts and
-  calldata use decimal strings; simulations remain advisory and never
-  prepare or execute a spend.
-- With an Alkanes provider, plain BTC sends exclude asset-bearing and
-  unindexed outputs and stop if the indexer is unavailable.
+- sats signs only transactions it prepared on fresh chain state, with its
+  postage and Alkanes exclusions and, for agent requests, the check of what
+  the transaction pays.
+- Removed `sats send --export-psbt`, `sats psbt inspect`, and
+  `sats psbt sign`. Signing a PSBT built elsewhere bypassed those checks.
+- Removed `sats alkanes execute`, which called any contract with any
+  calldata, gated only by a provider's simulation.
+- `sats tx broadcast` rebroadcasts only transactions sats signed and saved;
+  it no longer broadcasts raw hex files.
 
 ### Providers
 
