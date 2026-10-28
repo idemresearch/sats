@@ -304,7 +304,7 @@ is in [MCP](mcp.md).
 ## Providers and inscription postage
 
 Preparing a spend requires fresh chain state. A sync failure stops every send
-mode, including `--dry-run` and `--export-psbt`, and stops agent execution.
+mode, including `--dry-run`, and stops agent execution.
 Balance, status, and history may show cached state and say so.
 
 Coin selection excludes outputs of exactly 546 or 330 sats, common
@@ -330,13 +330,12 @@ tool configures them, and the MCP server only uses what is configured.
 
 ## PSBTs
 
-A normal send, human or agent, keeps its PSBT in memory. `--export-psbt` is the
-exception: it writes the unsigned PSBT to an owner-only file you name, and
-leaves the directory's permissions alone. `sats psbt sign` turns a finalized
-artifact into a private transaction record. It also signs external PSBTs,
-which are untrusted input. Check them with `sats psbt inspect` and an
-independent tool before signing. A PSBT that still needs other signers is
-reported as partially signed and written back as an artifact.
+Every send, human or agent, keeps its PSBT in memory and never writes it to
+disk. sats has no command to export a PSBT or to sign one built elsewhere: it
+signs only transactions it prepared on fresh chain state with its own
+safety checks — the postage exclusion, the Alkanes exclusion, and, for agent
+requests, the derivation of what the transaction pays. A foreign PSBT would
+bypass all of them.
 
 ## Alkanes
 

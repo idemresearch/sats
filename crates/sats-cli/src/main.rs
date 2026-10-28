@@ -84,12 +84,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             offline,
             json,
         ),
-        Command::Psbt { command } => match command {
-            cli::PsbtCommand::Inspect { file } => commands::psbt::inspect(network, &file, json),
-            cli::PsbtCommand::Sign { file, out } => {
-                commands::psbt::sign(&store, network, &file, out.as_deref(), json)
-            }
-        },
         Command::Tx { command } => match command {
             cli::TxCommand::Broadcast { target } => {
                 commands::tx::broadcast(&store, network, || Ok(services(&config)?), &target, json)

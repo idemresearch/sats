@@ -64,7 +64,7 @@ sats history
 ```
 
 Amounts are whole sats: `25k` is 25,000 and `1.5m` is 1,500,000. Add
-`--dry-run` to price a send without making it. Restore, PSBT workflows, and
+`--dry-run` to price a send without making it. Restore, rebroadcasting, and
 JSON output are in the [CLI reference](docs/cli.md).
 
 ## Let an agent ask

@@ -403,23 +403,26 @@ fn send_refuses_stale_state_when_sync_fails() {
 }
 
 #[test]
-fn dry_run_conflicts_with_yes_and_export() {
+fn dry_run_conflicts_with_yes() {
     let dir = TempDir::new().unwrap();
     sats(&dir)
         .args(["send", "tb1qexample", "1000", "--dry-run", "--yes"])
         .assert()
         .code(2);
-    sats(&dir)
-        .args([
-            "send",
-            "tb1qexample",
-            "1000",
-            "--dry-run",
-            "--export-psbt",
-            "x.psbt",
-        ])
-        .assert()
-        .code(2);
+}
+
+/// The PSBT file workflow is gone: sats signs only what it prepared and
+/// verified itself, never a file built elsewhere.
+#[test]
+fn psbt_file_commands_are_removed() {
+    let dir = TempDir::new().unwrap();
+    for args in [
+        vec!["psbt", "inspect", "x.psbt"],
+        vec!["psbt", "sign", "x.psbt"],
+        vec!["send", "tb1qexample", "1000", "--export-psbt", "x.psbt"],
+    ] {
+        sats(&dir).args(&args).assert().code(2);
+    }
 }
 
 #[test]
@@ -661,29 +664,6 @@ fn balance_tolerates_sync_failure_and_reports_it() {
         serde_json::from_slice(&out.get_output().stdout).expect("json output");
     assert_eq!(json["balance_sat"], 0);
     assert_eq!(json["synced"], false);
-}
-
-#[test]
-fn psbt_sign_needs_an_explicit_source() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    // No hidden "newest session" default: FILE is required, and the
-    // removed --session flag stays removed.
-    sats(&dir).args(["psbt", "sign"]).assert().code(2);
-    sats(&dir)
-        .args(["psbt", "sign", "--session", "nope"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("--session"));
-    sats(&dir)
-        .args([
-            "psbt",
-            "inspect",
-            dir.path().join("config.toml").to_str().unwrap(),
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("not a valid PSBT"));
 }
 
 #[test]
@@ -1845,89 +1825,27 @@ fn dismiss_declines_a_pending_request() {
     assert_eq!(log[0]["event"], "dismissed");
 }
 
-// PSBT artifacts are owner-only files, but the directory belongs to the
-// user: a bare name lands in the working directory and the directory's
-// permissions are left alone.
-#[cfg(unix)]
-#[test]
-fn psbt_artifacts_are_private_without_touching_the_users_directory() {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    write_mock_provider(&dir);
-    common::fund_wallet(&dir, &[100_000]);
-    let work = dir.path().join("work");
-    std::fs::create_dir(&work).unwrap();
-    std::fs::set_permissions(&work, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-
-    sats(&dir)
-        .current_dir(&work)
-        .args([
-            "send",
-            common::ADDRESS,
-            "5000",
-            "--fee-rate",
-            "2",
-            "--export-psbt",
-            "spend.psbt",
-        ])
-        .assert()
-        .success();
-    sats(&dir)
-        .current_dir(&work)
-        .args(["psbt", "sign", "spend.psbt", "--out", "signed.psbt"])
-        .assert()
-        .success();
-
-    for name in ["spend.psbt", "signed.psbt"] {
-        assert_eq!(mode(&work.join(name)), 0o600, "{name}");
-    }
-    assert_eq!(
-        mode(&work),
-        0o755,
-        "the user's directory keeps its permissions"
-    );
-    let mut names: Vec<_> = std::fs::read_dir(&work)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
-    names.sort();
-    assert_eq!(
-        names,
-        ["signed.psbt", "spend.psbt"],
-        "no temporary files remain"
-    );
-}
-
 #[test]
 fn pending_saved_transaction_requires_providers_but_receipt_repair_does_not() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
-    write_mock_provider(&dir);
+    let mockdata = write_mock_provider(&dir);
     common::fund_wallet(&dir, &[100_000]);
-    let artifact = dir.path().join("unsigned.psbt");
+    // A send whose broadcast fails leaves a signed, saved, pending record.
+    std::fs::write(mockdata.join("broadcast-fail"), "provider down").unwrap();
     sats(&dir)
-        .args([
-            "send",
-            common::ADDRESS,
-            "5000",
-            "--fee-rate",
-            "2",
-            "--export-psbt",
-        ])
-        .arg(&artifact)
+        .args(["send", common::ADDRESS, "5000", "--fee-rate", "2", "--yes"])
         .assert()
-        .success();
-    let signed = json_stdout(
-        sats(&dir)
-            .args(["psbt", "sign"])
-            .arg(&artifact)
-            .arg("--json")
-            .assert()
-            .success(),
-    );
-    let txid = signed["txid"].as_str().unwrap();
+        .failure();
+    std::fs::remove_file(mockdata.join("broadcast-fail")).unwrap();
+    let saved: Vec<_> = std::fs::read_dir(dir.path().join("signet/transactions"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    assert_eq!(saved.len(), 1);
+    let txid = saved[0].file_stem().unwrap().to_str().unwrap().to_string();
+    let txid = txid.as_str();
     let record_path = dir.path().join(format!("signet/transactions/{txid}.json"));
     let before = std::fs::read(&record_path).unwrap();
     let servers = common::write_unresolvable_providers(&dir);

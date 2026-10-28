@@ -3,7 +3,7 @@ use sats_core::bitcoin::Network;
 use sats_core::plan::PreparedSpend;
 use sats_wallet::prepare;
 use sats_wallet::provider::Services;
-use sats_wallet::store::{Store, write_artifact};
+use sats_wallet::store::Store;
 use sats_wallet::{spend, walletd};
 
 use crate::cli::SendArgs;
@@ -47,30 +47,6 @@ pub fn run(
         return Ok(());
     }
     ctx.persist()?;
-
-    if let Some(file) = &args.export_psbt {
-        // The PSBT names the wallet's UTXOs and change: owner-only perms.
-        write_artifact(file, prepared.psbt().to_string().as_bytes())?;
-        if json {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "recipient": prepared.recipient,
-                    "amount_sat": prepared.amount_sat,
-                    "fee_sat": prepared.fee_sat,
-                    "total_sat": prepared.total_sat(),
-                    "excluded_utxos": prepared.excluded_utxos,
-                    "psbt_file": file.display().to_string(),
-                })
-            );
-        } else {
-            print_block(&prepared);
-            println!();
-            ui::ok(&format!("unsigned PSBT written  {}", file.display()));
-            ui::dim(&format!("next: sats psbt sign {}", file.display()));
-        }
-        return Ok(());
-    }
 
     if !json {
         print_block(&prepared);
