@@ -10,7 +10,6 @@ pub mod init;
 pub mod mode;
 pub mod network;
 pub mod providers;
-pub mod psbt;
 pub mod receive;
 pub mod recipients;
 pub mod requests;

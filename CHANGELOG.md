@@ -5,6 +5,14 @@ Notable changes to sats, newest first. Versions follow
 
 ## Unreleased
 
+### Sending
+
+- Removed `sats send --export-psbt`, `sats psbt inspect`, and
+  `sats psbt sign`. sats signs only transactions it prepared on fresh chain
+  state with its postage and Alkanes exclusions; signing a PSBT built
+  elsewhere bypassed both. `sats tx broadcast` still rebroadcasts saved
+  transactions and raw hex files.
+
 ### Agent grants
 
 - Grants no longer carry a budget, spending ledger, or fee cap. Every agent

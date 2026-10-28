@@ -42,8 +42,9 @@ today that path is `sats agent approve`, which unseals the seed with
 the human's password for exactly one execution. The agent observes the
 result and takes no action after filing.
 
-Prepared spends are PSBTs. Normal sends keep them in memory; an explicit
-export writes the unsigned PSBT to a user-named file artifact. Once signed,
+Prepared spends are PSBTs, kept in memory and never written to disk. sats
+signs only what it prepared and verified itself: there is no PSBT export
+and no command that signs a PSBT built elsewhere. Once signed,
 durable state contains private raw transaction hex rather than a signed
 PSBT. The persisted BDK wallet is watch-only. Human sends and approved
 agent requests share validation, sync, the dust exclusion, fee estimation, and
@@ -166,6 +167,9 @@ A workflow two surfaces could need belongs here, not in a command.
   it where supported.
 - Preserve the `Signer` boundary; do not make callers depend directly on the
   local mnemonic signer.
+- Sign only transactions sats prepared through the shared pipeline. Never
+  add a command or tool that signs a PSBT or transaction built elsewhere:
+  it would bypass the dust and asset exclusions and intent verification.
 - Treat a signed transaction as spendable even when broadcast fails.
 - Persist finalized transaction hex before attempting broadcast, in the
   process that produced the signature. Do not persist a signed PSBT for a

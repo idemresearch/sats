@@ -88,11 +88,6 @@ pub enum Command {
         #[arg(long)]
         offline: bool,
     },
-    /// Inspect and sign PSBT files (advanced, multi-signer workflows)
-    Psbt {
-        #[command(subcommand)]
-        command: PsbtCommand,
-    },
     /// Work with signed transactions (advanced)
     Tx {
         #[command(subcommand)]
@@ -262,25 +257,6 @@ pub enum TxCommand {
     },
 }
 
-#[derive(Subcommand)]
-pub enum PsbtCommand {
-    /// Decode a PSBT file: outputs, fee, and signing state
-    Inspect {
-        /// PSBT file (base64 text or binary)
-        #[arg(value_name = "FILE")]
-        file: PathBuf,
-    },
-    /// Sign a PSBT file with the wallet seed
-    Sign {
-        /// PSBT file (base64 text or binary)
-        #[arg(value_name = "FILE")]
-        file: PathBuf,
-        /// Write the signed PSBT here instead of staging a broadcast
-        #[arg(long, value_name = "FILE")]
-        out: Option<PathBuf>,
-    },
-}
-
 #[derive(clap::Args)]
 pub struct SendArgs {
     /// Recipient address
@@ -295,14 +271,11 @@ pub struct SendArgs {
     #[arg(long)]
     pub allow_dust: bool,
     /// Skip the confirmation prompt
-    #[arg(short, long, conflicts_with_all = ["dry_run", "export_psbt"])]
+    #[arg(short, long, conflicts_with = "dry_run")]
     pub yes: bool,
     /// Preview only: prepare and price the send, persist nothing
-    #[arg(long, conflicts_with = "export_psbt")]
+    #[arg(long)]
     pub dry_run: bool,
-    /// Write the unsigned PSBT to FILE instead of signing
-    #[arg(long, value_name = "FILE")]
-    pub export_psbt: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]

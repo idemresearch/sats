@@ -13,8 +13,6 @@ exact options in your installed version.
 | `sats send <address> <amount>` | Prepare, confirm, sign, save, and broadcast a payment |
 | `sats status [TXID] [--offline]` | Show saved transactions and their chain status |
 | `sats history [--offline]` | List the wallet's transactions, newest first |
-| `sats psbt inspect <FILE>` | Decode a PSBT offline: outputs, fee, signing state |
-| `sats psbt sign <FILE> [--out FILE]` | Sign a PSBT file |
 | `sats tx broadcast <FILE\|TXID>` | Broadcast a raw hex file or a saved transaction |
 | `sats agent grant <name>` | Let an agent file requests you approve |
 | `sats agent mode <name> <ask\|observe>` | Switch a grant's mode |
@@ -111,7 +109,7 @@ chain on first sync.
 
 ```sh
 sats send <address> <amount> [--fee-rate <SAT_VB>] [--allow-dust]
-          [--yes | --dry-run | --export-psbt <FILE>]
+          [--yes | --dry-run]
 ```
 
 Every send, human or agent, takes the same path:
@@ -132,7 +130,6 @@ and is never available to agents.
 | default | Show amount and fee, ask to confirm, sign, save the transaction, broadcast |
 | `--yes` | Skip the confirmation. Password, safety checks, and grant rules still apply. |
 | `--dry-run` | Price the send and change nothing. No password needed. |
-| `--export-psbt <FILE>` | Write the unsigned PSBT to an owner-only file and sign nothing. The file's directory must exist, and sats leaves its permissions alone. The reserved change address is saved so the PSBT stays valid. |
 
 If a broadcast fails after signing, the transaction is already saved.
 `sats status` lists it, and `sats tx broadcast <txid>` retries it.
@@ -152,23 +149,10 @@ confirmed shows as "signed; broadcast unconfirmed", alongside whatever the
 chain reports for it. In JSON, `sync_status` is `fresh`, `offline`, or
 `failed`.
 
-## PSBT workflow
+## Rebroadcasting
 
-A normal `send` never writes a PSBT. To work step by step:
-
-```sh
-sats send tb1p... 25k --export-psbt spend.psbt
-sats psbt inspect spend.psbt
-sats psbt sign spend.psbt
-sats tx broadcast <txid>
-```
-
-`psbt sign` accepts base64 or binary PSBTs, including ones from other
-wallets. If the wallet's signature completes the transaction, sats saves it
-for `sats tx broadcast` and doesn't keep the signed PSBT. If other signers
-are still needed, it writes `<name>.signed.psbt` beside the input and reports
-the PSBT as partially signed. `--out <FILE>` always writes the signed PSBT to
-`FILE` and saves nothing else.
+sats signs only transactions it prepared and verified itself. There is no
+command to sign a PSBT file built elsewhere.
 
 `tx broadcast` reads an existing file as raw transaction hex. Otherwise it
 looks up a saved transaction by txid or unique prefix and rebroadcasts the
@@ -384,7 +368,7 @@ precedes the password (on stderr with `--json`).
 ## JSON output
 
 `--json` is supported by `balance`, `receive`, `send` (all modes), `status`,
-`history`, `psbt inspect`, `psbt sign`, `tx broadcast`, `network`, `network use`,
+`history`, `tx broadcast`, `network`, `network use`,
 every `agent` subcommand except `serve`, every `providers` subcommand, and
 every `alkanes` subcommand.
 
