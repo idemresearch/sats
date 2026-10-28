@@ -168,8 +168,10 @@ A workflow two surfaces could need belongs here, not in a command.
 - Preserve the `Signer` boundary; do not make callers depend directly on the
   local mnemonic signer.
 - Sign only transactions sats prepared through the shared pipeline. Never
-  add a command or tool that signs a PSBT or transaction built elsewhere:
-  it would bypass the dust and asset exclusions and intent verification.
+  add a command or tool that signs a PSBT or transaction built elsewhere,
+  or a generic contract call: each would bypass the dust and asset
+  exclusions and intent verification. A new protocol operation gets its
+  own composer and independent checker.
 - Treat a signed transaction as spendable even when broadcast fails.
 - Persist finalized transaction hex before attempting broadcast, in the
   process that produced the signature. Do not persist a signed PSBT for a

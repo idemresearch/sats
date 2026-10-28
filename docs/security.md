@@ -340,8 +340,10 @@ bypass all of them.
 ## Alkanes
 
 Standard builds include Alkanes inspection, advisory simulation, balance,
-and human-authorized execution and transfers. Views come from the network's
-provider, which must be Subfrost. MCP exposes Alkanes balance, inspection,
+and human-authorized transfers. There is no generic contract call: sats signs
+only Alkanes operations it composes and independently verifies, so a
+provider's simulation is never the only check before the signer. Views come
+from the network's provider, which must be Subfrost. MCP exposes Alkanes balance, inspection,
 and advisory simulation, authenticated against the pinned network's grant
 on every call. These reads never prepare, execute, sign, or broadcast.
 The separate fixed `request_wrap_frbtc` capability files a request under
@@ -351,16 +353,7 @@ to preserve u128 precision. The generic simulation request format has not been
 verified against a live endpoint. Wrapping uses a separate exact-transaction
 protobuf view checked against testnet4.
 
-Generic calls require a recognized numeric status-zero
-simulation response without reported errors or contradictory statuses.
-Unknown responses remain displayable by the read-only command but cannot
-reach preparation or signing. A successful response is still only an
-advisory provider claim. The transaction checker independently decodes the
-call, enforces wallet-owned pointer/refund and change outputs, rejects
-edicts and unexpected outputs, and derives fees from wallet input values.
-It does not prove future contract effects.
-
-Human Alkanes execution is staged in `sats-wallet::alkanes::human`. The
+Human Alkanes transfers are staged in `sats-wallet::alkanes::human`. The
 surface shows its immutable review, on stderr in JSON mode, before asking
 for confirmation or a password; `--yes` skips only confirmation. Commit
 consumes the operation and invokes a signer factory once, then drops the

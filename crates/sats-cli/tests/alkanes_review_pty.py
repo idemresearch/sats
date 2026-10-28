@@ -1,4 +1,4 @@
-"""Check human execute review before password input, using disposable state."""
+"""Check human Alkanes review before password input, using disposable state."""
 import fcntl
 import os
 from pathlib import Path
@@ -11,6 +11,7 @@ import time
 
 binary, root = sys.argv[1], Path(sys.argv[2])
 request_id = sys.argv[3] if len(sys.argv) > 3 else None
+RECIPIENT = "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n"
 
 for json_mode, yes, cancel in [(False, False, False), (True, False, False),
                                (True, True, False), (True, False, True)]:
@@ -23,7 +24,7 @@ for json_mode, yes, cancel in [(False, False, False), (True, False, False),
         fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
 
     args = ([binary, "agent", "approve", request_id] if request_id else
-            [binary, "alkanes", "execute", "2:1", "77"])
+            [binary, "alkanes", "send", "32:0", "1000", RECIPIENT])
     confirmation = "Approve and sign?" if request_id else "Sign?"
     if json_mode:
         args.append("--json")
@@ -69,8 +70,8 @@ for json_mode, yes, cancel in [(False, False, False), (True, False, False),
         fields = (["Wallet", "Network", "signet", "Approve", request_id, "Asset transfer",
                    "alkanes:32:0", "1000 base units", "Returned assets", "32:0: 4000",
                    "2:0: 50", "546", "Fee", "Total"] if request_id else
-                  ["Wallet", "Network", "signet", "Execute", "2:1", "Inputs", "77",
-                   "advisory", "Postage", "Fee", "Total", "leave the wallet"])
+                  ["Wallet", "Network", "signet", "Send", "1000 of 32:0", "To", RECIPIENT,
+                   "Kept", "Postage", "Fee", "Total", "leave the wallet"])
         for text in fields:
             assert text in review, (text, transcript())
         if json_mode:

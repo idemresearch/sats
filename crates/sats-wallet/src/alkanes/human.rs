@@ -1,54 +1,22 @@
-//! Human-authorized Alkanes execution.
+//! Human-authorized Alkanes transfers.
 //!
 //! A surface stages, renders the immutable review, and obtains human approval
 //! before consuming the staged operation with a signer factory. Staging has no
 //! signer or key. The factory is invoked only in commit, once. Agent requests
-//! must use request::execute; this module provides no grant authority.
-
-use std::collections::BTreeSet;
+//! must use request::execute; this module provides no grant authority. There
+//! is no generic contract call: sats signs only operations it composes and
+//! verifies itself.
 
 use super::transfer::{TransferRequest, TransferReview};
-use anyhow::{Context, Result, anyhow, bail};
-use sats_alkanes::build::build_execute_plan;
-use sats_alkanes::call::AlkaneCall;
-use sats_alkanes::delta::SimulationView;
-use sats_core::bdk_wallet::KeychainKind;
-use sats_core::bitcoin::{Address, Amount, FeeRate, Network, OutPoint, Psbt};
-use sats_core::engine;
+use anyhow::{Context, Result, bail};
+use sats_core::bitcoin::{FeeRate, Network, Psbt};
 use sats_core::plan::{PreparedSpend, TransactionRecord, TxOrigin};
 use sats_core::signer::Signer;
 
-use crate::assets;
 use crate::provider::Services;
 use crate::spend;
-use crate::store::{Store, unix_now};
-use crate::walletd::{self, WalletCtx};
-
-use super::{check_services, simulate};
-
-pub struct ExecuteRequest {
-    pub call: AlkaneCall,
-    pub fee_rate: Option<u64>,
-    pub postage_sat: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct ExecuteReview {
-    pub call: AlkaneCall,
-    pub simulation: SimulationView,
-    pub pointer_address: String,
-    pub postage_sat: u64,
-    pub fee_sat: u64,
-    /// Postage stays in the wallet; only the fee leaves it.
-    pub external_sat: u64,
-    pub excluded_utxos: u64,
-}
-
-#[derive(Debug, Clone)]
-pub enum OperationReview {
-    Execute(ExecuteReview),
-    Transfer(TransferReview),
-}
+use crate::store::Store;
+use crate::walletd::WalletCtx;
 
 /// An unsigned, checked operation. Private fields and a consuming commit bind
 /// approval to the reviewed PSBT, wallet, network and provider. Not Clone.
@@ -58,7 +26,7 @@ pub struct StagedOperation<'a> {
     services: &'a Services,
     ctx: WalletCtx,
     prepared: PreparedSpend,
-    review: OperationReview,
+    review: TransferReview,
 }
 
 pub struct ExecutionOutcome {
@@ -69,7 +37,7 @@ pub struct ExecutionOutcome {
 }
 
 impl StagedOperation<'_> {
-    pub fn review(&self) -> &OperationReview {
+    pub fn review(&self) -> &TransferReview {
         &self.review
     }
 
@@ -90,9 +58,7 @@ impl StagedOperation<'_> {
         surface: &str,
         signer_factory: impl FnOnce() -> Result<S>,
     ) -> Result<ExecutionOutcome> {
-        if let OperationReview::Transfer(review) = &self.review {
-            super::transfer::recheck(&self.ctx, self.services, self.prepared.psbt(), review)?;
-        }
+        super::transfer::recheck(&self.ctx, self.services, self.prepared.psbt(), &self.review)?;
         let mut record = {
             let mut signer = signer_factory()?;
             spend::sign_with(self.prepared, &mut signer)
@@ -149,70 +115,6 @@ pub(crate) fn input_values(ctx: &WalletCtx, psbt: &Psbt) -> Result<Vec<u64>> {
     Ok(values)
 }
 
-pub fn stage_execute<'a>(
-    store: &'a Store,
-    network: Network,
-    services: &'a Services,
-    args: &ExecuteRequest,
-) -> Result<StagedOperation<'a>> {
-    check_services(network, services)?;
-    let simulation = simulate(services, &args.call)?;
-    simulation.require_success()?;
-    let mut ctx = walletd::open(store, network)?;
-    services
-        .sync_wallet(&mut ctx)
-        .map_err(|e| anyhow!("{e} — refusing to plan on stale state"))?;
-    let utxos: Vec<(OutPoint, Amount)> = ctx
-        .wallet
-        .list_unspent()
-        .map(|u| (u.outpoint, u.txout.value))
-        .collect();
-    let mut excluded: BTreeSet<OutPoint> = engine::dust_suspects(utxos).into_iter().collect();
-    excluded.extend(assets::excluded_for_send(&ctx, services)?.unwrap_or_default());
-    let pointer = ctx.wallet.reveal_next_address(KeychainKind::External);
-    let prepared = build_execute_plan(
-        &mut ctx.wallet,
-        &args.call,
-        &pointer.address,
-        args.postage_sat,
-        fee_rate(services, args.fee_rate)?,
-        &excluded.into_iter().collect::<Vec<_>>(),
-        ctx.net_name,
-        unix_now(),
-    )?;
-    ctx.persist()?;
-    let tx = &prepared.psbt().unsigned_tx;
-    let summary = sats_alkanes::execute::summarize(
-        tx,
-        &input_values(&ctx, prepared.psbt())?,
-        &args.call,
-        args.postage_sat,
-        |i| {
-            ctx.wallet
-                .is_mine(tx.output[i as usize].script_pubkey.clone())
-        },
-    )?;
-    if summary.fee_sat != prepared.fee_sat || summary.postage_sat != prepared.amount_sat {
-        bail!("prepared execution disagrees with the verified transaction");
-    }
-    let review = ExecuteReview {
-        call: args.call.clone(),
-        simulation,
-        pointer_address: Address::from_script(&tx.output[1].script_pubkey, network)?.to_string(),
-        postage_sat: summary.postage_sat,
-        fee_sat: summary.fee_sat,
-        external_sat: 0,
-        excluded_utxos: prepared.excluded_utxos,
-    };
-    Ok(StagedOperation {
-        store,
-        services,
-        ctx,
-        prepared,
-        review: OperationReview::Execute(review),
-    })
-}
-
 pub fn stage_transfer<'a>(
     store: &'a Store,
     network: Network,
@@ -225,7 +127,7 @@ pub fn stage_transfer<'a>(
         services,
         ctx: transfer.ctx,
         prepared: transfer.prepared,
-        review: OperationReview::Transfer(transfer.review),
+        review: transfer.review,
     })
 }
 
@@ -233,9 +135,11 @@ pub fn stage_transfer<'a>(
 mod tests {
     use super::*;
     use crate::config::{ChainChoice, Config, EsploraConfig, RedactedUrl};
-    use sats_alkanes::id::AlkaneId;
+    use crate::walletd;
+    use anyhow::anyhow;
     use sats_core::bdk_wallet::chain::{BlockId, ConfirmationBlockTime};
     use sats_core::bdk_wallet::test_utils::{insert_checkpoint, receive_output};
+    use sats_core::bitcoin::Amount;
     use sats_core::bitcoin::hashes::Hash;
     use sats_core::bitcoin::{BlockHash, Psbt};
     use sats_core::error::SignerError;
@@ -258,7 +162,6 @@ mod tests {
             let mockdata = dir.path().join("mock");
             std::fs::create_dir(&mockdata).unwrap();
             std::fs::write(mockdata.join("alkanes-simulate.json"), r#"{"status":0}"#).unwrap();
-            std::fs::write(mockdata.join("alkanes-outpoints.json"), "{}").unwrap();
             let mut config = Config::default();
             config.signet.chain = Some(ChainChoice::Esplora);
             config.signet.esplora = Some(EsploraConfig {
@@ -284,6 +187,13 @@ mod tests {
                 },
             );
             ctx.persist().unwrap();
+            // The wallet's only output carries the asset every test sends.
+            let outpoint = ctx.wallet.list_unspent().next().unwrap().outpoint;
+            std::fs::write(
+                mockdata.join("alkanes-outpoints.json"),
+                serde_json::json!({outpoint.to_string(): {"32:0":"5000","2:0":"50"}}).to_string(),
+            )
+            .unwrap();
             Self {
                 _dir: dir,
                 store,
@@ -293,7 +203,7 @@ mod tests {
         }
 
         fn stage(&self) -> StagedOperation<'_> {
-            stage_execute(&self.store, Network::Signet, &self.services, &request()).unwrap()
+            stage_transfer(&self.store, Network::Signet, &self.services, &request()).unwrap()
         }
 
         fn assert_no_spend(&self) {
@@ -302,12 +212,13 @@ mod tests {
         }
     }
 
-    fn request() -> ExecuteRequest {
-        ExecuteRequest {
-            call: AlkaneCall {
-                target: AlkaneId { block: 2, tx: 1 },
-                inputs: vec![77],
-            },
+    const RECIPIENT: &str = "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n";
+
+    fn request() -> TransferRequest {
+        TransferRequest {
+            asset: "32:0".parse().unwrap(),
+            amount: 1000,
+            address: RECIPIENT.into(),
             fee_rate: Some(2),
             postage_sat: 546,
         }
@@ -353,14 +264,12 @@ mod tests {
         let fx = Fixture::new();
         let stage = fx.stage();
         fx.assert_no_spend();
-        let OperationReview::Execute(review) = stage.review() else {
-            panic!("execute review")
-        };
-        let fee = review.fee_sat;
-        assert_eq!(review.external_sat, 0);
+        let review = stage.review();
+        let fee = review.summary.fee_sat;
+        assert_eq!(review.amount, 1000);
         let mut detached = review.clone();
-        detached.call.target.tx = 99;
-        detached.fee_sat = 0;
+        detached.amount = 1;
+        detached.summary.fee_sat = 0;
         let calls = Cell::new(0);
         let outcome = stage
             .commit("test-human", || {
@@ -376,7 +285,7 @@ mod tests {
         assert_eq!(calls.get(), 1);
         assert!(outcome.broadcast_error.is_none());
         assert_eq!(outcome.transaction.fee_sat, fee);
-        assert_eq!(outcome.transaction.recipient, "alkanes:2:1");
+        assert_eq!(outcome.transaction.recipient, RECIPIENT);
         assert_eq!(
             outcome.transaction.origin.as_ref().unwrap().surface,
             "test-human"
@@ -392,22 +301,7 @@ mod tests {
     #[test]
     fn transfer_index_changes_stop_before_the_human_signer_factory() {
         let fx = Fixture::new();
-        let ctx = walletd::open(&fx.store, Network::Signet).unwrap();
-        let outpoint = ctx.wallet.list_unspent().next().unwrap().outpoint;
-        std::fs::write(
-            fx.mockdata.join("alkanes-outpoints.json"),
-            serde_json::json!({outpoint.to_string(): {"32:0":"5000","2:0":"50"}}).to_string(),
-        )
-        .unwrap();
-        drop(ctx);
-        let args = TransferRequest {
-            asset: "32:0".parse().unwrap(),
-            amount: 1000,
-            address: "tb1pvlnw9n2zuefmxzwmuz0763uajw8nmaattkhd8002g3ekejjspxtshu2q9n".into(),
-            fee_rate: Some(1),
-            postage_sat: 546,
-        };
-        let staged = stage_transfer(&fx.store, Network::Signet, &fx.services, &args).unwrap();
+        let staged = fx.stage();
         std::fs::write(fx.mockdata.join("alkanes-outpoints.json"), "{}").unwrap();
         let result = staged.commit::<LocalSigner>("test", || panic!("must not construct signer"));
         assert!(result.is_err());
@@ -504,39 +398,5 @@ mod tests {
         assert!(format!("{error:#}").contains("could not be persisted"));
         assert_eq!(calls.get(), 1);
         assert!(!fx.mockdata.join("broadcasts.log").exists());
-    }
-
-    #[test]
-    fn invalid_simulation_sync_and_network_fail_before_staging() {
-        let fx = Fixture::new();
-        for raw in [
-            r#"{"status":7}"#,
-            "null",
-            "{}",
-            r#"{"status":0,"error":"revert"}"#,
-        ] {
-            std::fs::write(fx.mockdata.join("alkanes-simulate.json"), raw).unwrap();
-            let error = stage_execute(&fx.store, Network::Signet, &fx.services, &request())
-                .err()
-                .unwrap();
-            assert!(format!("{error:#}").contains("refusing execution"));
-            fx.assert_no_spend();
-        }
-        for network in [Network::Bitcoin, Network::Testnet4] {
-            let error = stage_execute(&fx.store, network, &fx.services, &request())
-                .err()
-                .unwrap();
-            assert!(
-                !format!("{error:#}").contains("refusing execution"),
-                "network checked before simulation"
-            );
-        }
-        std::fs::write(fx.mockdata.join("alkanes-simulate.json"), r#"{"status":0}"#).unwrap();
-        std::fs::write(fx.mockdata.join("sync-error"), "offline").unwrap();
-        let error = stage_execute(&fx.store, Network::Signet, &fx.services, &request())
-            .err()
-            .unwrap();
-        assert!(format!("{error:#}").contains("stale state"));
-        fx.assert_no_spend();
     }
 }

@@ -1,8 +1,8 @@
 //! Alkanes workflows shared by native surfaces.
 //!
 //! Provider I/O and wallet state live here; pure protocol rules live in
-//! sats-alkanes. No prompts, rendering, or password access. Human execution
-//! is never an MCP or agent capability.
+//! sats-alkanes. No prompts, rendering, or password access. Human transfers
+//! are never an MCP or agent capability.
 
 use anyhow::{Result, anyhow, bail};
 use sats_alkanes::call::AlkaneCall;

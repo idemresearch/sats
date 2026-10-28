@@ -13,7 +13,7 @@ exact options in your installed version.
 | `sats send <address> <amount>` | Prepare, confirm, sign, save, and broadcast a payment |
 | `sats status [TXID] [--offline]` | Show saved transactions and their chain status |
 | `sats history [--offline]` | List the wallet's transactions, newest first |
-| `sats tx broadcast <FILE\|TXID>` | Broadcast a raw hex file or a saved transaction |
+| `sats tx broadcast <TXID>` | Rebroadcast a saved transaction |
 | `sats agent grant <name>` | Let an agent file requests you approve |
 | `sats agent mode <name> <ask\|observe>` | Switch a grant's mode |
 | `sats agent allow <name> <address>` | Add a recipient to a grant's allowlist |
@@ -32,7 +32,6 @@ exact options in your installed version.
 | `sats alkanes balance` | Show indexed assets and unindexed outputs |
 | `sats alkanes inspect <ID>` | Show bytecode size and code hash |
 | `sats alkanes simulate <ID> <INPUTS>...` | Show an advisory simulation |
-| `sats alkanes execute <ID> <INPUTS>...` | Review and execute a human-operated contract call |
 | `sats alkanes send <ID> <AMOUNT> <ADDRESS>` | Transfer an asset in its base units |
 | `sats alkanes frbtc info` | Read the frBTC contract hash and BTC signer |
 | `sats network` | Show the active network and saved default |
@@ -152,11 +151,11 @@ chain reports for it. In JSON, `sync_status` is `fresh`, `offline`, or
 ## Rebroadcasting
 
 sats signs only transactions it prepared and verified itself. There is no
-command to sign a PSBT file built elsewhere.
+command to sign a PSBT built elsewhere or to broadcast a transaction sats
+didn't sign.
 
-`tx broadcast` reads an existing file as raw transaction hex. Otherwise it
-looks up a saved transaction by txid or unique prefix and rebroadcasts the
-saved bytes, without signing again.
+`tx broadcast` looks up a saved transaction by txid or unique prefix and
+rebroadcasts the saved bytes, without signing again.
 
 ## Agent grants
 
@@ -328,25 +327,11 @@ the raw result. It is display only, never authorization. Both commands are
 read-only and check the endpoint's network first. `inspect` reads bytecode
 through the indexer's `getbytecode` view, checked against Subfrost's signet
 endpoint; `simulate`'s request format hasn't been verified against a live
-endpoint yet, and neither has `balance`'s.
+endpoint yet, and neither has `balance`'s. There is no command to execute an
+arbitrary contract call: sats signs only operations it composes and
+verifies, such as `send` below.
 
-`sats alkanes execute <ID> <INPUTS>...` executes a human-authorized call.
-Execution accepts only the currently recognized simulation result: a numeric top-level `status` of `0`, with no
-reported error or contradictory status in the known result containers.
-Failed, missing, malformed, and unknown results stop before preparation or
-password entry. The read-only `simulate` command still displays them.
-Status zero is a provider claim, not a guarantee of contract effects; the
-simulation wire format remains unverified against a live endpoint.
-
-Before signing a call, sats decodes the built transaction and checks its
-target, calldata, pointer/refund, postage, and wallet-owned outputs. It derives
-the fee from the wallet's own input values. The review shows the wallet,
-network, call, advisory asset predictions, return address, postage, fee, and
-Bitcoin leaving the wallet. Postage returns to the wallet; only the fee
-leaves it. The existing JSON receipt's `total_sat` remains the funding amount
-(postage plus fee).
-
-Both `execute` and `send` always render review before confirmation and
+`send` always renders its review before confirmation and
 password entry, including with `--yes`. With `--json`, review, confirmation,
 and cancellation go to stderr; stdout is reserved for the final JSON receipt.
 

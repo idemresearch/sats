@@ -1,6 +1,6 @@
 //! Human CLI rendering and authorization for Alkanes workflows.
 //! Wallet/provider work lives in sats-wallet::alkanes; pure protocol logic
-//! lives in sats-alkanes. MCP has no Alkanes execution capability.
+//! lives in sats-alkanes. MCP has no Alkanes signing capability.
 
 use anyhow::bail;
 use anyhow::{Result, anyhow};
@@ -9,7 +9,7 @@ use sats_alkanes::id::AlkaneId;
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
 use sats_wallet::alkanes;
-use sats_wallet::alkanes::human::{self, OperationReview, StagedOperation};
+use sats_wallet::alkanes::human::{self, StagedOperation};
 use sats_wallet::provider::Services;
 use sats_wallet::store::Store;
 
@@ -184,50 +184,6 @@ pub fn simulate(services: &Services, id: &str, inputs: &[u128], json: bool) -> R
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn execute(
-    store: &Store,
-    network: Network,
-    services: &Services,
-    id: &str,
-    inputs: &[u128],
-    fee_rate: Option<u64>,
-    postage: u64,
-    yes: bool,
-    json: bool,
-) -> Result<()> {
-    let args = human::ExecuteRequest {
-        call: AlkaneCall {
-            target: parse_id(id)?,
-            inputs: inputs.to_vec(),
-        },
-        fee_rate,
-        postage_sat: postage,
-    };
-    let staged = human::stage_execute(store, network, services, &args)?;
-    let OperationReview::Execute(review) = staged.review().clone() else {
-        unreachable!()
-    };
-    let Some(outcome) = authorize_and_commit(store, staged, yes, json)? else {
-        return Ok(());
-    };
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "txid": outcome.transaction.txid,
-                "target": review.call.target.to_string(),
-                "inputs": review.call.inputs.iter().map(u128::to_string).collect::<Vec<_>>(),
-                "postage_sat": review.postage_sat,
-                "fee_sat": review.fee_sat,
-                "total_sat": review.postage_sat + review.fee_sat,
-                "excluded_utxos": review.excluded_utxos,
-            })
-        );
-    }
-    Ok(())
-}
-
 pub struct SendArgs<'a> {
     pub id: &'a str,
     pub amount: u128,
@@ -252,9 +208,7 @@ pub fn send(
         postage_sat: args.postage,
     };
     let staged = human::stage_transfer(store, network, services, &request)?;
-    let OperationReview::Transfer(review) = staged.review().clone() else {
-        unreachable!()
-    };
+    let review = staged.review().clone();
     let Some(outcome) = authorize_and_commit(store, staged, args.yes, json)? else {
         return Ok(());
     };
@@ -289,105 +243,52 @@ fn authorize_and_commit(
             sats_wallet::config::network_name(staged.network()).to_string(),
         ),
     ];
-    match staged.review() {
-        OperationReview::Execute(review) => {
-            let predicted = review
-                .simulation
-                .transfers
-                .iter()
-                .map(|t| format!("{} of {}", t.value, t.id))
-                .collect::<Vec<_>>();
-            rows.extend([
-                ("Execute", review.call.target.to_string()),
-                (
-                    "Inputs",
-                    review
-                        .call
-                        .inputs
-                        .iter()
-                        .map(u128::to_string)
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                ),
-                (
-                    "Simulation",
-                    "provider reports status 0 (advisory; effects not guaranteed)".into(),
-                ),
-                (
-                    "Predicted",
-                    if predicted.is_empty() {
-                        "no recognized asset transfers; effects unknown".into()
+    // The review borrow ends here, before commit consumes the operation.
+    {
+        let review = staged.review();
+        let name = label(&review.name, &review.symbol);
+        let returned = review
+            .summary
+            .returned
+            .iter()
+            .map(|(id, amount)| format!("{amount} of {id}"))
+            .collect::<Vec<_>>();
+        rows.extend([
+            (
+                "Send",
+                format!(
+                    "{} of {}{}",
+                    review.amount,
+                    review.asset,
+                    if name.is_empty() {
+                        String::new()
                     } else {
-                        predicted.join(", ")
-                    },
+                        format!(" {name}")
+                    }
                 ),
-                ("Return to", review.pointer_address.clone()),
-                (
-                    "Postage",
-                    format!("{} sats retained in the wallet", review.postage_sat),
+            ),
+            ("To", review.recipient.clone()),
+            (
+                "Kept",
+                if returned.is_empty() {
+                    "nothing else".into()
+                } else {
+                    returned.join(", ")
+                },
+            ),
+            (
+                "Postage",
+                format!("{} sats to the recipient", review.summary.recipient_sat),
+            ),
+            ("Fee", format!("{} sats", review.summary.fee_sat)),
+            (
+                "Total",
+                format!(
+                    "{} sats leave the wallet",
+                    review.summary.external_sat + review.summary.fee_sat
                 ),
-                ("Fee", format!("{} sats", review.fee_sat)),
-                (
-                    "Funding",
-                    format!(
-                        "{} sats (postage + fee)",
-                        review.postage_sat + review.fee_sat
-                    ),
-                ),
-                (
-                    "Total",
-                    format!(
-                        "{} sats leave the wallet",
-                        review.external_sat + review.fee_sat
-                    ),
-                ),
-            ]);
-        }
-        OperationReview::Transfer(review) => {
-            let name = label(&review.name, &review.symbol);
-            let returned = review
-                .summary
-                .returned
-                .iter()
-                .map(|(id, amount)| format!("{amount} of {id}"))
-                .collect::<Vec<_>>();
-            rows.extend([
-                (
-                    "Send",
-                    format!(
-                        "{} of {}{}",
-                        review.amount,
-                        review.asset,
-                        if name.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" {name}")
-                        }
-                    ),
-                ),
-                ("To", review.recipient.clone()),
-                (
-                    "Kept",
-                    if returned.is_empty() {
-                        "nothing else".into()
-                    } else {
-                        returned.join(", ")
-                    },
-                ),
-                (
-                    "Postage",
-                    format!("{} sats to the recipient", review.summary.recipient_sat),
-                ),
-                ("Fee", format!("{} sats", review.summary.fee_sat)),
-                (
-                    "Total",
-                    format!(
-                        "{} sats leave the wallet",
-                        review.summary.external_sat + review.summary.fee_sat
-                    ),
-                ),
-            ]);
-        }
+            ),
+        ]);
     }
     if json {
         ui::kv_rows_stderr(&rows);

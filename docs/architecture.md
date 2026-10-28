@@ -92,12 +92,13 @@ protostone/runestone envelope and its decoder, bytecode hashing, the
 outpoint balance view, transfers and their check, and tolerant simulation
 views. Encodings follow the published alkanes-rs reference, frozen by unit
 vectors. Like `sats-core`, it does no I/O. Standard builds include
-`sats alkanes balance`, `inspect`, `simulate`, `execute`, and `send`.
+`sats alkanes balance`, `inspect`, `simulate`, and `send`. There is no
+generic contract call: sats signs only operations it composes and verifies.
 When the selected provider serves Alkanes, sends exclude asset-bearing
 and unknown outputs.
 
 Native Alkanes orchestration lives in `sats-wallet::alkanes`. Its
-`human` module stages an unsigned call or transfer and returns an
+`human` module stages an unsigned transfer and returns an
 immutable typed review. A surface renders that review and obtains explicit
 human authorization before consuming the staged operation with a signer
 factory. The operation binds its wallet, network, provider, and exact PSBT;
