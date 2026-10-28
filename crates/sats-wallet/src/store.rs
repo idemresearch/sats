@@ -363,15 +363,24 @@ impl Store {
                 continue;
             };
             // Wrapped-seed records are reported by `legacy_grants`, never
-            // treated as authority here. Anything else unreadable — or
-            // from a newer sats — is skipped with a warning; `load_grant`
-            // names the fix when the grant is actually used.
+            // treated as authority here. Anything else unreadable — from
+            // an older or a newer sats — is skipped with a warning, exactly
+            // as `load_grant` would refuse it, so a listing never shows a
+            // grant that cannot be used.
             if is_legacy_grant(&value) {
                 continue;
             }
             let grant = match serde_json::from_value::<Grant>(value) {
-                Ok(grant) if grant.format_version <= sats_core::authz::GRANT_FORMAT_VERSION => {
+                Ok(grant) if grant.format_version == sats_core::authz::GRANT_FORMAT_VERSION => {
                     grant
+                }
+                Ok(grant) if grant.format_version < sats_core::authz::GRANT_FORMAT_VERSION => {
+                    let agent = &grant.agent;
+                    log::warn!(
+                        "grant for {agent:?} was written by an older sats and is not used — \
+                         recreate it: sats agent revoke {agent} && sats agent grant {agent}"
+                    );
+                    continue;
                 }
                 _ => {
                     log::warn!("skipping unreadable grant {}", path.display());
@@ -1309,6 +1318,24 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(store.active_grants("signet", 1_000).unwrap().len(), 1);
+    }
+
+    /// A listing never shows a grant `load_grant` would refuse: a
+    /// budgeted grant of a retired version is skipped, not listed.
+    #[test]
+    fn listing_skips_grants_of_retired_versions() {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path());
+        store.save_grant("signet", &grant("signet")).unwrap();
+        assert_eq!(store.active_grants("signet", 1_000).unwrap().len(), 1);
+        let path = store.grants_dir("signet").join("claude.json");
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        value["format_version"] = serde_json::json!(1);
+        value["budget_sat"] = serde_json::json!(50_000);
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        assert!(store.active_grants("signet", 1_000).unwrap().is_empty());
+        assert!(store.load_grant("signet", "claude").is_err());
     }
 
     /// Directory listings under the data dir name agents, txids, and
