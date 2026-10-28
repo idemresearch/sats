@@ -57,8 +57,8 @@ Every agent action resolves to one of:
 - **ASK**: the normal verdict for a valid spend proposal. sats files a
   durable `pending_approval` request, and a human decides.
 - **DENY**: the proposal crosses a boundary the human committed to in
-  advance, such as expiry, an amount or fee cap, the budget, or the
-  recipient allowlist. Denials are never approvable, so the human is never
+  advance, such as expiry, the amount cap, or the recipient allowlist.
+  Denials are never approvable, so the human is never
   asked about them.
 
 ## The request is the product
@@ -74,15 +74,18 @@ and no long-lived process that keeps an unsealed seed.
 
 ## Grants bound proposals, not keys
 
-A grant defines what an agent may *propose*: expiry, total budget,
-per-transaction amount and fee caps, a recipient allowlist, and a network.
+A grant defines what an agent may *propose*: an expiry, an optional
+per-request amount cap, an optional recipient allowlist, and a network.
 Approval authorizes one proposal inside those limits and can never exceed
 them. A grant holds no key material, only the hash of the agent's token.
 
-A budget therefore means "this agent may ask me to authorize up to this
-much", not "this agent controls a key holding this much". The budget still
-matters with a human in the loop: it keeps invalid proposals out of the
-review queue and bounds what sats will ever authorize.
+A grant is a credential and a scope, not an account. It carries no budget,
+spending ledger, or fee cap: every execution waits for a human who sees the
+real amount and fee, so cumulative accounting would only repeat that
+judgement. The boundaries that remain guard what a human reviews poorly. A
+recipient allowlist catches a substituted address, which nobody verifies by
+eye, and an amount cap keeps absurd proposals out of the review queue. A
+budget belongs to an autonomous spend model, and sats has none.
 
 ## Trust zones
 

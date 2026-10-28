@@ -30,8 +30,8 @@ const features = [
     title: "Hard limits per agent",
     body: (
       <>
-        <code>sats agent grant</code> sets a budget, a per-payment cap, a fee
-        cap, a recipient allowlist, and an expiry. Approval can&apos;t
+        <code>sats agent grant</code> sets an expiry, an optional per-payment
+        cap, and an optional recipient allowlist. Approval can&apos;t
         override them.
       </>
     ),

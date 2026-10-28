@@ -38,7 +38,7 @@ runtime. Callers pass in time and own the BDK wallet.
 
 | Module | Owns |
 |---|---|
-| `authz` | Grants, the verdict ladder (every proposal is ask or deny), reservations, refunds |
+| `authz` | Grants and the verdict ladder (every proposal is ask or deny) |
 | `request` | The request record and its state machine |
 | `intent` | The canonical send intent and its digest |
 | `network` | The network policy: test networks only, mainnet refused |
@@ -108,7 +108,7 @@ entry remain in `sats-cli`; no MCP tool invokes this workflow.
 The narrow `alkanes::wrapping` module supplies request-bound public facts and
 unsigned preparation for `request::execute`. `request_wrap_frbtc` only files
 a typed `FrbtcWrap` request; the common human-authorized request executor
-stages, verifies, simulates, reserves, signs, and persists it. Pure wrapping
+stages, verifies, simulates, re-checks, signs, and persists it. Pure wrapping
 composition, context protobuf encoding, response decoding, and independent
 output checking live in `sats-alkanes::wrap`. The typed contract facts and
 intent digest live in `sats-core`; the ordinary BTC authorization ladder
@@ -122,7 +122,7 @@ positive u128 quantity separately from the common BTC postage and fee facts.
 The digest binds both. Protocol-specific composition and checking stay in
 `sats-alkanes`, and native dispatch in `sats-wallet` refuses unsupported
 protocols. The common request executor reviews, rechecks indexed balances,
-and uses the same grant ladder, ledger, and signing boundary as BTC sends.
+and uses the same grant ladder and signing boundary as BTC sends.
 No protocol grant fields or agent-facing execution primitive are added.
 
 ### `sats-playground`
@@ -188,7 +188,7 @@ sequenceDiagram
     participant S as Store
     participant H as Human (CLI)
     A->>M: request_send(address, amount_sat, idempotency_key)
-    M->>S: verify token, canonical intent, ladder (fee unknown)
+    M->>S: verify token, canonical intent, ladder
     S-->>M: pending_approval (or denied)
     M-->>A: request_id + status
     H->>H: sats agent approve selects the request for review
@@ -211,19 +211,18 @@ sequenceDiagram
     participant E as Core
     participant S as Store
     H->>C: sats agent approve (or an explicit id)
-    C->>S: claim the request, re-check the grant (fee unknown)
+    C->>S: claim the request, re-check the grant
     C->>P: sync, fee estimate
-    C->>E: prepare PSBT; derive what it pays; ladder with the real fee
+    C->>E: prepare PSBT; derive what it pays; ladder on the derived amount
     C-->>H: wallet, network, recipient, amount, fee, total; confirmation and password
-    C->>S: under the grant lock: check the grant instance, reserve budget, then record signing
+    C->>S: under the grant lock: check the grant instance, re-run the ladder, record signing
     C->>E: construct the signer, sign, finalize
     C->>S: save the attributed transaction (before broadcast)
     C->>P: broadcast
     C->>S: record sent, or broadcast_pending
 ```
 
-The reservation and the `signing` record are durable before the signer is
-constructed, which is why `request::execute::commit` takes the signer as a
+The `signing` record is durable before the signer is constructed, which is why `request::execute::commit` takes the signer as a
 factory. What happens on failure at each step, and how a crash is
 reconciled, is specified in [Security](security.md#approving-a-request).
 

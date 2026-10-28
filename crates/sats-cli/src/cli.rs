@@ -309,9 +309,6 @@ pub struct SendArgs {
 pub struct GrantArgs {
     /// Agent name (e.g. claude)
     pub name: String,
-    /// Total budget in sats (amounts + fees draw it down; shorthand ok: 50k)
-    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
-    pub budget: u64,
     /// Grant lifetime (e.g. 24h, 7d)
     #[arg(
         long = "for",
@@ -320,14 +317,11 @@ pub struct GrantArgs {
         value_name = "DURATION"
     )]
     pub duration: String,
-    /// Hard per-transaction amount cap in sats: amounts above it are
-    /// refused outright — the only escalation is changing the grant
+    /// Hard per-request amount cap in sats (fee excluded; shorthand ok:
+    /// 50k): larger amounts are refused outright — the only escalation is
+    /// changing the grant. Without it, you review every amount
     #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
     pub max_tx: Option<u64>,
-    /// Hard per-transaction fee cap in sats
-    /// (default: 2% of the budget, at least 1000, never above the budget)
-    #[arg(long, value_name = "SATS", value_parser = crate::amount::parse)]
-    pub max_fee: Option<u64>,
     /// Authority mode: ask (every request waits for your approval) or
     /// observe (read-only)
     #[arg(long, default_value = "ask", value_name = "ask|observe")]
@@ -341,7 +335,7 @@ pub struct GrantArgs {
 
 #[derive(Subcommand)]
 pub enum AgentCommand {
-    /// Grant an agent a spending budget
+    /// Let an agent file requests you approve
     Grant(GrantArgs),
     /// Revoke an agent's grant
     Revoke {

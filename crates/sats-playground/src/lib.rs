@@ -26,9 +26,7 @@ use bdk_wallet::bitcoin::{
 use bdk_wallet::chain::{BlockId, ConfirmationBlockTime, TxUpdate};
 use bdk_wallet::{KeychainKind, Update, Wallet};
 use bip39::Mnemonic;
-use sats_core::authz::{
-    Decision, GRANT_FORMAT_VERSION, Grant, ReserveError, SpendRequest, evaluate_send, new_grant_id,
-};
+use sats_core::authz::{Decision, GRANT_FORMAT_VERSION, Grant, evaluate_send, new_grant_id};
 use sats_core::fmt::format_sats;
 use sats_core::intent::SendIntent;
 use sats_core::plan::{PreparedSpend, TransactionRecord};
@@ -387,28 +385,15 @@ impl Sim {
     fn grant(
         &mut self,
         agent: &str,
-        budget_str: &str,
         max_tx_str: Option<String>,
-        max_fee_str: Option<String>,
         lifetime_secs: u64,
         now: u64,
     ) -> Result<String, String> {
         validate_agent_name(agent)?;
-        let budget_sat = amount::parse(budget_str)?;
-        if budget_sat == 0 {
-            return Err("budget must be greater than 0".to_string());
-        }
         if lifetime_secs == 0 {
             return Err("--for must be a positive duration".to_string());
         }
         let max_tx_sat = max_tx_str.as_deref().map(amount::parse).transpose()?;
-        // Every grant carries a hard fee cap, exactly like the native
-        // grant command: chosen, or defaulted from the budget.
-        let max_fee_sat = max_fee_str
-            .as_deref()
-            .map(amount::parse)
-            .transpose()?
-            .unwrap_or_else(|| sats_core::authz::default_max_fee_sat(budget_sat));
 
         // Same shape as the native grant: a capability token, never key
         // material. The playground has no daemon to hold a seed behind a
@@ -421,27 +406,20 @@ impl Sim {
             format_version: GRANT_FORMAT_VERSION,
             agent: agent.to_string(),
             network: NETWORK_NAME.to_string(),
-            budget_sat,
-            spent_sat: 0,
             max_tx_sat,
-            max_fee_sat,
             created_at: now,
             expires_at: now.saturating_add(lifetime_secs),
-            tx_count: 0,
             token_id: issued.token_id.clone(),
             token_hash: issued.token_hash.clone(),
             mode: Default::default(),
             allowed_recipients: None,
             grant_id: new_grant_id()?,
-            reservations: Vec::new(),
         };
         let out = json!({
             "agent": grant.agent,
             "grant_id": grant.grant_id,
             "token_id": grant.token_id,
-            "budget_sat": grant.budget_sat,
             "max_tx_sat": grant.max_tx_sat,
-            "max_fee_sat": grant.max_fee_sat,
             "expires_at": grant.expires_at,
             "replaced": replaced,
         })
@@ -459,12 +437,7 @@ impl Sim {
                 json!({
                     "agent": g.agent,
                     "mode": g.mode.as_str(),
-                    "budget_sat": g.budget_sat,
-                    "spent_sat": g.spent_sat,
-                    "remaining_sat": g.remaining_sat(),
                     "max_tx_sat": g.max_tx_sat,
-                    "max_fee_sat": g.max_fee_sat,
-                    "tx_count": g.tx_count,
                     "expires_at": g.expires_at,
                     "expired": g.is_expired(now),
                 })
@@ -514,15 +487,7 @@ impl Sim {
         {
             return Ok(request_view(existing));
         }
-        let verdict = evaluate_send(
-            grant,
-            &normalized,
-            &SpendRequest {
-                amount_sat,
-                fee_sat: 0,
-            },
-            now,
-        );
+        let verdict = evaluate_send(grant, &normalized, amount_sat, now);
         let state = match verdict {
             Decision::Ask => RequestState::PendingApproval,
             Decision::Deny(reason) => RequestState::Denied {
@@ -583,8 +548,8 @@ impl Sim {
     }
 
     /// The human authorizes one pending request, and that authorization
-    /// executes it: plan on the current chain, re-run the ladder with the
-    /// real fee, reserve before signing, sign, broadcast. The agent takes
+    /// executes it: plan on the current chain, re-run the ladder on what
+    /// the plan pays, mark it signing, sign, broadcast. The agent takes
     /// no part. Native sats does the same in `sats agent approve`.
     fn approve(&mut self, id: &str, fee_rate: u32, now: u64) -> Result<String, String> {
         let record = self
@@ -608,15 +573,7 @@ impl Sim {
             .filter(|grant| grant.grant_id == record.grant_id)
             .ok_or_else(|| format!("no active grant for {agent:?}"))?;
         // Precheck against the current grant before planning.
-        if let Decision::Deny(reason) = evaluate_send(
-            grant,
-            &recipient,
-            &SpendRequest {
-                amount_sat,
-                fee_sat: 0,
-            },
-            now,
-        ) {
+        if let Decision::Deny(reason) = evaluate_send(grant, &recipient, amount_sat, now) {
             self.record_denied(id, reason.clone(), now);
             return Err(format!(
                 "denied {id} — {} (outside the grant; only changing the grant lifts it)",
@@ -624,35 +581,20 @@ impl Sim {
             ));
         }
         let plan = self.plan(&recipient, &amount_sat.to_string(), fee_rate, now)?;
-        let spend = SpendRequest {
-            amount_sat: plan.amount_sat,
-            fee_sat: plan.fee_sat,
-        };
-        // Reserve with the real fee before signing; a refusal here is a
-        // grant boundary the fee crossed.
-        let grant = self.grants.get_mut(&agent).expect("checked above");
-        // A request that never reached the signer holds no draw here:
-        // an in-memory playground has no crash window to recover.
-        grant.refund(id);
-        match grant.reserve_send(id, &recipient, &spend, now) {
-            Ok(_) => {}
-            Err(ReserveError::Denied(reason)) => {
-                self.record_denied(id, reason.clone(), now);
-                return Err(format!(
-                    "denied {id} — {} (outside the grant; only changing the grant lifts it)",
-                    reason.code()
-                ));
-            }
-            Err(ReserveError::Mismatch { .. }) => {
-                return Err(format!(
-                    "request {id} already holds a different reservation"
-                ));
-            }
+        // The ladder again on what the plan actually pays.
+        let grant = self.grants.get(&agent).expect("checked above");
+        if let Decision::Deny(reason) = evaluate_send(grant, &recipient, plan.amount_sat, now) {
+            self.record_denied(id, reason.clone(), now);
+            return Err(format!(
+                "denied {id} — {} (outside the grant; only changing the grant lifts it)",
+                reason.code()
+            ));
         }
+        let fee_sat = plan.fee_sat;
         if let Some(record) = self.requests.get_mut(id) {
             record.state = RequestState::Signing {
                 approved_at: now,
-                fee_sat: spend.fee_sat,
+                fee_sat,
             };
             record.updated_at = now;
         }
@@ -666,7 +608,6 @@ impl Sim {
                     };
                     record.updated_at = now;
                 }
-                let grant = self.grants.get(&agent).expect("still present");
                 Ok(json!({
                     "approved": id,
                     "status": "sent",
@@ -675,15 +616,13 @@ impl Sim {
                     "amount_sat": tx.amount_sat,
                     "fee_sat": tx.fee_sat,
                     "total_sat": tx.total_sat(),
-                    "grant_remaining_sat": grant.remaining_sat(),
-                    "grant_tx_count": grant.tx_count,
                 })
                 .to_string())
             }
             Err(e) => {
                 // The signer was invoked: its word is not trusted to mean
-                // "no signature". The draw stands and the request is never
-                // signed again — the native rule, in miniature.
+                // "no signature". The request is never signed again — the
+                // native rule, in miniature.
                 if let Some(record) = self.requests.get_mut(id) {
                     record.state = RequestState::Unresolved {
                         at: now,
@@ -822,20 +761,13 @@ impl Playground {
     pub fn grant(
         &mut self,
         agent: &str,
-        budget: &str,
         max_tx: Option<String>,
-        max_fee: Option<String>,
         lifetime_secs: f64,
         now: f64,
     ) -> Result<String, JsError> {
-        js(self.sim_mut()?.grant(
-            agent,
-            budget,
-            max_tx,
-            max_fee,
-            lifetime_secs as u64,
-            now as u64,
-        ))
+        js(self
+            .sim_mut()?
+            .grant(agent, max_tx, lifetime_secs as u64, now as u64))
     }
 
     pub fn grants(&self, now: f64) -> Result<String, JsError> {
@@ -998,7 +930,7 @@ mod tests {
     fn request_files_pending_and_approval_executes_once() {
         let mut sim = funded_sim();
         let addr = own_address(&mut sim);
-        sim.grant("claude", "50k", None, None, 86_400, NOW).unwrap();
+        sim.grant("claude", None, 86_400, NOW).unwrap();
         let grants = value(&sim.grants(NOW).unwrap());
         assert_eq!(grants[0]["mode"], "ask", "every grant asks");
 
@@ -1017,7 +949,7 @@ mod tests {
         assert_eq!(queue[0]["id"], id.as_str());
 
         // Filing again identically returns the same request, not a
-        // second queue entry — and still draws nothing.
+        // second queue entry — and still signs nothing.
         let again = value(&sim.request_send("claude", &addr, "10k", NOW).unwrap());
         assert_eq!(again["request_id"], id.as_str());
         assert_eq!(
@@ -1027,8 +959,6 @@ mod tests {
                 .len(),
             1
         );
-        let grants = value(&sim.grants(NOW).unwrap());
-        assert_eq!(grants[0]["spent_sat"], 0, "filing draws no budget");
         assert!(
             value(&sim.history().unwrap())
                 .as_array()
@@ -1039,13 +969,8 @@ mod tests {
         // The human approves; the approval executes exactly once.
         let sent = value(&sim.approve(&id, 2, NOW).unwrap());
         assert_eq!(sent["status"], "sent", "got: {sent}");
-        let fee = sent["fee_sat"].as_u64().unwrap();
-        assert_eq!(
-            sent["grant_remaining_sat"].as_u64().unwrap(),
-            50_000 - 10_000 - fee
-        );
-        let grants = value(&sim.grants(NOW).unwrap());
-        assert_eq!(grants[0]["tx_count"], 1);
+        assert_eq!(sent["amount_sat"], 10_000);
+        assert_eq!(value(&sim.history().unwrap()).as_array().unwrap().len(), 1);
         assert!(
             value(&sim.requests_view().unwrap())
                 .as_array()
@@ -1057,15 +982,18 @@ mod tests {
         // Settled: approving again never produces a second signature.
         let err = sim.approve(&id, 2, NOW).unwrap_err();
         assert!(err.contains("is sent"), "{err}");
-        let grants = value(&sim.grants(NOW).unwrap());
-        assert_eq!(grants[0]["tx_count"], 1, "no second signature");
+        assert_eq!(
+            value(&sim.history().unwrap()).as_array().unwrap().len(),
+            1,
+            "no second signature"
+        );
     }
 
     #[test]
     fn dismiss_declines_and_hard_refusals_cannot_be_approved() {
         let mut sim = funded_sim();
         let addr = own_address(&mut sim);
-        sim.grant("claude", "50k", None, None, 86_400, NOW).unwrap();
+        sim.grant("claude", None, 86_400, NOW).unwrap();
         let filed = value(&sim.request_send("claude", &addr, "5k", NOW).unwrap());
         let id = filed["request_id"].as_str().unwrap().to_string();
         let dismissed = value(&sim.dismiss(&id, NOW).unwrap());
@@ -1094,7 +1022,7 @@ mod tests {
     fn request_over_cap_is_denied_not_error() {
         let mut sim = funded_sim();
         let addr = own_address(&mut sim);
-        sim.grant("claude", "50k", Some("10k".to_string()), None, 86_400, NOW)
+        sim.grant("claude", Some("10k".to_string()), 86_400, NOW)
             .unwrap();
         let denied = value(&sim.request_send("claude", &addr, "20k", NOW).unwrap());
         assert_eq!(denied["status"], "denied");
@@ -1105,17 +1033,20 @@ mod tests {
                 .unwrap()
                 .starts_with("outside the grant"),
         );
-        // A denial reserves nothing.
-        let grants = value(&sim.grants(NOW).unwrap());
-        assert_eq!(grants[0]["spent_sat"], 0);
-        assert_eq!(grants[0]["tx_count"], 0);
+        // A denial signs nothing.
+        assert!(
+            value(&sim.history().unwrap())
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn expired_grant_denies_and_revocation_removes_authority() {
         let mut sim = funded_sim();
         let addr = own_address(&mut sim);
-        sim.grant("claude", "50k", None, None, 3_600, NOW).unwrap();
+        sim.grant("claude", None, 3_600, NOW).unwrap();
         let denied = value(
             &sim.request_send("claude", &addr, "10k", NOW + 3_600)
                 .unwrap(),
@@ -1138,12 +1069,10 @@ mod tests {
     }
 
     #[test]
-    fn grant_names_are_validated() {
+    fn grant_names_and_lifetimes_are_validated() {
         let mut sim = funded_sim();
-        assert!(
-            sim.grant("Bad Name", "50k", None, None, 3_600, NOW)
-                .is_err()
-        );
-        assert!(sim.grant("claude", "0", None, None, 3_600, NOW).is_err());
+        assert!(sim.grant("Bad Name", None, 3_600, NOW).is_err());
+        assert!(sim.grant("claude", None, 0, NOW).is_err());
+        assert!(sim.grant("claude", None, 3_600, NOW).is_ok());
     }
 }

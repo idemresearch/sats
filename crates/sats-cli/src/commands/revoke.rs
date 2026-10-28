@@ -7,8 +7,8 @@ use crate::ui;
 
 pub fn run(store: &Store, network: Network, agent: &str, json: bool) -> Result<()> {
     let net_name = network_name(network);
-    // Under the grant lock so revocation waits out any in-flight send's
-    // budget write instead of being resurrected by it.
+    // Under the grant lock so revocation serializes with any in-flight
+    // request creation or approval: whichever runs second sees the other.
     let revoked = {
         let _lock = store.lock_grants(net_name)?;
         store.delete_grant(net_name, agent)?

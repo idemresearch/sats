@@ -19,7 +19,7 @@ prepares, signs, or broadcasts. The flow:
 Create a grant on a funded wallet:
 
 ```sh
-sats agent grant claude --budget 50k --for 24h --max-tx 10k --max-fee 1000
+sats agent grant claude --for 24h --max-tx 10k
 ```
 
 sats prints two setup commands that embed the same token as
@@ -131,7 +131,9 @@ wallet's derivation index.
 
 ### `get_grant`
 
-Returns budget, spent, remaining, caps, mode, recipient allowlist, and expiry.
+Returns the mode, per-request amount cap (`max_tx_sat`, absent when uncapped),
+recipient allowlist, and expiry. A grant holds no budget: every request waits
+for a human who sees its real amount and fee.
 `active: false` means the grant was revoked, expired, or re-issued with a
 different token. It then carries no limits, and the message names the command
 a human runs to issue a new one.
@@ -150,8 +152,8 @@ so a lost response never files twice. Reusing a key for a different send is
 the error `idempotency_key_conflict`. Keys are scoped to a grant: after a
 re-issue, the same key files a new request.
 
-sats runs the grant's full [authorization ladder](security.md#the-authorization-ladder)
-with the fee unknown. A proposal inside every limit is the normal, successful
+sats runs the grant's full [authorization ladder](security.md#the-authorization-ladder).
+A proposal inside every limit is the normal, successful
 result:
 
 ```json
@@ -195,10 +197,10 @@ zero, negatives, overflow, and unknown arguments are rejected. The agent
 cannot supply postage, fee rates, calldata, a PSBT, or signing inputs.
 
 No new grant or protocol flag is needed. The current ask grant applies its
-recipient allowlist, expiry, amount cap, fee cap, and budget.
-**BTC caps cover the fixed 546-sat recipient postage plus actual miner fee;
-they do not limit the asset quantity or its value.** Every quantity needs
-human review and approval; an observe grant records `observe_only`.
+recipient allowlist, expiry, and amount cap.
+**The amount cap checks the fixed 546-sat recipient postage; the grant does
+not limit the asset quantity or its value.** Every quantity needs human
+review and approval; an observe grant records `observe_only`.
 
 Filing is local: no provider access, wallet sync, transaction preparation,
 seed access, or signature. The receipt includes:
@@ -224,11 +226,11 @@ and dust outputs from BTC funding. It checks the exact asset quantity and
 recipient, returns all remaining indexed Alkanes to the wallet, rejects extra
 external BTC outputs, and derives input values and fee from the wallet.
 Human review shows the protocol, id, base-unit quantity, recipient, returned
-assets, BTC postage, actual fee, total, and remaining budget before the password.
+assets, BTC postage, actual fee, and total before the password.
 JSON mode keeps this review on stderr. The executor rechecks indexed input
-balances and the live grant before budget reservation and signing.
+balances and the live grant before signing.
 
-Transfers use the same reservation ledger and signature boundary as BTC sends.
+Transfers use the same signature boundary as BTC sends.
 A `sent` receipt means broadcast; confirmation and indexing must be observed
 separately with `alkanes_balance`. After filing, the agent only observes
 `check_request`. It must never refile to make a transfer complete.
@@ -260,10 +262,10 @@ without provider access.
 
 Wrapping uses the ordinary sats grant, with no protocol-specific flag or
 permission. Existing grants work within their BTC limits: ask mode, expiry,
-recipient allowlist, amount cap, fee cap, and budget. Observe mode refuses
-wraps. A recipient allowlist must include the BTC signer address. Budget
-counts the **gross BTC payment plus miner fee**; 546 sat of postage stays
-in the wallet's frBTC output. Public discovery authenticates first and
+recipient allowlist, and amount cap. Observe mode refuses wraps. A recipient
+allowlist must include the BTC signer address. The amount cap checks the
+**gross BTC payment**; 546 sat of postage stays in the wallet's frBTC
+output. Public discovery authenticates first and
 filing rechecks the grant after discovery, so revocation and replacement
 take effect during provider access.
 
@@ -281,7 +283,7 @@ the exact transaction, and simulates that transaction through the
 prediction is required. The human reviews the signer payment, contract
 hash, wallet receive address, postage, fee, total, and advisory predicted
 frBTC before authorization. The signer and code hash are rechecked again
-before reserving budget and signing. Simulations are provider claims,
+before signing. Simulations are provider claims,
 not guarantees of execution or future effects. The wrapped asset may
 charge a protocol fee, so the predicted amount can be below the BTC paid.
 
@@ -293,7 +295,7 @@ For a testnet4 manual test (using an existing `t4` alias):
 
 ```sh
 t4 alkanes frbtc info --json
-t4 agent grant alkanes-ai --mode ask --budget 12k --max-tx 10k --max-fee 2000
+t4 agent grant alkanes-ai --mode ask --max-tx 10k
 # Use an existing ask grant with sufficient limits, or reconnect using the new token.
 # Ask the agent to call request_wrap_frbtc with amount_sat=10000 and key wrap-1.
 t4 agent requests
@@ -302,13 +304,13 @@ t4 agent approve <request-id>
 t4 alkanes balance
 ```
 
-If approval returns `over_max_fee`, nothing was signed. Inspect the reported
-fee and cap before changing the grant. The provider's estimate uses your
-network's configured confirmation target; a longer target can select a
-lower estimate, with slower confirmation. See [Fee targets](providers.md#fee-targets).
-Changing the target does not change the grant or token. The denied request
-is terminal: after choosing the target, explicitly ask for a new request
-with a fresh idempotency key. The agent must not retry on its own.
+If the fee in the review is higher than you want, decline at the
+confirmation: nothing is signed and the request stays pending. The
+provider's estimate uses your network's configured confirmation target; a
+longer target can select a lower estimate, with slower confirmation. See
+[Fee targets](providers.md#fee-targets). Changing the target does not change
+the grant or token; approve the same request again afterwards. The agent
+must not retry on its own.
 
 The `simulate` protobuf request and signer script handling are frozen
 against the alkanes-rs reference and a read-only testnet4 simulation; the
@@ -343,7 +345,7 @@ local record only. It never contacts the chain or changes anything.
 | `unresolved` | A signature may exist without a saved result | Don't file again; the human inspects |
 | `failed` | Stopped before signing; see the diagnostic | Observe; only the human can retry |
 
-What each state means for signing and budget is in
+What each state means for signing is in
 [Security](security.md#the-signing-boundary).
 
 ## Errors
@@ -381,11 +383,8 @@ filing the same proposal again can't expand authority.
 |---|---|
 | `expired` | The grant has expired |
 | `observe_only` | The grant is observe-only |
-| `amount_overflow` | Amount plus fee overflows |
 | `recipient_not_allowed` | The recipient isn't on the grant's allowlist |
-| `over_max_tx` | The amount exceeds the per-transaction cap |
-| `over_max_fee` | The real fee, known at approval, exceeds the fee cap |
-| `over_budget` | Amount plus fee exceeds the remaining budget |
+| `over_max_tx` | The amount exceeds the per-request cap |
 | `revoked` | The grant that created the request was revoked or re-issued |
 
 ## After filing
@@ -394,7 +393,7 @@ Nothing happens on the agent's side. The human finds the request with
 `sats agent requests` (or `--watch`) and approves or dismisses it; see
 [Reviewing agent requests](cli.md#reviewing-agent-requests). Approval
 prepares the transaction on fresh chain state, verifies it matches the
-request, re-checks the grant with the real fee, and signs only after the
+request, re-checks the grant, and signs only after the
 human enters the wallet password.
 
 If preparation fails because of a sync, fee, or provider problem, the

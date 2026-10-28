@@ -1,7 +1,7 @@
 //! The causal record of the agent path.
 //!
 //! One event per state transition of an agent request — received,
-//! decided, approved, reserved, signed, broadcast, refunded — linked to
+//! decided, approved, signed, broadcast — linked to
 //! its request by id and to its exact meaning by intent digest. Events
 //! are appended, never rewritten: the [`crate::request::AgentRequest`]
 //! record holds current state, this log holds how it got there.
@@ -38,20 +38,15 @@ pub enum EventKind {
     },
     Denied {
         deny: DenyReason,
-        /// "create" (fee unknown) or "execute" (real fee).
+        /// "create" (at filing) or "execute" (re-checked at approval).
         stage: String,
     },
-    /// A human authorized execution of exactly this request.
+    /// A human authorized execution of exactly this request. Appended
+    /// after `signing` is persisted and before the signer is constructed:
+    /// an audit log that cannot take it stops the execution as `failed`.
     Approved,
     /// A human dismissed the request.
     Dismissed,
-    Reserved {
-        total_sat: u64,
-        remaining_sat: u64,
-    },
-    Refunded {
-        total_sat: u64,
-    },
     Signed {
         txid: String,
     },
@@ -62,13 +57,13 @@ pub enum EventKind {
         txid: String,
         message: String,
     },
-    /// Execution stopped before `Signer::sign` was invoked; the draw was
-    /// returned and the request is re-approvable.
+    /// Execution stopped before `Signer::sign` was invoked; the request is
+    /// re-approvable.
     Failed {
         message: String,
     },
     /// The signer was invoked and the outcome is not durable: a
-    /// signature may exist. Never refunded, never signed again.
+    /// signature may exist. Never signed again.
     Unresolved {
         message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,8 +103,6 @@ impl AgentEvent {
             EventKind::Denied { .. } => "denied",
             EventKind::Approved => "approved",
             EventKind::Dismissed => "dismissed",
-            EventKind::Reserved { .. } => "reserved",
-            EventKind::Refunded { .. } => "refunded",
             EventKind::Signed { .. } => "signed",
             EventKind::Broadcast { .. } => "broadcast",
             EventKind::BroadcastFailed { .. } => "broadcast_failed",
@@ -145,17 +138,16 @@ mod tests {
 
     #[test]
     fn kind_flattens_into_the_event_object() {
-        let e = event(EventKind::Reserved {
-            total_sat: 4_781,
-            remaining_sat: 45_219,
+        let e = event(EventKind::Signed {
+            txid: "ab".repeat(32),
         });
         let json = serde_json::to_value(&e).unwrap();
-        assert_eq!(json["event"], "reserved");
-        assert_eq!(json["total_sat"], 4_781);
+        assert_eq!(json["event"], "signed");
+        assert_eq!(json["txid"], "ab".repeat(32));
         assert_eq!(json["request_id"], "k-job-1");
-        assert_eq!(e.kind_str(), "reserved");
+        assert_eq!(e.kind_str(), "signed");
         let back: AgentEvent = serde_json::from_value(json).unwrap();
-        assert_eq!(back.kind_str(), "reserved");
+        assert_eq!(back.kind_str(), "signed");
     }
 
     #[test]
@@ -169,15 +161,15 @@ mod tests {
     #[test]
     fn denial_events_nest_the_typed_reason() {
         let e = event(EventKind::Denied {
-            deny: DenyReason::OverBudget {
+            deny: DenyReason::OverMaxTx {
                 requested_sat: 20_000,
-                remaining_sat: 4_588,
+                max_tx_sat: 10_000,
             },
             stage: "execute".into(),
         });
         let json = serde_json::to_value(&e).unwrap();
         assert_eq!(json["event"], "denied");
-        assert_eq!(json["deny"]["reason"], "over_budget");
+        assert_eq!(json["deny"]["reason"], "over_max_tx");
         assert_eq!(json["stage"], "execute");
     }
 
@@ -190,7 +182,6 @@ mod tests {
             }),
             event(EventKind::Approved),
             event(EventKind::Dismissed),
-            event(EventKind::Refunded { total_sat: 1 }),
             event(EventKind::Signed { txid: "t".into() }),
             event(EventKind::Broadcast { txid: "t".into() }),
             event(EventKind::BroadcastFailed {

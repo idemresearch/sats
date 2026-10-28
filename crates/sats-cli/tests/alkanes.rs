@@ -56,14 +56,7 @@ fn frbtc_info_is_read_only_and_obsolete_names_and_grant_flags_are_removed() {
     assert!(info["signer_address"].as_str().unwrap().starts_with("tb1p"));
     sats(&dir).args(["alkanes", "wrap-info"]).assert().failure();
     sats(&dir)
-        .args([
-            "agent",
-            "grant",
-            "claude",
-            "--budget",
-            "12000",
-            "--allow-alkanes-wrap",
-        ])
+        .args(["agent", "grant", "claude", "--allow-alkanes-wrap"])
         .assert()
         .failure();
     assert!(!dir.path().join("seed.sealed").exists());

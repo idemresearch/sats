@@ -38,7 +38,7 @@ pub fn run(
         None
     };
     // Keep the exact snapshot id, never a number looked up in a new queue.
-    // Selection confers no authority, claims no request, and draws no budget.
+    // Selection confers no authority and claims no request.
     if let Some(selected) = &selected {
         requests::reread_selection(store, network, selected)?;
     }
@@ -79,18 +79,6 @@ pub fn run(
         (
             "Total",
             format!("{} sat", format_sats(staged.spend().total_sat())),
-        ),
-        (
-            "Budget",
-            format!(
-                "{} sat remaining after this",
-                format_sats(
-                    staged
-                        .grant()
-                        .remaining_sat()
-                        .saturating_sub(staged.spend().total_sat())
-                )
-            ),
         ),
     ];
     if let Some(wrap) = staged.wrap_review() {
@@ -152,7 +140,7 @@ pub fn run(
     // The password prompt IS the human authorization. The mnemonic it
     // unseals is held by this process from here until the signer is
     // dropped: captured by the factory closure, which the executor
-    // invokes only after the reservation is durable, and zeroized with
+    // invokes only after `signing` is durable, and zeroized with
     // the signer. The seed and private descriptors are never persisted.
     let mnemonic = keys::unlock(store)?;
     let request_id = staged.request().id.clone();
@@ -165,7 +153,6 @@ pub fn run(
             txid,
             amount_sat,
             fee_sat,
-            remaining_sat,
         } => {
             if json {
                 println!(
@@ -177,7 +164,6 @@ pub fn run(
                         "amount_sat": amount_sat,
                         "fee_sat": fee_sat,
                         "total_sat": amount_sat.saturating_add(fee_sat),
-                        "remaining_budget_sat": remaining_sat,
                     })
                 );
             } else {
@@ -223,8 +209,8 @@ pub fn run(
                 Ok(())
             } else {
                 anyhow::bail!(
-                    "{message} — the request is unresolved: sats will not sign it again or \
-                     refund it; check sats status, then dismiss it"
+                    "{message} — the request is unresolved: sats will not sign it again; \
+                     check sats status, then dismiss it"
                 )
             }
         }

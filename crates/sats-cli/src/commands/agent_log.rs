@@ -114,15 +114,6 @@ fn detail(event: &AgentEvent) -> String {
         } => format!("{} sat → {recipient}", format_sats(*amount_sat)),
         EventKind::Denied { deny, stage } => format!("{} at {stage}", deny.code()),
         EventKind::Approved | EventKind::Dismissed => String::new(),
-        EventKind::Reserved {
-            total_sat,
-            remaining_sat,
-        } => format!(
-            "{} sat, {} sat remaining",
-            format_sats(*total_sat),
-            format_sats(*remaining_sat)
-        ),
-        EventKind::Refunded { total_sat } => format!("{} sat", format_sats(*total_sat)),
         EventKind::Signed { txid } | EventKind::Broadcast { txid } => txid.clone(),
         EventKind::BroadcastFailed { txid, message } => format!("{txid}: {message}"),
         EventKind::Failed { message } => message.clone(),

@@ -204,12 +204,12 @@ impl Store {
     }
 
     /// Take the per-network advisory grant lock. Blocks until any
-    /// concurrent holder releases it. Grant budgets are read-modify-write
-    /// state: every reserve, refund, replacement, or revocation must happen
-    /// under this lock so concurrent sends cannot double-draw a budget and
-    /// a revoked grant cannot be resurrected by an in-flight save. Agent
-    /// request rewrites — outcomes and approvals — share it, so budget and
-    /// approval state serialize as one history. The underlying flock-style
+    /// concurrent holder releases it. Every grant issuance, replacement,
+    /// or revocation happens under this lock, and so does every
+    /// read-then-write of an agent request — creation, approval, outcome
+    /// — so a revoke or re-issue cannot interleave with a request being
+    /// filed or executed under the old grant, and grant and request state
+    /// serialize as one history. The underlying flock-style
     /// lock contends between separate opens even within one process, so it
     /// also serializes sends inside one server.
     pub fn lock_grants(&self, network: &str) -> Result<GrantLock> {
@@ -258,22 +258,28 @@ impl Store {
         if is_legacy_grant(&value) {
             bail!("{}", legacy_grant_message(agent, &path));
         }
-        let grant: Grant = serde_json::from_value(value).with_context(|| {
+        let recreate = || {
             format!(
                 "grant for {agent:?} is not a readable current-format grant ({}) — \
                  pre-release development state is not migrated; recreate it: \
-                 sats agent revoke {agent} && sats agent grant {agent} --budget <sats>",
+                 sats agent revoke {agent} && sats agent grant {agent}",
                 path.display()
             )
-        })?;
+        };
+        let grant: Grant = serde_json::from_value(value).with_context(recreate)?;
+        // An older shape is development state too. Versions 1 through 3
+        // carried a budget this build no longer reads; honoring such a
+        // record would silently drop a limit its creator chose.
+        if grant.format_version < sats_core::authz::GRANT_FORMAT_VERSION {
+            bail!("{}", recreate());
+        }
         // Fail closed on records from the future: a newer sats may have
         // written restrictive fields this build cannot see, and ignoring
         // them would widen the agent's authority, never narrow it.
         if grant.format_version > sats_core::authz::GRANT_FORMAT_VERSION {
             bail!(
                 "grant for {agent:?} was written by a newer sats (format v{}, this build reads \
-                 up to v{}) — upgrade sats, or re-issue it with: sats agent grant {agent} \
-                 --budget <sats>",
+                 up to v{}) — upgrade sats, or re-issue it with: sats agent grant {agent}",
                 grant.format_version,
                 sats_core::authz::GRANT_FORMAT_VERSION,
             );
@@ -282,7 +288,7 @@ impl Store {
             bail!(
                 "grant network {} does not match {network} — a grant authorizes only the \
                  network it was created for; re-issue it with: sats agent grant {agent} \
-                 --budget <sats> --network {network}",
+                 --network {network}",
                 grant.network
             );
         }
@@ -382,8 +388,8 @@ impl Store {
     }
 
     /// Delete expired grant files, returning the agent names pruned.
-    /// Takes the grant lock so a prune never races an in-flight send's
-    /// budget write or a grant replacement.
+    /// Takes the grant lock so a prune never races an in-flight request
+    /// or a grant replacement.
     pub fn prune_expired_grants(&self, network: &str, now_unix: u64) -> Result<Vec<String>> {
         let dir = self.grants_dir(network);
         if !dir.exists() {
@@ -520,8 +526,8 @@ impl Store {
     }
 
     /// Rewrite a request record. Callers must hold the grant lock: request
-    /// rewrites share it with grant writes so approvals, outcomes, and
-    /// budget decisions serialize as one history.
+    /// rewrites share it with grant writes so issuance, revocation,
+    /// approvals, and outcomes serialize as one history.
     pub fn save_agent_request(&self, network: &str, request: &AgentRequest) -> Result<()> {
         let path = self
             .agent_requests_dir(network)
@@ -718,7 +724,7 @@ pub fn legacy_grant_message(agent: &str, path: &Path) -> String {
          material in the grant file itself. It cannot be used for signing.\n\n\
          Re-issue it:\n\n    \
          sats agent revoke {agent}\n    \
-         sats agent grant {agent} --budget <sats> --for 24h\n\n\
+         sats agent grant {agent} --for 24h\n\n\
          Then delete the old file: {}\n\n\
          If an agent with shell access ever ran on this machine while that grant \
          existed, treat the seed as disclosed and move the funds to a fresh wallet.",
@@ -872,19 +878,14 @@ mod tests {
             format_version: sats_core::authz::GRANT_FORMAT_VERSION,
             agent: "claude".into(),
             network: network.into(),
-            budget_sat: 50_000,
-            spent_sat: 0,
             max_tx_sat: None,
-            max_fee_sat: 1_000,
             created_at: 0,
             expires_at: u64::MAX,
-            tx_count: 0,
             token_id: token.token_id,
             token_hash: token.token_hash,
             mode: Default::default(),
             allowed_recipients: None,
             grant_id: sats_core::authz::new_grant_id().unwrap(),
-            reservations: Vec::new(),
         }
     }
 
@@ -916,7 +917,8 @@ mod tests {
     }
 
     /// Pre-release state discipline: unreleased development records —
-    /// the removed `auto` mode, a record without a mode — fail to load
+    /// the removed `auto` mode, a record without a mode, a budgeted
+    /// grant of a retired version — fail to load
     /// with the recreate hint, and a record from the future is refused
     /// because it may carry restrictions this build cannot see.
     #[test]
@@ -947,6 +949,21 @@ mod tests {
             message.contains("not migrated; recreate it"),
             "mode-less grant must name the fix, got: {message}"
         );
+
+        // Versions 1 through 3 carried a budget this build no longer
+        // reads: refused with the recreate step, never honored without it.
+        for retired in 1..sats_core::authz::GRANT_FORMAT_VERSION {
+            let mut budgeted = value.clone();
+            budgeted["format_version"] = serde_json::json!(retired);
+            budgeted["budget_sat"] = serde_json::json!(50_000);
+            budgeted["spent_sat"] = serde_json::json!(0);
+            fs::write(&path, serde_json::to_vec_pretty(&budgeted).unwrap()).unwrap();
+            let message = format!("{:#}", store.load_grant("signet", "claude").unwrap_err());
+            assert!(
+                message.contains("not migrated; recreate it"),
+                "a budgeted v{retired} grant must name the fix, got: {message}"
+            );
+        }
 
         // The future is refused, not partially honored.
         let mut newer = value.clone();

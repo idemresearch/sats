@@ -382,7 +382,7 @@ fn check_connection(
             directory.as_ref().map(|_| network),
             xdg,
         )
-        .args(["agent", "grant", "--budget", "12345", "--", agent])
+        .args(["agent", "grant", "--max-tx", "12345", "--", agent])
         .output()
         .unwrap();
     assert!(
@@ -546,7 +546,7 @@ fn check_connection(
         }
         let view = mcp.tool(2, "get_grant", json!({}));
         assert_eq!(view["active"], true);
-        assert_eq!(view["remaining_sat"], 12345);
+        assert_eq!(view["max_tx_sat"], 12345);
         let address = mcp.tool(3, "get_receive_address", json!({}));
         assert_eq!(address["network"], network);
         let filed = mcp.tool(
@@ -655,9 +655,7 @@ fn observe_grant_omits_the_approval_hint() {
 
     let out = fixture
         .sats(Some(&wallet), Some("signet"), false)
-        .args([
-            "agent", "grant", "observer", "--budget", "12345", "--mode", "observe",
-        ])
+        .args(["agent", "grant", "observer", "--mode", "observe"])
         .output()
         .unwrap();
     assert!(

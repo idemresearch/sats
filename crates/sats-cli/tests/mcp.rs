@@ -65,7 +65,7 @@ fn alkanes_reads_preserve_precision_unknown_results_and_the_pinned_network_witho
         r#"{"32:0":"0x0061736d"}"#,
     )
     .unwrap();
-    let token = grant_token(&dir, "claude", &["--budget", "50000", "--mode", "observe"]);
+    let token = grant_token(&dir, "claude", &["--mode", "observe"]);
     let grant_path = dir.path().join("signet/grants/claude.json");
     let grant_before = std::fs::read(&grant_path).unwrap();
     let mut mcp = McpSession::start(&dir, "claude", &token);
@@ -140,7 +140,7 @@ fn alkanes_reads_preserve_precision_unknown_results_and_the_pinned_network_witho
 #[test]
 fn alkanes_reads_validate_inputs_and_fail_closed_on_provider_or_sync_failure() {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let fx = funded_setup(&dir, &[], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     let config_path = dir.path().join("config.toml");
@@ -225,8 +225,8 @@ fn alkanes_reads_validate_inputs_and_fail_closed_on_provider_or_sync_failure() {
     .unwrap();
     assert_alkanes_reads_refused(&mut mcp, "provider_error");
     assert_eq!(
-        mcp.call_tool(10, "get_grant", serde_json::json!({}))["spent_sat"],
-        0
+        mcp.call_tool(10, "get_grant", serde_json::json!({}))["active"],
+        true
     );
     assert!(!dir.path().join("signet/transactions").exists());
     assert!(!fx.mockdata.join("broadcasts.log").exists());
@@ -242,7 +242,7 @@ fn alkanes_reads_check_the_provider_network_preserve_wire_precision_and_redact_f
 
     let dir = TempDir::new().unwrap();
     run_sats(&dir, &["init"]);
-    let token = grant_token(&dir, "claude", &["--budget", "50000", "--mode", "observe"]);
+    let token = grant_token(&dir, "claude", &["--mode", "observe"]);
     let mode = Arc::new(AtomicU8::new(0));
     let mode_server = Arc::clone(&mode);
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -341,7 +341,7 @@ fn alkanes_reads_check_the_provider_network_preserve_wire_precision_and_redact_f
 fn mcp_serves_ten_tools_and_enforces_the_grant() {
     let dir = TempDir::new().unwrap();
     run_sats(&dir, &["init"]);
-    let token = grant_token(&dir, "claude", &["--budget", "50000", "--max-tx", "10000"]);
+    let token = grant_token(&dir, "claude", &["--max-tx", "10000"]);
 
     let mut mcp = McpSession::start(&dir, "claude", &token);
     mcp.send(serde_json::json!({
@@ -476,10 +476,18 @@ fn mcp_serves_ten_tools_and_enforces_the_grant() {
     // The grant snapshot lets the agent plan.
     let grant = mcp.call_tool(3, "get_grant", serde_json::json!({}));
     assert_eq!(grant["active"], true);
-    assert_eq!(grant["budget_sat"], 50000);
-    assert_eq!(grant["remaining_sat"], 50000);
     assert_eq!(grant["max_tx_sat"], 10000);
     assert_eq!(grant["mode"], "ask");
+    // A grant is a credential and a scope: no budget on the wire.
+    for removed in [
+        "budget_sat",
+        "spent_sat",
+        "remaining_sat",
+        "max_fee_sat",
+        "tx_count",
+    ] {
+        assert!(grant.get(removed).is_none(), "{removed}: {grant}");
+    }
 
     // Over the per-tx cap: a denied request, recorded, as a successful
     // tool result — terminal, with no approval path.
@@ -494,13 +502,10 @@ fn mcp_serves_ten_tools_and_enforces_the_grant() {
     assert_eq!(request_record(&dir, "claude", &big)["status"], "denied");
     assert_eq!(event_kinds(&dir), ["request_received", "denied"]);
 
-    // Over both the cap and the budget: the cap answers first.
+    // Each filing is its own request, denied on its own.
     let denied = mcp.request_send(5, 60_000, "huge");
     assert_eq!(denied["status"], "denied");
-    assert_eq!(
-        denied["reason"], "over_max_tx",
-        "the cap answers before the budget"
-    );
+    assert_eq!(denied["reason"], "over_max_tx");
     assert_ne!(id_of(&denied), big);
 
     // A wrong-network address is a typed operational error, not a record.
@@ -534,11 +539,7 @@ fn alkanes_send_request_is_local_keyless_human_approved_and_observed() {
         .to_string(),
     )
     .unwrap();
-    let token = grant_token(
-        &dir,
-        "claude",
-        &["--budget", "10000", "--max-tx", "546", "--max-fee", "2000"],
-    );
+    let token = grant_token(&dir, "claude", &["--max-tx", "546"]);
     let mut mcp = McpSession::start(&dir, "claude", &token);
     handshake(&mut mcp);
     let seed_path = dir.path().join("seed.sealed");
@@ -568,7 +569,6 @@ fn alkanes_send_request_is_local_keyless_human_approved_and_observed() {
         mcp.request_send(4, 546, "asset")["error_code"],
         "idempotency_key_conflict"
     );
-    assert_eq!(spent_sat(&dir), 0);
     assert!(!mock.join("broadcasts.log").exists());
     assert!(!dir.path().join("signet/transactions").exists());
     std::fs::write(&config_path, config).unwrap();
@@ -593,7 +593,7 @@ fn alkanes_send_request_is_local_keyless_human_approved_and_observed() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(spent_sat(&dir), 0);
+        assert_eq!(saved_transactions(&dir), 0);
     }
     let approval = sats_output(&dir, &["--json", "agent", "approve", &id, "--yes"]);
     assert!(
@@ -611,7 +611,6 @@ fn alkanes_send_request_is_local_keyless_human_approved_and_observed() {
         "546",
         "Fee",
         "Total",
-        "Budget",
     ] {
         assert!(review.contains(field), "missing {field}: {review}");
     }
@@ -619,9 +618,7 @@ fn alkanes_send_request_is_local_keyless_human_approved_and_observed() {
     assert_eq!(result["status"], "sent", "{result}");
     assert_eq!(result["asset_transfer"], filed["asset_transfer"]);
     assert!(result["message"].as_str().unwrap().contains("confirmation"));
-    assert_eq!(spent_sat(&dir), 546 + result["fee_sat"].as_u64().unwrap());
-    let policy = read_json(&dir.path().join("signet/grants/claude.json"));
-    assert_eq!(policy["tx_count"], 1);
+    assert_eq!(saved_transactions(&dir), 1);
     let broadcasts = std::fs::read(mock.join("broadcasts.log")).unwrap();
     assert_eq!(
         mcp.call_tool(6, "request_alkanes_send", args)["status"],
@@ -641,11 +638,7 @@ fn alkanes_send_request_is_local_keyless_human_approved_and_observed() {
 #[test]
 fn alkanes_send_requests_preserve_u128_reject_extra_authority_and_obey_observe() {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(
-        &dir,
-        &["--budget", "50000", "--mode", "observe"],
-        &[100_000],
-    );
+    let fx = funded_setup(&dir, &["--mode", "observe"], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     let base = serde_json::json!({"id":"32:0","amount":u128::MAX.to_string(),"address":ADDRESS,"idempotency_key":"asset"});
@@ -708,7 +701,7 @@ fn alkanes_send_requests_preserve_u128_reject_extra_authority_and_obey_observe()
             "{response}"
         );
     }
-    assert_eq!(spent_sat(&dir), 0);
+    assert_eq!(saved_transactions(&dir), 0);
     assert!(!fx.mockdata.join("broadcasts.log").exists());
     assert!(!dir.path().join("signet/transactions").exists());
 }
@@ -734,18 +727,7 @@ fn frbtc_wrap_request_is_human_approved_and_observed_end_to_end() {
     assert_eq!(info["id"], "32:0", "{info}");
     let grant_output = sats_output(
         &dir,
-        &[
-            "--json",
-            "agent",
-            "grant",
-            "claude",
-            "--budget",
-            "12000",
-            "--max-tx",
-            "10000",
-            "--max-fee",
-            "2000",
-        ],
+        &["--json", "agent", "grant", "claude", "--max-tx", "10000"],
     );
     assert!(
         grant_output.status.success(),
@@ -802,10 +784,10 @@ fn frbtc_wrap_request_is_human_approved_and_observed_end_to_end() {
     let result = mcp.check_request(6, &id);
     assert_eq!(result["status"], "sent", "{result}");
     assert!(result["message"].as_str().unwrap().contains("confirmation"));
-    let spent = mcp.call_tool(7, "get_grant", serde_json::json!({}));
+    assert_eq!(saved_transactions(&dir), 1);
     assert_eq!(
-        spent["spent_sat"].as_u64().unwrap(),
-        10000 + result["fee_sat"].as_u64().unwrap()
+        mcp.call_tool(7, "get_grant", serde_json::json!({}))["active"],
+        true
     );
     let broadcasts = std::fs::read(mock.join("broadcasts.log")).unwrap();
     assert_eq!(
@@ -838,18 +820,7 @@ fn frbtc_requests_use_standard_grants_and_reject_arbitrary_execution_parameters(
         "0a241a22512030685674457c3eaa6d2904a1340ab80296625e8c7313f54c6ae7c51318f5860710e1fc02",
     )
     .unwrap();
-    let token = grant_token(
-        &dir,
-        "claude",
-        &[
-            "--budget",
-            "50000",
-            "--max-fee",
-            "2000",
-            "--mode",
-            "observe",
-        ],
-    );
+    let token = grant_token(&dir, "claude", &["--mode", "observe"]);
     let mut mcp = McpSession::start(&dir, "claude", &token);
     handshake(&mut mcp);
     let denied = mcp.call_tool(
@@ -897,11 +868,7 @@ fn frbtc_requests_use_standard_grants_and_reject_arbitrary_execution_parameters(
 #[test]
 fn request_send_files_pending_and_approve_executes() {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(
-        &dir,
-        &["--budget", "50000", "--max-tx", "30000"],
-        &[100_000],
-    );
+    let fx = funded_setup(&dir, &["--max-tx", "30000"], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
 
@@ -964,7 +931,8 @@ fn request_send_files_pending_and_approve_executes() {
     assert_eq!(approved["amount_sat"], 4_500);
     let fee = approved["fee_sat"].as_u64().unwrap();
     assert!(fee > 0);
-    assert_eq!(approved["remaining_budget_sat"], 50_000 - 4_500 - fee);
+    assert_eq!(approved["total_sat"], 4_500 + fee);
+    assert!(approved.get("remaining_budget_sat").is_none(), "{approved}");
 
     // The agent observes the result without having done anything.
     let view = mcp.check_request(6, &id);
@@ -978,7 +946,7 @@ fn request_send_files_pending_and_approve_executes() {
     assert_eq!(record["origin"]["surface"], "agent");
     assert_eq!(record["origin"]["agent"], "claude");
     assert_eq!(record["origin"]["request_id"], id);
-    assert_eq!(spent_sat(&dir), 4_500 + fee);
+    assert_eq!(saved_transactions(&dir), 1);
     assert!(
         std::fs::read_to_string(fx.mockdata.join("broadcasts.log"))
             .unwrap()
@@ -986,16 +954,10 @@ fn request_send_files_pending_and_approve_executes() {
     );
     assert_eq!(
         event_kinds(&dir),
-        [
-            "request_received",
-            "approved",
-            "reserved",
-            "signed",
-            "broadcast"
-        ]
+        ["request_received", "approved", "signed", "broadcast"]
     );
     let log = sats_json(&dir, &["--json", "agent", "log", "--request", &id]);
-    assert_eq!(log.as_array().unwrap().len(), 5);
+    assert_eq!(log.as_array().unwrap().len(), 4);
 
     // Filing the same key again returns the settled request; it does
     // not file a second one and never pays twice. Passing the server id
@@ -1008,8 +970,8 @@ fn request_send_files_pending_and_approve_executes() {
     assert_eq!(misused["status"], "pending_approval", "got: {misused}");
     assert_ne!(id_of(&misused), id);
     sats_json(&dir, &["--json", "agent", "dismiss", &id_of(&misused)]);
-    assert_eq!(event_kinds(&dir).len(), 7);
-    assert_eq!(spent_sat(&dir), 4_500 + fee);
+    assert_eq!(event_kinds(&dir).len(), 6);
+    assert_eq!(saved_transactions(&dir), 1, "never pays twice");
 
     // And a settled request cannot be approved again.
     let output = sats_output(&dir, &["agent", "approve", &id, "--yes"]);
@@ -1024,7 +986,7 @@ fn request_send_files_pending_and_approve_executes() {
 #[test]
 fn request_send_is_idempotent_and_conflicts_on_key_reuse() {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let fx = funded_setup(&dir, &[], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
 
@@ -1073,7 +1035,7 @@ fn request_send_is_idempotent_and_conflicts_on_key_reuse() {
 fn dismissed_and_denied_requests_observe_as_terminal() {
     let dir = TempDir::new().unwrap();
     let other = common::foreign_address(sats_core::bitcoin::Network::Signet);
-    let fx = funded_setup(&dir, &["--budget", "50000", "--to", ADDRESS], &[100_000]);
+    let fx = funded_setup(&dir, &["--to", ADDRESS], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
 
@@ -1106,7 +1068,7 @@ fn dismissed_and_denied_requests_observe_as_terminal() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("recipient_not_allowed"));
 
     // Observe mode files nothing approvable.
-    let observer = grant_token(&dir, "watcher", &["--budget", "50000", "--mode", "observe"]);
+    let observer = grant_token(&dir, "watcher", &["--mode", "observe"]);
     let mut watcher = McpSession::start(&dir, "watcher", &observer);
     handshake(&mut watcher);
     let observe = watcher.request_send(2, 1_000, "peek");
@@ -1131,7 +1093,7 @@ fn dismissed_and_denied_requests_observe_as_terminal() {
 #[test]
 fn revocation_takes_effect_mid_session() {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let fx = funded_setup(&dir, &[], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     let filed = mcp.request_send(2, 1_000, "before");
@@ -1163,7 +1125,7 @@ fn revocation_takes_effect_mid_session() {
     // and nothing else answers.
     let grant = mcp.call_tool(4, "get_grant", serde_json::json!({}));
     assert_eq!(grant["active"], false);
-    assert!(grant.get("budget_sat").is_none(), "{grant}");
+    assert!(grant.get("expires_at").is_none(), "{grant}");
     mcp.refused_read(5, "get_balance", "no_grant");
     mcp.refused_read(6, "get_receive_address", "no_grant");
     assert_alkanes_reads_refused(&mut mcp, "no_grant");
@@ -1179,11 +1141,11 @@ fn revocation_takes_effect_mid_session() {
     assert_eq!(event_kinds(&dir), ["request_received", "denied"]);
 
     // A re-issued grant for the same agent never executes the old request.
-    let fresh = grant_token(&dir, "claude", &["--budget", "50000"]);
+    let fresh = grant_token(&dir, "claude", &[]);
     let output = sats_output(&dir, &["agent", "approve", &before, "--yes"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("denied revoked"));
-    assert_eq!(spent_sat(&dir), 0);
+    assert_eq!(saved_transactions(&dir), 0);
     let mut fresh_mcp = McpSession::start(&dir, "claude", &fresh);
     handshake(&mut fresh_mcp);
     // The old request is not the new grant's: reusing its key files a
@@ -1209,7 +1171,7 @@ fn revocation_takes_effect_mid_session() {
 #[test]
 fn broadcast_failure_observes_as_broadcast_pending_until_rebroadcast() {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let fx = funded_setup(&dir, &[], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     let filed = mcp.request_send(2, 1_000, "flaky");
@@ -1224,24 +1186,16 @@ fn broadcast_failure_observes_as_broadcast_pending_until_rebroadcast() {
         approved["message"]
             .as_str()
             .unwrap()
-            .contains("budget reserved")
+            .contains("signed transaction is saved")
     );
     let record = read_json(&dir.path().join(format!("signet/transactions/{txid}.json")));
     assert_eq!(record["status"], "pending");
-    let spent = spent_sat(&dir);
-    assert!(spent > 1_000);
     let view = mcp.check_request(3, &flaky);
     assert_eq!(view["status"], "broadcast_pending", "got: {view}");
     assert_eq!(view["txid"], txid);
     assert_eq!(
         event_kinds(&dir),
-        [
-            "request_received",
-            "approved",
-            "reserved",
-            "signed",
-            "broadcast_failed"
-        ]
+        ["request_received", "approved", "signed", "broadcast_failed"]
     );
 
     // Approving again never produces a second signature.
@@ -1259,7 +1213,7 @@ fn broadcast_failure_observes_as_broadcast_pending_until_rebroadcast() {
     std::fs::remove_file(fx.mockdata.join("broadcast-fail")).unwrap();
     run_sats(&dir, &["tx", "broadcast", &txid]);
     assert_eq!(mcp.check_request(4, &flaky)["status"], "sent");
-    assert_eq!(spent_sat(&dir), spent, "no second draw");
+    assert_eq!(saved_transactions(&dir), 1, "no second signature");
     assert_eq!(request_record(&dir, "claude", &flaky)["status"], "sent");
     assert_eq!(event_kinds(&dir).last().unwrap(), "broadcast");
 }
@@ -1283,9 +1237,9 @@ fn mcp_refuses_to_start_without_a_grant() {
 #[test]
 fn a_superseded_token_is_refused_at_startup() {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let fx = funded_setup(&dir, &[], &[100_000]);
     let stale = fx.token.clone();
-    let fresh = grant_token(&dir, "claude", &["--budget", "50000"]);
+    let fresh = grant_token(&dir, "claude", &[]);
     assert_ne!(stale, fresh);
 
     let output = Command::new(sats_bin())
@@ -1314,7 +1268,7 @@ fn a_superseded_token_is_refused_at_startup() {
 fn serving_without_a_token_says_where_to_get_one() {
     let dir = TempDir::new().unwrap();
     run_sats(&dir, &["init"]);
-    let _token = grant_token(&dir, "claude", &["--budget", "50000"]);
+    let _token = grant_token(&dir, "claude", &[]);
 
     let output = Command::new(sats_bin())
         .args(["agent", "serve", "claude"])
@@ -1334,7 +1288,7 @@ fn serving_without_a_token_says_where_to_get_one() {
 #[test]
 fn a_replaced_grant_refuses_the_old_session_without_writing() {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let fx = funded_setup(&dir, &[], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     assert_eq!(
@@ -1342,7 +1296,7 @@ fn a_replaced_grant_refuses_the_old_session_without_writing() {
         "pending_approval"
     );
 
-    let _fresh = grant_token(&dir, "claude", &["--budget", "50000"]);
+    let _fresh = grant_token(&dir, "claude", &[]);
     let requests_before = std::fs::read_dir(dir.path().join("signet/agent-requests/claude"))
         .unwrap()
         .count();
@@ -1361,7 +1315,7 @@ fn a_replaced_grant_refuses_the_old_session_without_writing() {
     // its limits, and the wallet tools refuse.
     let grant = mcp.call_tool(4, "get_grant", serde_json::json!({}));
     assert_eq!(grant["active"], false, "{grant}");
-    assert!(grant.get("budget_sat").is_none(), "{grant}");
+    assert!(grant.get("expires_at").is_none(), "{grant}");
     assert!(grant["message"].as_str().unwrap().contains("re-issued"));
     mcp.refused_read(5, "get_balance", "unauthorized");
     mcp.refused_read(6, "get_receive_address", "unauthorized");
@@ -1377,7 +1331,7 @@ fn a_replaced_grant_refuses_the_old_session_without_writing() {
 #[test]
 fn expiry_cuts_off_a_running_session() {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let fx = funded_setup(&dir, &[], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     let filed = mcp.request_send(2, 1_000, "before");
@@ -1402,7 +1356,7 @@ fn expiry_cuts_off_a_running_session() {
     );
     // A refused read does not advance the wallet: the next live session
     // reveals the address after the one already handed out.
-    let fresh = grant_token(&dir, "claude", &["--budget", "50000"]);
+    let fresh = grant_token(&dir, "claude", &[]);
     let mut fresh_mcp = McpSession::start(&dir, "claude", &fresh);
     handshake(&mut fresh_mcp);
     let next = fresh_mcp.call_tool(2, "get_receive_address", serde_json::json!({}));
@@ -1414,7 +1368,7 @@ fn expiry_cuts_off_a_running_session() {
 #[test]
 fn a_request_pending_at_expiry_is_denied_at_approval() {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let fx = funded_setup(&dir, &[], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     let filed = mcp.request_send(2, 1_000, "late");
@@ -1431,14 +1385,14 @@ fn a_request_pending_at_expiry_is_denied_at_approval() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("expired"), "{stderr}");
     assert_eq!(request_record(&dir, "claude", &late)["status"], "denied");
-    assert_eq!(spent_sat(&dir), 0);
+    assert_eq!(saved_transactions(&dir), 0);
     assert_eq!(event_kinds(&dir), ["request_received", "denied"]);
     assert!(!dir.path().join("signet/transactions").exists());
 
     // The expired session observes nothing; a fresh grant's session sees
     // the old request as denied, with the reason.
     assert_eq!(mcp.check_request(3, &late)["error_code"], "no_grant");
-    let fresh = grant_token(&dir, "claude", &["--budget", "50000"]);
+    let fresh = grant_token(&dir, "claude", &[]);
     let mut fresh_mcp = McpSession::start(&dir, "claude", &fresh);
     handshake(&mut fresh_mcp);
     let view = fresh_mcp.check_request(2, &late);
@@ -1449,7 +1403,7 @@ fn a_request_pending_at_expiry_is_denied_at_approval() {
 #[test]
 fn get_balance_reports_a_failed_sync() {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let fx = funded_setup(&dir, &[], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     let balance = mcp.call_tool(2, "get_balance", serde_json::json!({}));
@@ -1465,7 +1419,7 @@ fn get_balance_reports_a_failed_sync() {
 fn provider_resolution_is_deferred_until_an_mcp_chain_read() {
     let dir = TempDir::new().unwrap();
     run_sats(&dir, &["init"]);
-    let token = grant_token(&dir, "claude", &["--budget", "50000", "--max-tx", "10000"]);
+    let token = grant_token(&dir, "claude", &["--max-tx", "10000"]);
     let servers = common::write_unresolvable_providers(&dir);
 
     // Deferring providers must not defer authentication.
@@ -1483,7 +1437,7 @@ fn provider_resolution_is_deferred_until_an_mcp_chain_read() {
     handshake(&mut mcp);
     let grant = mcp.call_tool(2, "get_grant", serde_json::json!({}));
     assert_eq!(grant["active"], true);
-    assert_eq!(grant["remaining_sat"], 50_000);
+    assert_eq!(grant["mode"], "ask");
     let first = mcp.call_tool(3, "get_receive_address", serde_json::json!({}));
     let second = mcp.call_tool(4, "get_receive_address", serde_json::json!({}));
     assert!(first["address"].as_str().unwrap().starts_with("tb1p"));
@@ -1510,7 +1464,7 @@ fn provider_resolution_is_deferred_until_an_mcp_chain_read() {
     // A conflicting filing keeps its existing audit event; observation and
     // an identical retry above write nothing.
     assert_eq!(event_kinds(&dir), ["request_received", "conflicted"]);
-    assert_eq!(spent_sat(&dir), 0);
+    assert_eq!(saved_transactions(&dir), 0);
     assert!(!dir.path().join("signet/transactions").exists());
 
     let balance = mcp.call_tool_raw(9, "get_balance", serde_json::json!({}));
@@ -1542,7 +1496,7 @@ fn provider_resolution_is_deferred_until_an_mcp_chain_read() {
 fn provider_resolution_deferral_preserves_mcp_config_errors() {
     let dir = TempDir::new().unwrap();
     run_sats(&dir, &["init"]);
-    let token = grant_token(&dir, "claude", &["--budget", "50000"]);
+    let token = grant_token(&dir, "claude", &[]);
     for config in [
         "network = [",
         "network = 7",
@@ -1565,8 +1519,8 @@ fn provider_resolution_deferral_preserves_mcp_config_errors() {
 
 // Provider failures on the approving side: a stalled chain provider
 // refuses to plan on stale state and leaves the request pending; a
-// broadcast timeout after signing is broadcast_pending with the budget
-// reserved. Credentials never reach the human's error text.
+// broadcast timeout after signing is broadcast_pending with the signed
+// transaction kept. Credentials never reach the human's error text.
 
 /// Route one chain role through a real HTTP transport. `sync` makes the
 /// endpoint the whole chain source; `fees` and `broadcast` keep the mock
@@ -1595,7 +1549,7 @@ fn with_http_provider(dir: &TempDir, driver: &str, url: &str, role: &str) {
 
 fn assert_sync_timeout(driver: &str) {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let fx = funded_setup(&dir, &[], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     let filed = mcp.request_send(2, 1_000, "timeout");
@@ -1616,7 +1570,7 @@ fn assert_sync_timeout(driver: &str) {
     assert_eq!(http.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(event_kinds(&dir), ["request_received", "failed"]);
     assert_eq!(request_record(&dir, "claude", &id)["status"], "failed");
-    assert_eq!(spent_sat(&dir), 0);
+    assert_eq!(saved_transactions(&dir), 0);
 }
 
 #[test]
@@ -1632,7 +1586,7 @@ fn subfrost_timeout_refuses_stale_state_and_redacts_credentials() {
 #[test]
 fn esplora_retryable_get_is_limited_to_two_retries() {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let fx = funded_setup(&dir, &[], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     let filed = mcp.request_send(2, 1_000, "fees");
@@ -1649,13 +1603,13 @@ fn esplora_retryable_get_is_limited_to_two_retries() {
     assert!(!output.status.success());
     assert_eq!(http.requests.load(std::sync::atomic::Ordering::SeqCst), 3);
     assert_eq!(request_record(&dir, "claude", &id)["status"], "failed");
-    assert_eq!(spent_sat(&dir), 0);
+    assert_eq!(saved_transactions(&dir), 0);
 }
 
 #[test]
-fn broadcast_timeout_keeps_signed_transaction_and_reserved_budget() {
+fn broadcast_timeout_keeps_the_signed_transaction() {
     let dir = TempDir::new().unwrap();
-    let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+    let fx = funded_setup(&dir, &[], &[100_000]);
     let mut mcp = McpSession::start(&dir, "claude", &fx.token);
     handshake(&mut mcp);
     let filed = mcp.request_send(2, 1_000, "broadcast-timeout");
@@ -1672,16 +1626,10 @@ fn broadcast_timeout_keeps_signed_transaction_and_reserved_budget() {
     let txid = approved["txid"].as_str().unwrap();
     let record = read_json(&dir.path().join(format!("signet/transactions/{txid}.json")));
     assert_eq!(record["status"], "pending");
-    assert!(spent_sat(&dir) > 1_000);
+    assert_eq!(saved_transactions(&dir), 1);
     assert_eq!(
         event_kinds(&dir),
-        [
-            "request_received",
-            "approved",
-            "reserved",
-            "signed",
-            "broadcast_failed"
-        ]
+        ["request_received", "approved", "signed", "broadcast_failed"]
     );
     let view = mcp.check_request(3, &id);
     assert_eq!(view["status"], "broadcast_pending");
@@ -1693,7 +1641,7 @@ fn broadcast_timeout_keeps_signed_transaction_and_reserved_budget() {
 fn preparation_receipts_redact_provider_secrets_and_observation_stays_local() {
     for driver in ["esplora", "subfrost"] {
         let dir = TempDir::new().unwrap();
-        let fx = funded_setup(&dir, &["--budget", "50000"], &[100_000]);
+        let fx = funded_setup(&dir, &[], &[100_000]);
         let mut mcp = McpSession::start(&dir, "claude", &fx.token);
         handshake(&mut mcp);
         let filed = mcp.request_send(2, 1_000, "one-filing");
@@ -1755,7 +1703,7 @@ fn preparation_receipts_redact_provider_secrets_and_observation_stays_local() {
             assert_eq!(std::fs::read(path).unwrap(), contents);
         }
         assert_eq!(http.requests.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(spent_sat(&dir), 0);
+        assert_eq!(saved_transactions(&dir), 0);
         assert_eq!(event_kinds(&dir), ["request_received", "failed"]);
         std::fs::write(&request_path, "{").unwrap();
         let corrupt = mcp.check_request(5, &id);

@@ -37,7 +37,7 @@ material and never prepares, signs, or broadcasts. A request is the
 first-class workflow object (`sats-core::request`): `pending_approval`,
 `denied`, `dismissed`, `signing`, `sent`, `broadcast_pending`,
 `unresolved`, or `failed`, bound to the grant instance that created it. The human-authorized execution path (`crates/sats-wallet/src/request/`)
-prepares, re-verifies, reserves budget, signs, persists, and broadcasts;
+prepares, re-verifies, re-checks the grant, signs, persists, and broadcasts;
 today that path is `sats agent approve`, which unseals the seed with
 the human's password for exactly one execution. The agent observes the
 result and takes no action after filing.
@@ -79,7 +79,7 @@ advice for exactly that file.
 | Path | Owns |
 |---|---|
 | `crates/sats-core/src/engine.rs` | Pure transaction planning and conservative UTXO exclusion |
-| `crates/sats-core/src/authz.rs` | Pure grant decisions (the verdict ladder), reservation, and refund rules |
+| `crates/sats-core/src/authz.rs` | The grant shape and pure grant decisions (the verdict ladder) |
 | `crates/sats-core/src/request.rs` | The request record and its state machine |
 | `crates/sats-core/src/intent.rs` | Canonical BTC and protocol-qualified asset-transfer intents and digests |
 | `crates/sats-core/src/network.rs` | The network policy: test networks only, mainnet refused |
@@ -171,33 +171,29 @@ A workflow two surfaces could need belongs here, not in a command.
   process that produced the signature. Do not persist a signed PSBT for a
   fully finalized single-sig send.
 - The irreversible boundary is the invocation of `Signer::sign`.
-  `signing` is persisted before the signer runs. A refund is permitted
-  only before that invocation (audit append, signer construction), when
-  the executing process knows no signature exists; from the invocation
+  `signing` is persisted before the signer runs. A stop before that
+  invocation (audit append, signer construction), when the executing
+  process knows no signature exists, is `failed`; from the invocation
   on, nothing the signer reports is trusted to mean "no signature" — an
   error, an unfinalized result, a finalization or persistence failure,
-  or a crash is `unresolved`: never refund, never sign again
-  automatically. `failed` is re-approvable only because it is provable
-  that `Signer::sign` was never invoked. `sent` and `broadcast_pending`
+  or a crash is `unresolved`: never sign again automatically. `failed`
+  is re-approvable only because it is provable that `Signer::sign` was
+  never invoked. `sent` and `broadcast_pending`
   mean a persisted signature — only rebroadcast. A `signing` record is
   reconciled from the transaction attributed to it (agent, request id,
   intent digest), never guessed.
-- Budget is drawn on a per-request ledger on the grant, updated in the
-  same atomic write as the totals: one draw per request id, a repeat
-  with the same spend draws nothing, a different spend fails closed, and
-  a refund happens exactly once. A draw is returned only when the
-  durable record proves the signer was never invoked (`pending_approval`,
-  `failed`, `denied`); every other draw stays. Never solve a crash
-  window by accepting a leaked or double-counted budget.
+- A grant is a credential and a scope — token hash, network, expiry,
+  mode, recipient allowlist, per-request amount cap — not an account. It
+  holds no budget, spending ledger, or fee cap: the human reviews the
+  real amount and fee of every execution, so cumulative accounting
+  would only repeat that judgement. A budget belongs with an autonomous
+  path, and there is none.
 - Request ids are global (`r-` + 32 hex). A filing derives its id from
   the grant id, the agent, and the agent's idempotency key; the key is
-  never the id, and `check_request` deals in ids only. Request creation
-  reconciles the reservation ledger under the grant lock before its
-  verdict, so a crashed execution's orphaned draw never denies another
-  request. A request records the `grant_id` (128 random bits) of
-  the grant that created it and executes only under that instance;
-  creation holds the grant lock so a revoke or re-issue cannot
-  interleave.
+  never the id, and `check_request` deals in ids only. A request
+  records the `grant_id` (128 random bits) of the grant that created it
+  and executes only under that instance; creation holds the grant lock
+  so a revoke or re-issue cannot interleave.
 - A grant carries no key material. Never reintroduce a field from which a
   seed can be recovered; only a token hash belongs beside a policy.
 - A bearer token is emitted once, at creation, and never persisted.
@@ -207,7 +203,8 @@ A workflow two surfaces could need belongs here, not in a command.
 ### Agent authorization
 
 - `evaluate_send` is the single deterministic policy decision, run at
-  request creation (fee unknown) and again at execution with the real fee.
+  request creation and again at execution on the amount derived from
+  the PSBT, under the grant lock before `signing` is persisted.
 - Never execute against an amount or fee a caller reported. Derive both
   from the PSBT with `sats_core::verify` and refuse on disagreement with
   the recorded request.
@@ -217,23 +214,23 @@ A workflow two surfaces could need belongs here, not in a command.
 - Operational conditions carry a typed `error_code`; policy refusals are
   a `denied` request with a `reason`. Never conflate them.
 - The grant alone never allows a spend: every grant boundary is hard —
-  expiry, mode, overflow, recipient allowlist, amount cap, fee cap,
-  budget — and a proposal inside all of them is `Decision::Ask`, the
-  request state `pending_approval`. A pending request is normal workflow,
-  never presented as a denied send. Never reintroduce an autonomous path
+  expiry, mode, recipient allowlist, amount cap — and a proposal inside
+  all of them is `Decision::Ask`, the request state `pending_approval`.
+  A pending request is normal workflow, never presented as a denied
+  send. Never reintroduce an autonomous path
   to the signer, and never make a boundary approvable.
 - Preserve check order: the specific boundary answers before the
   terminal ask, so a refusal names what was crossed.
-- Budget includes amount plus fee.
-- Reserve and persist budget, then persist the request as `signing`,
-  before the signer is invoked; construct the signer only after the
-  reservation is durable (`request::execute::commit` takes it as a
-  factory for exactly this reason).
-- Refund only when it is provable that the signer was never invoked. A
-  signer reporting failure cannot prove that no signature was produced.
+- Persist the request as `signing` before the signer is invoked;
+  construct the signer only after `signing` is durable
+  (`request::execute::commit` takes it as a factory for exactly this
+  reason).
+- Mark a request re-approvable (`failed`) only when it is provable that
+  the signer was never invoked. A signer reporting failure cannot prove
+  that no signature was produced.
 - The human review (recipient, amount, real fee, total) precedes the
   password in every mode; `--json` moves it to stderr, never drops it.
-- Never refund a signed transaction after a broadcast failure.
+- Never sign again after a broadcast failure: only rebroadcast.
 - Re-read the grant at creation and again under the grant lock at
   execution, so revocation takes effect immediately.
 - Denials are typed, successful MCP results. Do not turn expected denials
@@ -328,9 +325,12 @@ diverge.
 The pre-release compatibility policy applies: serialized shapes may
 change freely, and unsupported development state fails with a clear
 error naming the recreate step. Grant records carry
-`GRANT_FORMAT_VERSION` (currently 1, the standard BTC grant shape);
-records claiming a newer version are refused because they may carry
-restrictions this build cannot see. Request and event records carry
+`GRANT_FORMAT_VERSION` (currently 4, a credential and scope without a
+budget); records claiming a newer version are refused because they may
+carry restrictions this build cannot see, and older ones are refused
+with the recreate step, since versions 1 through 3 carried a budget this
+build would otherwise silently drop. Never reuse a retired version
+number. Request and event records carry
 their own versions and are read tolerantly for the same forward-safety
 reason. The one backward-reading exception is the pre-daemon
 `wrapped_seed` grant, refused with wallet-rotation guidance. Preserve

@@ -68,7 +68,7 @@ for json_mode, yes, cancel in [(False, False, False), (True, False, False),
         review = buffers[review_fd].decode(errors="replace")
         fields = (["Wallet", "Network", "signet", "Approve", request_id, "Asset transfer",
                    "alkanes:32:0", "1000 base units", "Returned assets", "32:0: 4000",
-                   "2:0: 50", "546", "Fee", "Total", "Budget"] if request_id else
+                   "2:0: 50", "546", "Fee", "Total"] if request_id else
                   ["Wallet", "Network", "signet", "Execute", "2:1", "Inputs", "77",
                    "advisory", "Postage", "Fee", "Total", "leave the wallet"])
         for text in fields:

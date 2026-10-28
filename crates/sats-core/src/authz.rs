@@ -1,17 +1,20 @@
-//! The authorization engine: deterministic enforcement of human-set
-//! authority for agent spending.
+//! The authorization engine: deterministic enforcement of the scope a
+//! human sets for an agent's requests.
 //!
 //! [`evaluate_send`] is pure — no clock, no IO — and is the single
 //! ladder every frontend decides through: the grant's hard boundaries
-//! (expiry, observe mode, overflow, recipient rule, caps, budget), then
+//! (expiry, observe mode, recipient rule, per-request amount cap), then
 //! the terminal [`Decision::Ask`] — a valid proposal inside the grant,
 //! which only a human may authorize. A grant bounds what an agent may
 //! propose; the human's authorization executes one valid proposal
 //! inside it and never exceeds it. The grant alone never allows a spend:
 //! no agent-originated request may reach the signer without explicit
-//! human authorization bound to that exact request. Callers reserve
-//! budget *before* signing (a signed transaction is already spendable),
-//! and refund only while no signature exists.
+//! human authorization bound to that exact request.
+//!
+//! A grant is a credential and a scope, not an account: it holds no
+//! budget and no spending ledger. The human reviews the real amount and
+//! fee of every execution, so cumulative accounting would only repeat
+//! that judgement.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,16 +31,18 @@ pub fn new_grant_id() -> Result<String, String> {
     Ok(hex::encode(bytes))
 }
 
-/// Current on-disk standard BTC grant shape.
+/// Current on-disk grant shape: a credential and a scope, with no
+/// budget.
 ///
 /// Records from a newer sats are refused by `Store::load_grant`: they
 /// may carry restrictions this build cannot see, and ignoring them
-/// would widen authority. Anything older is unreleased development
-/// state and fails to parse; the fix is deleting the file and
-/// re-granting. (The one special case: a pre-daemon development file
-/// containing `wrapped_seed` is a seed disclosure and is refused with
-/// wallet-rotation guidance rather than a parse error.)
-pub const GRANT_FORMAT_VERSION: u32 = 1;
+/// would widen authority. Older records are unreleased development
+/// state — versions 1 through 3 all carried a budget this build no
+/// longer enforces — and are refused rather than migrated; the fix is
+/// deleting the file and re-granting. Never reuse a retired number. (The one special case: a pre-daemon development
+/// file containing `wrapped_seed` is a seed disclosure and is refused
+/// with wallet-rotation guidance rather than a parse error.)
+pub const GRANT_FORMAT_VERSION: u32 = 4;
 
 const fn grant_format_version() -> u32 {
     GRANT_FORMAT_VERSION
@@ -103,22 +108,13 @@ pub struct Grant {
     pub agent: String,
     /// Network name, so a grant file copied across networks is inert.
     pub network: String,
-    pub budget_sat: u64,
-    /// Running total of amount + fee for every reserved spend.
-    pub spent_sat: u64,
-    /// Hard per-transaction amount cap (excluding fee). An amount above
-    /// it is refused outright — no approval lifts a grant boundary; the
-    /// only escalation is changing the grant. `None` leaves the budget
-    /// as the only amount bound.
+    /// Hard per-request amount cap (excluding fee). An amount above it
+    /// is refused outright — no approval lifts a grant boundary; the
+    /// only escalation is changing the grant. `None` leaves the amount
+    /// to the human's review.
     pub max_tx_sat: Option<u64>,
-    /// Hard per-transaction fee cap. Always present: a grant without one
-    /// would let a single bad fee estimate burn the budget as miner
-    /// fees, and with approvals bounded by the grant this is the one fee
-    /// bound in the system.
-    pub max_fee_sat: u64,
     pub created_at: u64,
     pub expires_at: u64,
-    pub tx_count: u64,
     /// Public identifier for this grant's bearer token: a prefix of
     /// `token_hash`, safe to log, display, and put in an error.
     pub token_id: String,
@@ -136,52 +132,10 @@ pub struct Grant {
     /// `Some(vec![])` means none may be.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_recipients: Option<Vec<String>>,
-    /// The request-scoped draw ledger: one entry per request whose
-    /// budget draw stands. `spent_sat` and `tx_count` are its totals and
-    /// are only ever changed through [`Grant::reserve_send`] and
-    /// [`Grant::refund`], in the same write as the ledger, so recovery
-    /// can tell exactly which request drew and refund it exactly once.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub reservations: Vec<Reservation>,
 }
 
-/// One request's budget draw, keyed by the server request id.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Reservation {
-    pub request_id: String,
-    pub amount_sat: u64,
-    pub fee_sat: u64,
-}
-
-impl Reservation {
-    pub fn spend(&self) -> SpendRequest {
-        SpendRequest {
-            amount_sat: self.amount_sat,
-            fee_sat: self.fee_sat,
-        }
-    }
-}
-
-/// How [`Grant::reserve_send`] resolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reserved {
-    /// The draw was recorded now.
-    Drawn,
-    /// The same request already holds an identical draw: nothing was
-    /// drawn again. The idempotent answer for a retried commit.
-    AlreadyReserved,
-}
-
-/// Why [`Grant::reserve_send`] refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReserveError {
-    /// A grant boundary.
-    Denied(DenyReason),
-    /// The request already holds a draw for a different amount or fee.
-    /// Fails closed: a reservation is never silently replaced.
-    Mismatch { reserved: SpendRequest },
-}
-
+/// What a prepared transaction pays and costs, derived from the PSBT —
+/// what the human reviews before authorizing it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpendRequest {
     pub amount_sat: u64,
@@ -189,17 +143,9 @@ pub struct SpendRequest {
 }
 
 impl SpendRequest {
-    /// What the spend draws from the budget: amount + fee. Saturating,
-    /// for display and journaling; the authorization decision uses
-    /// [`SpendRequest::checked_total_sat`] so an overflow denies rather
-    /// than collapsing into a passable number.
+    /// Amount + fee, saturating: for display only.
     pub fn total_sat(&self) -> u64 {
         self.amount_sat.saturating_add(self.fee_sat)
-    }
-
-    /// The budget draw, or `None` when amount + fee overflows.
-    pub fn checked_total_sat(&self) -> Option<u64> {
-        self.amount_sat.checked_add(self.fee_sat)
     }
 }
 
@@ -215,20 +161,6 @@ pub enum DenyReason {
     OverMaxTx {
         requested_sat: u64,
         max_tx_sat: u64,
-    },
-    OverMaxFee {
-        fee_sat: u64,
-        max_fee_sat: u64,
-    },
-    OverBudget {
-        requested_sat: u64,
-        remaining_sat: u64,
-    },
-    /// Amount + fee overflows u64. Arithmetically absurd, so it fails
-    /// closed instead of saturating into a number a budget could pass.
-    AmountOverflow {
-        amount_sat: u64,
-        fee_sat: u64,
     },
     /// The grant is observe-only.
     ObserveOnly,
@@ -278,32 +210,17 @@ pub fn valid_agent_name(agent: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
-/// PURE. The per-transaction fee cap a grant gets when its creator does
-/// not choose one: max(2% of budget, 1000 sat), clamped to the budget.
+/// PURE. The full verdict ladder for a proposal, recipient rule
+/// included. This is the decision every surface enforces: at request
+/// creation and again at execution, under the grant lock, so a revoked,
+/// expired, or tightened grant refuses a request approved too late.
 ///
-/// A grant with no fee cap lets a single bad fee estimate burn the whole
-/// budget as miner fees; this keeps "budget + expiry" the only required
-/// decisions while bounding that loss. Lifting the cap is an explicit
-/// choice at creation.
-pub fn default_max_fee_sat(budget_sat: u64) -> u64 {
-    (budget_sat / 50).max(1_000).min(budget_sat)
-}
-
-/// PURE. The full verdict ladder for a send, recipient rule included.
-/// This is the decision every surface enforces: at request creation
-/// (fee unknown, so fee 0) and again at execution with the real fee.
-///
-/// Every rung is a grant boundary: expiry → observe mode → arithmetic
-/// overflow → recipient rule → per-tx amount cap → per-tx fee cap →
-/// budget. A proposal inside every boundary terminates in
-/// [`Decision::Ask`]. The specific boundary answers before the terminal
-/// ask, so a refusal names what was crossed.
-pub fn evaluate_send(
-    grant: &Grant,
-    recipient: &str,
-    req: &SpendRequest,
-    now_unix: u64,
-) -> Decision {
+/// Every rung is a grant boundary: expiry → observe mode → recipient
+/// rule → per-request amount cap. A proposal inside every boundary
+/// terminates in [`Decision::Ask`]. The specific boundary answers before
+/// the terminal ask, so a refusal names what was crossed. The fee is not
+/// a rung: sats computes it, not the agent, and the human reviews it.
+pub fn evaluate_send(grant: &Grant, recipient: &str, amount_sat: u64, now_unix: u64) -> Decision {
     // Expiry outranks everything: a dead grant reports dead.
     if grant.is_expired(now_unix) {
         return Decision::Deny(DenyReason::Expired {
@@ -313,12 +230,6 @@ pub fn evaluate_send(
     if grant.mode == GrantMode::Observe {
         return Decision::Deny(DenyReason::ObserveOnly);
     }
-    let Some(total_sat) = req.checked_total_sat() else {
-        return Decision::Deny(DenyReason::AmountOverflow {
-            amount_sat: req.amount_sat,
-            fee_sat: req.fee_sat,
-        });
-    };
     if let Some(allowed) = &grant.allowed_recipients
         && !allowed.iter().any(|entry| entry == recipient)
     {
@@ -327,24 +238,11 @@ pub fn evaluate_send(
         });
     }
     if let Some(max_tx_sat) = grant.max_tx_sat
-        && req.amount_sat > max_tx_sat
+        && amount_sat > max_tx_sat
     {
         return Decision::Deny(DenyReason::OverMaxTx {
-            requested_sat: req.amount_sat,
+            requested_sat: amount_sat,
             max_tx_sat,
-        });
-    }
-    if req.fee_sat > grant.max_fee_sat {
-        return Decision::Deny(DenyReason::OverMaxFee {
-            fee_sat: req.fee_sat,
-            max_fee_sat: grant.max_fee_sat,
-        });
-    }
-    let remaining_sat = grant.remaining_sat();
-    if total_sat > remaining_sat {
-        return Decision::Deny(DenyReason::OverBudget {
-            requested_sat: total_sat,
-            remaining_sat,
         });
     }
     // The terminal verdict: a valid proposal inside the grant still
@@ -359,83 +257,8 @@ impl Grant {
         token::verify(token, &self.token_hash)
     }
 
-    pub fn remaining_sat(&self) -> u64 {
-        self.budget_sat.saturating_sub(self.spent_sat)
-    }
-
     pub fn is_expired(&self, now_unix: u64) -> bool {
         now_unix >= self.expires_at
-    }
-
-    /// The standing draw for a request, if any.
-    pub fn reservation(&self, request_id: &str) -> Option<&Reservation> {
-        self.reservations
-            .iter()
-            .find(|entry| entry.request_id == request_id)
-    }
-
-    /// Draw a human-authorized spend down from the budget, once per
-    /// request.
-    ///
-    /// The caller asserts the human authorization; this re-runs the full
-    /// ladder — recipient rule included, with the real fee — so the draw
-    /// can never exceed the grant: authorization executes a valid
-    /// proposal inside the grant, never past it. The draw is keyed by
-    /// the request id: a repeated call with the same request and the
-    /// identical spend is `AlreadyReserved` and draws nothing again
-    /// (the ladder is still re-checked, against the budget as it stood
-    /// before that draw); a different spend for the same request fails
-    /// closed. Callers must persist the grant before signing.
-    pub fn reserve_send(
-        &mut self,
-        request_id: &str,
-        recipient: &str,
-        req: &SpendRequest,
-        now_unix: u64,
-    ) -> Result<Reserved, ReserveError> {
-        if let Some(existing) = self.reservation(request_id) {
-            let reserved = existing.spend();
-            if reserved != *req {
-                return Err(ReserveError::Mismatch { reserved });
-            }
-            // Re-check every boundary as if this draw were not yet
-            // counted, so an expired or tightened grant still refuses.
-            let mut without = self.clone();
-            without.refund(request_id);
-            return match evaluate_send(&without, recipient, req, now_unix) {
-                Decision::Ask => Ok(Reserved::AlreadyReserved),
-                Decision::Deny(reason) => Err(ReserveError::Denied(reason)),
-            };
-        }
-        match evaluate_send(self, recipient, req, now_unix) {
-            Decision::Ask => {}
-            Decision::Deny(reason) => return Err(ReserveError::Denied(reason)),
-        }
-        self.spent_sat = self.spent_sat.saturating_add(req.total_sat());
-        self.tx_count = self.tx_count.saturating_add(1);
-        self.reservations.push(Reservation {
-            request_id: request_id.to_string(),
-            amount_sat: req.amount_sat,
-            fee_sat: req.fee_sat,
-        });
-        Ok(Reserved::Drawn)
-    }
-
-    /// Return one request's reservation, exactly once. `None` means the
-    /// request holds no draw — already refunded, or never drawn — and
-    /// nothing changes. Never refund once the signer may have run: a
-    /// signature is spendable regardless of whether the broadcast
-    /// succeeded. Both subtractions saturate.
-    pub fn refund(&mut self, request_id: &str) -> Option<SpendRequest> {
-        let index = self
-            .reservations
-            .iter()
-            .position(|entry| entry.request_id == request_id)?;
-        let entry = self.reservations.remove(index);
-        let spend = entry.spend();
-        self.spent_sat = self.spent_sat.saturating_sub(spend.total_sat());
-        self.tx_count = self.tx_count.saturating_sub(1);
-        Some(spend)
     }
 }
 
@@ -444,9 +267,6 @@ impl DenyReason {
         match self {
             DenyReason::Expired { .. } => "expired",
             DenyReason::OverMaxTx { .. } => "over_max_tx",
-            DenyReason::OverMaxFee { .. } => "over_max_fee",
-            DenyReason::OverBudget { .. } => "over_budget",
-            DenyReason::AmountOverflow { .. } => "amount_overflow",
             DenyReason::ObserveOnly => "observe_only",
             DenyReason::Revoked => "revoked",
             DenyReason::RecipientNotAllowed { .. } => "recipient_not_allowed",
@@ -466,30 +286,6 @@ impl DenyReason {
                 format_sats(*requested_sat),
                 format_sats(*max_tx_sat)
             ),
-            DenyReason::OverMaxFee {
-                fee_sat,
-                max_fee_sat,
-            } => format!(
-                "fee      {} sat\nmax fee  {} sat",
-                format_sats(*fee_sat),
-                format_sats(*max_fee_sat)
-            ),
-            DenyReason::OverBudget {
-                requested_sat,
-                remaining_sat,
-            } => format!(
-                "requested  {} sat (amount + fee)\nremaining  {} sat",
-                format_sats(*requested_sat),
-                format_sats(*remaining_sat)
-            ),
-            DenyReason::AmountOverflow {
-                amount_sat,
-                fee_sat,
-            } => format!(
-                "amount  {} sat\nfee     {} sat\namount + fee overflows",
-                format_sats(*amount_sat),
-                format_sats(*fee_sat)
-            ),
             DenyReason::ObserveOnly => "grant is observe-only".to_string(),
             DenyReason::Revoked => {
                 "the grant this request was filed under was revoked or replaced".to_string()
@@ -505,88 +301,71 @@ impl DenyReason {
 mod tests {
     use super::*;
 
-    fn grant(budget: u64, spent: u64, max_tx: Option<u64>, max_fee: Option<u64>) -> Grant {
+    fn grant(max_tx: Option<u64>) -> Grant {
         let token = token::generate().unwrap();
         Grant {
             format_version: GRANT_FORMAT_VERSION,
             grant_id: new_grant_id().unwrap(),
             agent: "test".into(),
             network: "signet".into(),
-            budget_sat: budget,
-            spent_sat: spent,
             max_tx_sat: max_tx,
-            max_fee_sat: max_fee.unwrap_or_else(|| default_max_fee_sat(budget)),
             created_at: 1_000,
             expires_at: 2_000,
-            tx_count: 0,
             token_id: token.token_id,
             token_hash: token.token_hash,
             mode: GrantMode::Ask,
             allowed_recipients: None,
-            reservations: Vec::new(),
         }
     }
 
     const NOW: u64 = 1_500;
     const RECIPIENT: &str = "tb1ptestrecipient";
-    const REQ: &str = "r-0123456789abcdef";
 
-    fn reserve(g: &mut Grant, r: &SpendRequest, now: u64) -> Result<Reserved, ReserveError> {
-        g.reserve_send(REQ, RECIPIENT, r, now)
-    }
-
-    fn req(amount: u64, fee: u64) -> SpendRequest {
-        SpendRequest {
-            amount_sat: amount,
-            fee_sat: fee,
-        }
-    }
-
-    fn decide(g: &Grant, amount: u64, fee: u64) -> Decision {
-        evaluate_send(g, RECIPIENT, &req(amount, fee), NOW)
+    fn decide(g: &Grant, amount: u64) -> Decision {
+        evaluate_send(g, RECIPIENT, amount, NOW)
     }
 
     #[test]
     fn within_all_limits_terminates_in_ask() {
-        let g = grant(50_000, 0, Some(10_000), Some(1_000));
-        // The grant alone never authorizes: a valid in-envelope proposal
+        let g = grant(Some(10_000));
+        // The grant alone never authorizes: a valid in-scope proposal
         // ends in the terminal ask, which only a human turns into an
         // execution.
-        assert_eq!(decide(&g, 4_500, 281), Decision::Ask);
-        assert!(decide(&g, 4_500, 281).is_ask());
+        assert_eq!(decide(&g, 4_500), Decision::Ask);
+        assert!(decide(&g, 4_500).is_ask());
     }
 
     #[test]
-    fn denies_expired_even_when_within_budget() {
-        let g = grant(50_000, 0, Some(10_000), None);
+    fn denies_expired() {
+        let g = grant(Some(10_000));
         assert_eq!(
-            evaluate_send(&g, RECIPIENT, &req(1, 1), 2_000),
+            evaluate_send(&g, RECIPIENT, 1, 2_000),
             Decision::Deny(DenyReason::Expired { expired_at: 2_000 }),
             "expiry is inclusive"
         );
         assert!(matches!(
-            evaluate_send(&g, RECIPIENT, &req(1, 1), 5_000),
+            evaluate_send(&g, RECIPIENT, 1, 5_000),
             Decision::Deny(DenyReason::Expired { .. })
         ));
     }
 
     #[test]
     fn expiry_trumps_every_other_reason() {
-        let mut g = grant(1, 1, Some(1), Some(1));
+        let mut g = grant(Some(1));
         g.mode = GrantMode::Observe;
         g.allowed_recipients = Some(vec![]);
         assert!(matches!(
-            evaluate_send(&g, RECIPIENT, &req(u64::MAX, u64::MAX), 5_000),
+            evaluate_send(&g, RECIPIENT, u64::MAX, 5_000),
             Decision::Deny(DenyReason::Expired { .. })
         ));
     }
 
     #[test]
-    fn max_tx_is_amount_only() {
-        let g = grant(50_000, 0, Some(10_000), Some(5_000));
-        assert_eq!(decide(&g, 10_000, 4_000), Decision::Ask, "cap is inclusive");
+    fn max_tx_is_inclusive() {
+        let g = grant(Some(10_000));
+        assert_eq!(decide(&g, 10_000), Decision::Ask, "cap is inclusive");
         assert_eq!(
-            decide(&g, 10_001, 0),
+            decide(&g, 10_001),
             Decision::Deny(DenyReason::OverMaxTx {
                 requested_sat: 10_001,
                 max_tx_sat: 10_000
@@ -595,195 +374,18 @@ mod tests {
     }
 
     #[test]
-    fn max_fee_is_fee_only() {
-        let g = grant(50_000, 0, None, Some(1_000));
-        assert_eq!(decide(&g, 40_000, 1_000), Decision::Ask, "cap is inclusive");
-        assert_eq!(
-            decide(&g, 100, 1_001),
-            Decision::Deny(DenyReason::OverMaxFee {
-                fee_sat: 1_001,
-                max_fee_sat: 1_000
-            })
-        );
-    }
-
-    #[test]
-    fn budget_counts_amount_plus_fee() {
-        let g = grant(10_000, 0, None, Some(1_000));
-        assert_eq!(
-            decide(&g, 9_000, 1_000),
-            Decision::Ask,
-            "exactly the budget"
-        );
-        assert_eq!(
-            decide(&g, 9_001, 1_000),
-            Decision::Deny(DenyReason::OverBudget {
-                requested_sat: 10_001,
-                remaining_sat: 10_000
-            })
-        );
-    }
-
-    #[test]
-    fn budget_accounts_for_prior_spending() {
-        let g = grant(10_000, 6_100, None, None);
-        assert_eq!(decide(&g, 3_800, 100), Decision::Ask);
-        assert!(matches!(
-            decide(&g, 3_900, 100),
-            Decision::Deny(DenyReason::OverBudget {
-                remaining_sat: 3_900,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn overspent_grant_denies_everything() {
-        let g = grant(1_000, 1_000, None, None);
-        assert!(matches!(
-            decide(&g, 1, 0),
-            Decision::Deny(DenyReason::OverBudget {
-                remaining_sat: 0,
-                ..
-            })
-        ));
-        assert_eq!(g.remaining_sat(), 0);
-    }
-
-    #[test]
-    fn zero_total_request_still_asks() {
-        let g = grant(1_000, 0, None, None);
-        assert_eq!(decide(&g, 0, 0), Decision::Ask);
-    }
-
-    /// Reserve as the human-authorized executor does: the ladder re-runs
-    /// with the real fee, and only an in-envelope proposal draws.
-    #[test]
-    fn reserve_draws_down_and_recheck_denies() {
-        let mut g = grant(10_000, 0, None, None);
-        assert_eq!(reserve(&mut g, &req(6_000, 100), NOW), Ok(Reserved::Drawn));
-        assert_eq!(g.spent_sat, 6_100);
-        assert_eq!(g.tx_count, 1);
-        assert_eq!(g.reservation(REQ).unwrap().spend(), req(6_000, 100));
-        // A second request that no longer fits reports the budget: the
-        // specific boundary runs before the terminal ask.
-        let err = g
-            .reserve_send("r-other", RECIPIENT, &req(4_000, 100), NOW)
-            .unwrap_err();
-        assert_eq!(
-            err,
-            ReserveError::Denied(DenyReason::OverBudget {
-                requested_sat: 4_100,
-                remaining_sat: 3_900
-            })
-        );
-        assert_eq!(g.spent_sat, 6_100, "failed reserve must not draw down");
-        assert_eq!(g.reservations.len(), 1);
-    }
-
-    /// The ledger makes the draw idempotent per request: a retry with
-    /// the identical spend draws nothing again, a different spend for the
-    /// same request fails closed, and a refund credits exactly once.
-    #[test]
-    fn reserve_and_refund_are_request_scoped_and_idempotent() {
-        let mut g = grant(10_000, 0, None, None);
-        let r = req(6_000, 100);
-        assert_eq!(reserve(&mut g, &r, NOW), Ok(Reserved::Drawn));
-        assert_eq!(reserve(&mut g, &r, NOW), Ok(Reserved::AlreadyReserved));
-        assert_eq!(g.spent_sat, 6_100, "no second draw");
-        assert_eq!(g.tx_count, 1);
-        assert_eq!(g.reservations.len(), 1);
-        assert_eq!(
-            reserve(&mut g, &req(6_000, 200), NOW),
-            Err(ReserveError::Mismatch { reserved: r })
-        );
-        assert_eq!(g.spent_sat, 6_100);
-        // The idempotent path still re-checks the grant's boundaries.
-        assert!(matches!(
-            reserve(&mut g, &r, 2_000),
-            Err(ReserveError::Denied(DenyReason::Expired { .. }))
-        ));
-        // Refund exactly once; a repeat credits nothing.
-        assert_eq!(g.refund(REQ), Some(r));
-        assert_eq!(g.spent_sat, 0);
-        assert_eq!(g.tx_count, 0);
-        assert!(g.reservations.is_empty());
-        assert_eq!(g.refund(REQ), None);
-        assert_eq!(g.spent_sat, 0);
-        assert_eq!(g.tx_count, 0);
-        // Never a refund for a request that never drew.
-        assert_eq!(g.refund("r-never"), None);
-        // The restored budget accepts a fresh reservation of the whole
-        // amount.
-        assert_eq!(reserve(&mut g, &req(9_900, 100), NOW), Ok(Reserved::Drawn));
-        assert_eq!(g.spent_sat, 10_000);
-    }
-
-    #[test]
-    fn ledger_round_trips_and_stays_off_the_wire_when_empty() {
-        let mut g = grant(10_000, 0, None, None);
-        let quiet = serde_json::to_value(&g).unwrap();
-        assert!(quiet.get("reservations").is_none());
-        assert!(quiet["grant_id"].as_str().unwrap().len() == 32);
-        reserve(&mut g, &req(1_000, 10), NOW).unwrap();
-        let json = serde_json::to_value(&g).unwrap();
-        assert_eq!(json["reservations"][0]["request_id"], REQ);
-        assert_eq!(json["reservations"][0]["amount_sat"], 1_000);
-        let back: Grant = serde_json::from_value(json).unwrap();
-        assert_eq!(back.reservations, g.reservations);
-        assert_eq!(back.grant_id, g.grant_id);
+    fn uncapped_grant_leaves_the_amount_to_the_human() {
+        let g = grant(None);
+        assert_eq!(decide(&g, 0), Decision::Ask);
+        assert_eq!(decide(&g, u64::MAX), Decision::Ask);
     }
 
     /// Pre-release contract: a grant without an identity does not parse.
     #[test]
     fn grant_without_identity_does_not_parse() {
-        let mut json = serde_json::to_value(grant(10_000, 0, None, None)).unwrap();
+        let mut json = serde_json::to_value(grant(None)).unwrap();
         json.as_object_mut().unwrap().remove("grant_id");
         assert!(serde_json::from_value::<Grant>(json).is_err());
-    }
-
-    #[test]
-    fn overflowing_total_is_denied_not_saturated() {
-        let mut g = grant(u64::MAX, 0, None, None);
-        let r = req(u64::MAX, u64::MAX);
-        // Display total still saturates; the decision does not.
-        assert_eq!(r.total_sat(), u64::MAX);
-        assert_eq!(r.checked_total_sat(), None);
-        assert_eq!(
-            evaluate_send(&g, RECIPIENT, &r, NOW),
-            Decision::Deny(DenyReason::AmountOverflow {
-                amount_sat: u64::MAX,
-                fee_sat: u64::MAX,
-            })
-        );
-        assert!(reserve(&mut g, &r, NOW).is_err());
-        assert_eq!(g.spent_sat, 0, "denied reserve must not draw down");
-        assert_eq!(g.tx_count, 0);
-        // The largest representable total is not overflow — it reaches
-        // the terminal ask like any other in-envelope proposal.
-        assert_eq!(decide(&g, u64::MAX, 0), Decision::Ask);
-    }
-
-    #[test]
-    fn amount_overflow_serializes_with_tag() {
-        let reason = DenyReason::AmountOverflow {
-            amount_sat: u64::MAX,
-            fee_sat: 1,
-        };
-        let json = serde_json::to_value(&reason).unwrap();
-        assert_eq!(json["reason"], "amount_overflow");
-        assert_eq!(json["amount_sat"], u64::MAX);
-        assert_eq!(json["fee_sat"], 1);
-        assert_eq!(reason.code(), "amount_overflow");
-        assert!(reason.human().contains("overflows"));
-    }
-
-    #[test]
-    fn tx_count_saturates_at_max() {
-        let mut g = grant(10_000, 0, None, None);
-        g.tx_count = u64::MAX;
-        reserve(&mut g, &req(1_000, 100), NOW).unwrap();
-        assert_eq!(g.tx_count, u64::MAX);
     }
 
     #[test]
@@ -809,36 +411,24 @@ mod tests {
     }
 
     #[test]
-    fn default_max_fee_floors_scales_and_clamps() {
-        assert_eq!(default_max_fee_sat(10_000), 1_000, "floor wins");
-        assert_eq!(default_max_fee_sat(50_000), 1_000, "2% below floor");
-        assert_eq!(default_max_fee_sat(100_000), 2_000, "2% of budget");
-        assert_eq!(default_max_fee_sat(1_000_000), 20_000);
-        assert_eq!(default_max_fee_sat(500), 500, "never above the budget");
-        assert_eq!(default_max_fee_sat(0), 0);
-    }
-
-    #[test]
     fn deny_reason_serializes_with_tag() {
-        let reason = DenyReason::OverBudget {
+        let reason = DenyReason::OverMaxTx {
             requested_sat: 20_000,
-            remaining_sat: 4_588,
+            max_tx_sat: 10_000,
         };
         let json = serde_json::to_value(&reason).unwrap();
-        assert_eq!(json["reason"], "over_budget");
+        assert_eq!(json["reason"], "over_max_tx");
         assert_eq!(json["requested_sat"], 20_000);
-        assert_eq!(json["remaining_sat"], 4_588);
-        assert_eq!(reason.code(), "over_budget");
+        assert_eq!(json["max_tx_sat"], 10_000);
+        assert_eq!(reason.code(), "over_max_tx");
     }
 
     #[test]
     fn grant_json_round_trip() {
-        let g = grant(50_000, 12_412, Some(10_000), Some(1_000));
+        let g = grant(Some(10_000));
         let json = serde_json::to_string(&g).unwrap();
         let back: Grant = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.budget_sat, 50_000);
-        assert_eq!(back.spent_sat, 12_412);
-        assert_eq!(back.remaining_sat(), 37_588);
+        assert_eq!(back.max_tx_sat, Some(10_000));
         assert_eq!(back.format_version, GRANT_FORMAT_VERSION);
         assert_eq!(back.mode, GrantMode::Ask);
     }
@@ -849,7 +439,7 @@ mod tests {
     /// is deleting the file and granting again.
     #[test]
     fn unreleased_grant_state_fails_to_parse() {
-        let mut json = serde_json::to_value(grant(50_000, 0, None, None)).unwrap();
+        let mut json = serde_json::to_value(grant(None)).unwrap();
         json.as_object_mut().unwrap().remove("mode");
         assert!(
             serde_json::from_value::<Grant>(json.clone()).is_err(),
@@ -857,70 +447,35 @@ mod tests {
         );
         json["mode"] = serde_json::json!("auto");
         assert!(
-            serde_json::from_value::<Grant>(json.clone()).is_err(),
-            "the removed auto mode must not parse"
-        );
-        json["mode"] = serde_json::json!("ask");
-        json.as_object_mut().unwrap().remove("max_fee_sat");
-        assert!(
             serde_json::from_value::<Grant>(json).is_err(),
-            "a grant without a fee cap must not parse"
+            "the removed auto mode must not parse"
         );
     }
 
-    /// The core invariant, swept: no send request — routine, at a cap,
-    /// zero, or enormous — is ever allowed by the ladder on its own. The
-    /// only non-denial is the terminal ask.
+    /// The core invariant, swept: no proposal — routine, at a cap, zero,
+    /// or enormous — is ever allowed by the ladder on its own. The only
+    /// non-denial is the terminal ask.
     #[test]
     fn the_ladder_never_allows_a_spend() {
-        let grants = [
-            grant(50_000, 0, Some(10_000), Some(1_000)),
-            grant(u64::MAX, 0, None, None),
-            grant(1_000, 999, None, None),
-        ];
-        let requests = [
-            req(0, 0),
-            req(1, 0),
-            req(10_000, 500),
-            req(10_001, 0),
-            req(u64::MAX, 0),
-            req(u64::MAX, u64::MAX),
-        ];
+        let grants = [grant(Some(10_000)), grant(None)];
         for g in &grants {
-            for r in &requests {
+            for amount in [0, 1, 10_000, 10_001, u64::MAX] {
                 assert!(
                     matches!(
-                        evaluate_send(g, RECIPIENT, r, NOW),
+                        evaluate_send(g, RECIPIENT, amount, NOW),
                         Decision::Ask | Decision::Deny(_)
                     ),
-                    "unexpected verdict for {r:?}"
+                    "unexpected verdict for {amount}"
                 );
             }
         }
     }
 
     #[test]
-    fn reserve_cannot_overspend_the_budget() {
-        let mut g = grant(1_000, 0, None, None);
-        // The budget is a grant boundary: human authorization does not
-        // lift it, and a denied reserve draws nothing.
-        assert!(matches!(
-            reserve(&mut g, &req(5_000, 100), NOW),
-            Err(ReserveError::Denied(DenyReason::OverBudget { .. }))
-        ));
-        assert_eq!(g.spent_sat, 0, "denied reserve must not draw down");
-        reserve(&mut g, &req(800, 100), NOW).unwrap();
-        assert_eq!(g.spent_sat, 900);
-        assert_eq!(g.remaining_sat(), 100);
-    }
-
-    #[test]
     fn observe_mode_denies_sends() {
-        let mut g = grant(50_000, 0, None, None);
+        let mut g = grant(None);
         g.mode = GrantMode::Observe;
-        assert_eq!(decide(&g, 1, 1), Decision::Deny(DenyReason::ObserveOnly));
-        assert!(reserve(&mut g, &req(1, 1), NOW).is_err());
-        assert_eq!(g.spent_sat, 0);
+        assert_eq!(decide(&g, 1), Decision::Deny(DenyReason::ObserveOnly));
     }
 
     /// The intra-ladder order is deliberate: the specific boundary
@@ -928,49 +483,43 @@ mod tests {
     /// that was crossed instead of the generic ask.
     #[test]
     fn caps_speak_before_the_terminal_ask() {
-        let g = grant(50_000, 0, Some(10_000), None);
+        let g = grant(Some(10_000));
         assert_eq!(
-            decide(&g, 1_000, 10),
+            decide(&g, 1_000),
             Decision::Ask,
-            "in-envelope: the routine ask"
+            "in scope: the routine ask"
         );
         assert!(
             matches!(
-                decide(&g, 20_000, 10),
+                decide(&g, 20_000),
                 Decision::Deny(DenyReason::OverMaxTx { .. })
             ),
             "over the cap: the specific hard refusal"
         );
     }
 
-    /// Overflow answers before the recipient rule and the caps — an
-    /// arithmetically absurd request never reads as a routine refusal —
-    /// and the recipient rule answers before the caps.
+    /// The recipient rule answers before the amount cap.
     #[test]
-    fn overflow_outranks_recipient_and_caps() {
-        let mut g = grant(u64::MAX, 0, Some(10_000), None);
+    fn recipient_outranks_the_cap() {
+        let mut g = grant(Some(10_000));
         g.allowed_recipients = Some(vec!["tb1pother".into()]);
         assert!(matches!(
-            decide(&g, u64::MAX, u64::MAX),
-            Decision::Deny(DenyReason::AmountOverflow { .. })
-        ));
-        assert!(matches!(
-            decide(&g, 30_000, 10),
+            decide(&g, 30_000),
             Decision::Deny(DenyReason::RecipientNotAllowed { .. })
         ));
     }
 
     #[test]
     fn recipient_rule_is_a_hard_boundary() {
-        let mut g = grant(50_000, 0, None, None);
+        let mut g = grant(None);
         g.allowed_recipients = Some(vec![RECIPIENT.to_string(), "tb1pother".into()]);
         assert_eq!(
-            decide(&g, 1_000, 10),
+            decide(&g, 1_000),
             Decision::Ask,
             "a listed recipient is a routine ask"
         );
         assert_eq!(
-            evaluate_send(&g, "tb1pstranger", &req(1_000, 10), NOW),
+            evaluate_send(&g, "tb1pstranger", 1_000, NOW),
             Decision::Deny(DenyReason::RecipientNotAllowed {
                 recipient: "tb1pstranger".into()
             })
@@ -978,11 +527,9 @@ mod tests {
         // An empty allowlist means no recipient may be proposed.
         g.allowed_recipients = Some(vec![]);
         assert!(matches!(
-            decide(&g, 1_000, 10),
+            decide(&g, 1_000),
             Decision::Deny(DenyReason::RecipientNotAllowed { .. })
         ));
-        assert!(reserve(&mut g, &req(1_000, 10), NOW).is_err());
-        assert_eq!(g.spent_sat, 0);
     }
 
     /// Every deny reason has a stable wire tag; the set is frozen here so
@@ -998,27 +545,6 @@ mod tests {
                 },
                 "over_max_tx",
             ),
-            (
-                DenyReason::OverMaxFee {
-                    fee_sat: 2,
-                    max_fee_sat: 1,
-                },
-                "over_max_fee",
-            ),
-            (
-                DenyReason::OverBudget {
-                    requested_sat: 2,
-                    remaining_sat: 1,
-                },
-                "over_budget",
-            ),
-            (
-                DenyReason::AmountOverflow {
-                    amount_sat: u64::MAX,
-                    fee_sat: 1,
-                },
-                "amount_overflow",
-            ),
             (DenyReason::ObserveOnly, "observe_only"),
             (DenyReason::Revoked, "revoked"),
             (
@@ -1028,7 +554,7 @@ mod tests {
                 "recipient_not_allowed",
             ),
         ];
-        assert_eq!(cases.len(), 8, "every variant is listed");
+        assert_eq!(cases.len(), 5, "every variant is listed");
         for (reason, code) in cases {
             let json = serde_json::to_value(&reason).unwrap();
             assert_eq!(json["reason"], code);
@@ -1058,54 +584,20 @@ mod tests {
 
     #[test]
     fn grant_round_trips_with_every_field() {
-        let mut g = grant(50_000, 0, Some(10_000), Some(1_000));
+        let mut g = grant(Some(10_000));
         g.allowed_recipients = Some(vec![RECIPIENT.to_string()]);
         let json = serde_json::to_value(&g).unwrap();
         assert_eq!(json["format_version"], GRANT_FORMAT_VERSION);
         assert_eq!(json["mode"], "ask");
-        assert_eq!(json["max_fee_sat"], 1_000);
+        assert_eq!(json["max_tx_sat"], 10_000);
+        assert!(json.get("budget_sat").is_none(), "a grant holds no budget");
         let back: Grant = serde_json::from_value(json).unwrap();
         assert_eq!(back.mode, GrantMode::Ask);
         assert_eq!(back.allowed_recipients, g.allowed_recipients);
-        assert_eq!(back.max_fee_sat, 1_000);
 
         // Defaulted fields stay off the wire, so quiet grants stay small.
-        let quiet = serde_json::to_value(grant(1, 0, None, None)).unwrap();
+        let quiet = serde_json::to_value(grant(None)).unwrap();
         assert!(quiet.get("allowed_recipients").is_none());
         assert_eq!(quiet["mode"], "ask");
-    }
-
-    /// Layer A of the signer-boundary family: every denial class leaves
-    /// the budget untouched, so nothing downstream may sign.
-    #[test]
-    fn no_denied_send_draws_budget() {
-        let expired = grant(50_000, 0, None, None);
-        let observe = Grant {
-            mode: GrantMode::Observe,
-            ..grant(50_000, 0, None, None)
-        };
-        let capped = grant(50_000, 0, Some(10_000), None);
-        let fee_capped = grant(50_000, 0, None, Some(100));
-        let listed = Grant {
-            allowed_recipients: Some(vec!["tb1pother".into()]),
-            ..grant(50_000, 0, None, None)
-        };
-        let cases: Vec<(Grant, SpendRequest, u64)> = vec![
-            (expired, req(1_000, 10), 2_000),
-            (observe, req(1_000, 10), NOW),
-            (capped, req(10_001, 10), NOW),
-            (fee_capped, req(1_000, 101), NOW),
-            (listed, req(1_000, 10), NOW),
-            (grant(1_000, 0, None, None), req(1_000, 1), NOW),
-            (grant(u64::MAX, 0, None, None), req(u64::MAX, u64::MAX), NOW),
-        ];
-        for (mut g, r, now) in cases {
-            let spent_before = g.spent_sat;
-            let tx_before = g.tx_count;
-            let result = reserve(&mut g, &r, now);
-            assert!(result.is_err(), "expected a denial for {r:?} at {now}");
-            assert_eq!(g.spent_sat, spent_before, "denied send drew budget");
-            assert_eq!(g.tx_count, tx_before, "denied send counted a tx");
-        }
     }
 }

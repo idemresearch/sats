@@ -83,8 +83,7 @@ For Alkanes workflow changes, also run
 `cargo test -p sats-wallet --locked alkanes::`.
 For agent wrapping, also run the `request::execute::tests::wrap_` native
 suite and the `frbtc_` tests in the CLI MCP suite. These exercise the fixed
-contract wire vectors, human review, ordinary BTC grant limits, budget draw,
-changed facts, and failures on both sides of the signature boundary.
+contract wire vectors, human review, ordinary BTC grant limits, changed facts, and failures on both sides of the signature boundary.
 Its signer probes cover the staged operation, factory and signer failures,
 persistence-before-broadcast, and retaining signatures after broadcast failure.
 The CLI Alkanes integration suite includes real-terminal review, password,
@@ -133,7 +132,7 @@ and `direction.md` are also published on the website. Keep them lean:
 - **Open with one sentence under 160 characters.** The site uses a page's
   first paragraph as its description.
 - **Write for the reader of that page.** User pages say what you see and
-  what to do. Locks, ledgers, and crash windows belong in `security.md`.
+  what to do. Locks and crash windows belong in `security.md`.
 - **Use tables for anything enumerable,** such as flags, states, errors, and
   paths.
 - **Document shipped behavior only.** No roadmaps, dates, or speculative

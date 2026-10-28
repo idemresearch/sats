@@ -41,7 +41,7 @@ def write_record(record):
 
 
 def grant():
-    output = cli("agent", "grant", "claude", "--budget", "50000").stdout.decode()
+    output = cli("agent", "grant", "claude").stdout.decode()
     return next(line.strip() for line in output.splitlines()
                 if line.strip().startswith("claude mcp add "))
 
@@ -188,8 +188,6 @@ def unchanged(request_id, status="pending_approval"):
     assert read_record(request_id)["status"] == status
     saved = ROOT / "signet/transactions"
     assert not saved.exists() or not list(saved.glob("*.json"))
-    policy = json.loads((ROOT / "signet/grants/claude.json").read_text())
-    assert policy["spent_sat"] == 0 and policy.get("reservations", []) == [], policy
 
 
 assert cli_json("receive")["address"].startswith("tb1p")
@@ -269,7 +267,7 @@ try:
         write_record(first_snapshot)
         unchanged(request_id)
 
-    # Wrong password never draws budget. The next attempt uses the same filing.
+    # A wrong password never signs. The next attempt uses the same filing.
     wrong = Terminal(password="incorrect-password")
     wrong.choose(request_id)
     wrong.wait_for("Approve and sign?")
@@ -333,12 +331,8 @@ try:
     assert observed["status"] == "sent" and observed["txid"] == approved["txid"], observed
     events = [json.loads(line) for line in (ROOT / "signet/events/log.jsonl").read_text().splitlines()]
     kinds = [e["event"] for e in events if e.get("request_id") == request_id]
-    for kind in ["request_received", "approved", "reserved", "signed", "broadcast"]:
+    for kind in ["request_received", "approved", "signed", "broadcast"]:
         assert kinds.count(kind) == 1, kinds
-    policy = json.loads((ROOT / "signet/grants/claude.json").read_text())
-    assert len(policy["reservations"]) == 1
-    assert policy["reservations"][0]["request_id"] == request_id
-    assert policy["spent_sat"] == approved["total_sat"]
     assert len(list((ROOT / "signet/transactions").glob("*.json"))) == 1
     cli("agent", "approve", request_id, "--yes", ok=False)
 
@@ -359,7 +353,7 @@ try:
             next_connection = grant()
         mcp.close()
         mcp = MCP(next_connection)
-    print("generated connection and terminal approval scenarios passed; one signature and one budget draw")
+    print("generated connection and terminal approval scenarios passed; one signature")
 finally:
     for terminal in TERMINALS:
         if terminal.proc.poll() is None:
