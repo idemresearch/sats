@@ -151,23 +151,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cli::AlkanesCommand::Simulate { id, inputs } => {
                 commands::alkanes::simulate(&services(&config)?, &id, &inputs, json)
             }
-            cli::AlkanesCommand::Execute {
-                id,
-                inputs,
-                fee_rate,
-                postage,
-                yes,
-            } => commands::alkanes::execute(
-                &store,
-                network,
-                &services(&config)?,
-                &id,
-                &inputs,
-                fee_rate,
-                postage,
-                yes,
-                json,
-            ),
             cli::AlkanesCommand::Send {
                 id,
                 amount,

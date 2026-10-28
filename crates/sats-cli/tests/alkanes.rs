@@ -1,4 +1,4 @@
-//! Alkanes CLI integration tests: views, human execution, asset protection,
+//! Alkanes CLI integration tests: views, human transfers, asset protection,
 //! and provider failure modes against the file-driven mock provider.
 
 mod common;
@@ -25,8 +25,13 @@ fn standard_build_includes_all_alkanes_commands() {
         .stdout(predicate::str::contains("balance"))
         .stdout(predicate::str::contains("inspect"))
         .stdout(predicate::str::contains("simulate"))
-        .stdout(predicate::str::contains("execute"))
         .stdout(predicate::str::contains("send"));
+    // There is no generic contract call: sats signs only operations it
+    // composes and verifies itself.
+    sats(&dir)
+        .args(["alkanes", "execute", "2:1", "77", "-y"])
+        .assert()
+        .code(2);
     assert!(!dir.path().join("seed.sealed").exists());
     assert!(!dir.path().join("signet").exists());
 }
@@ -165,165 +170,20 @@ fn alkanes_need_subfrost_as_the_provider() {
 }
 
 #[test]
-fn execute_composes_signs_and_broadcasts_the_runestone() {
+fn alkanes_send_json_refuses_nonterminal_confirmation_without_unlocking() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     let mockdata = write_mock_provider(&dir);
-    std::fs::write(mockdata.join("alkanes-simulate.json"), r#"{"status": 0}"#).unwrap();
-    std::fs::write(mockdata.join("alkanes-outpoints.json"), "{}").unwrap();
-    common::fund_wallet(&dir, &[100_000]);
-
-    let out = json_stdout(
-        sats(&dir)
-            .args(["alkanes", "execute", "2:1", "77", "-y", "--json"])
-            .assert()
-            .success()
-            .stderr(predicate::str::contains("Execute"))
-            .stderr(predicate::str::contains("Network"))
-            .stderr(predicate::str::contains("provider reports status 0"))
-            .stderr(predicate::str::contains("retained in the wallet")),
-    );
-    let txid = out["txid"].as_str().unwrap().to_string();
-    assert_eq!(out["target"], "2:1");
-    assert_eq!(out["postage_sat"], 546);
-
-    // The broadcast reached the mock chain.
-    let broadcasts = std::fs::read_to_string(mockdata.join("broadcasts.log")).unwrap();
-    assert!(broadcasts.contains(&txid));
-
-    // The durable record is an ordinary attributed CLI transaction.
-    let record: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(
-            dir.path()
-                .join("signet/transactions")
-                .join(format!("{txid}.json")),
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(record["recipient"], "alkanes:2:1");
-    assert_eq!(record["status"], "broadcast");
-    assert_eq!(record["origin"]["surface"], "cli");
-
-    // Decode the signed transaction: output 0 is exactly the runestone
-    // the pure crate encodes for this call, output 1 the postage.
-    let tx: sats_core::bitcoin::Transaction = sats_core::bitcoin::consensus::deserialize(
-        &hex::decode(record["tx_hex"].as_str().unwrap()).unwrap(),
-    )
-    .unwrap();
-    let expected =
-        sats_alkanes::protostone::runestone_script(&[sats_alkanes::protostone::Protostone {
-            protocol_tag: sats_alkanes::protostone::ALKANES_PROTOCOL_TAG,
-            message: sats_alkanes::call::AlkaneCall {
-                target: sats_alkanes::id::AlkaneId { block: 2, tx: 1 },
-                inputs: vec![77],
-            }
-            .encode_cellpack(),
-            pointer: Some(1),
-            refund_pointer: Some(1),
-            edicts: Vec::new(),
-        }])
-        .unwrap();
-    assert_eq!(tx.output[0].script_pubkey, expected);
-    assert_eq!(tx.output[0].value.to_sat(), 0);
-    assert_eq!(tx.output[1].value.to_sat(), 546);
-    assert!(
-        tx.output[1].script_pubkey.is_p2tr(),
-        "postage pays the wallet"
-    );
-}
-
-#[test]
-fn execute_refuses_mainnet() {
-    let dir = TempDir::new().unwrap();
+    let funded = common::fund_wallet(&dir, &[100_000]);
+    mark_outputs(&mockdata, &[(funded[0], Some(&[("32:0", "5000")]))]);
     sats(&dir)
-        .args([
-            "--network",
-            "mainnet",
-            "alkanes",
-            "execute",
-            "2:1",
-            "77",
-            "-y",
-        ])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("mainnet is not supported"));
-}
-
-#[test]
-fn execute_fails_closed_without_simulation() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    write_mock_provider(&dir);
-    common::fund_wallet(&dir, &[100_000]);
-    // No alkanes-simulate.json: the call is never composed.
-    sats(&dir)
-        .args(["alkanes", "execute", "2:1", "77", "-y"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("alkanes view failed"));
-    assert!(!dir.path().join("signet/transactions").exists());
-}
-
-#[test]
-fn execute_refuses_failed_unknown_and_contradictory_simulations_before_unlocking() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    let mockdata = write_mock_provider(&dir);
-    // If execution gets past simulation, even sync must fail. The error
-    // below must come from simulation, before sync, asset lookup or unlock.
-    std::fs::write(mockdata.join("sync-error"), "must not sync").unwrap();
-    for raw in [
-        "null",
-        "{}",
-        r#"{"status":"0"}"#,
-        r#"{"status":7}"#,
-        r#"{"status":0,"error":"revert"}"#,
-        r#"{"status":0,"execution":{"status":1}}"#,
-    ] {
-        std::fs::write(mockdata.join("alkanes-simulate.json"), raw).unwrap();
-        // Inspection remains useful even for a failed/opaque result.
-        let view = json_stdout(
-            sats(&dir)
-                .args(["alkanes", "simulate", "2:1", "77", "--json"])
-                .assert()
-                .success(),
-        );
-        assert_eq!(
-            view["raw"],
-            serde_json::from_str::<serde_json::Value>(raw).unwrap()
-        );
-        sats(&dir)
-            .args(["alkanes", "execute", "2:1", "77", "--yes", "--json"])
-            .env("SATS_PASSWORD", "wrong-password")
-            .assert()
-            .failure()
-            .stdout("")
-            .stderr(predicate::str::contains("refusing execution"))
-            .stderr(predicate::str::contains("must not sync").not())
-            .stderr(predicate::str::contains("password").not());
-    }
-    assert!(!dir.path().join("signet/transactions").exists());
-    assert!(!mockdata.join("broadcasts.log").exists());
-}
-
-#[test]
-fn execute_json_refuses_nonterminal_confirmation_without_unlocking() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    let mockdata = write_mock_provider(&dir);
-    common::fund_wallet(&dir, &[100_000]);
-    std::fs::write(mockdata.join("alkanes-simulate.json"), r#"{"status":0}"#).unwrap();
-    std::fs::write(mockdata.join("alkanes-outpoints.json"), "{}").unwrap();
-    sats(&dir)
-        .args(["alkanes", "execute", "2:1", "77", "--json"])
+        .args(["alkanes", "send", "32:0", "1000", common::ADDRESS, "--json"])
         .env("SATS_PASSWORD", "wrong-password")
         .assert()
         .failure()
         .stdout("")
-        .stderr(predicate::str::contains("Execute"))
-        .stderr(predicate::str::contains("2:1"))
+        .stderr(predicate::str::contains("Send"))
+        .stderr(predicate::str::contains("32:0"))
         .stderr(predicate::str::contains("Fee"))
         .stderr(predicate::str::contains("Total"))
         .stderr(predicate::str::contains(
@@ -334,13 +194,12 @@ fn execute_json_refuses_nonterminal_confirmation_without_unlocking() {
 
 #[test]
 #[cfg(unix)]
-fn execute_review_precedes_password_on_a_terminal() {
+fn alkanes_send_review_precedes_password_on_a_terminal() {
     let dir = TempDir::new().unwrap();
     init_wallet(&dir);
     let mockdata = write_mock_provider(&dir);
-    common::fund_wallet(&dir, &[100_000]);
-    std::fs::write(mockdata.join("alkanes-simulate.json"), r#"{"status":0}"#).unwrap();
-    std::fs::write(mockdata.join("alkanes-outpoints.json"), "{}").unwrap();
+    let funded = common::fund_wallet(&dir, &[100_000]);
+    mark_outputs(&mockdata, &[(funded[0], Some(&[("32:0", "5000")]))]);
     let output = std::process::Command::new("python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -356,24 +215,6 @@ fn execute_review_precedes_password_on_a_terminal() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-}
-
-#[test]
-fn execute_excludes_dust_suspects() {
-    let dir = TempDir::new().unwrap();
-    init_wallet(&dir);
-    let mockdata = write_mock_provider(&dir);
-    std::fs::write(mockdata.join("alkanes-simulate.json"), r#"{"status": 0}"#).unwrap();
-    std::fs::write(mockdata.join("alkanes-outpoints.json"), "{}").unwrap();
-    common::fund_wallet(&dir, &[100_000, 546]);
-
-    let out = json_stdout(
-        sats(&dir)
-            .args(["alkanes", "execute", "2:1", "77", "-y", "--json"])
-            .assert()
-            .success(),
-    );
-    assert_eq!(out["excluded_utxos"], 1, "the 546-sat suspect stays out");
 }
 
 type MockOutput<'a> = (

@@ -88,7 +88,7 @@ pub enum Command {
         #[arg(long)]
         offline: bool,
     },
-    /// Work with signed transactions (advanced)
+    /// Rebroadcast transactions sats signed and saved
     Tx {
         #[command(subcommand)]
         command: TxCommand,
@@ -204,24 +204,6 @@ pub enum AlkanesCommand {
         #[arg(value_name = "INPUTS")]
         inputs: Vec<u128>,
     },
-    /// Execute a contract call: simulate, confirm, sign, broadcast
-    Execute {
-        /// Alkane id (e.g. 2:1)
-        #[arg(value_name = "BLOCK:TX")]
-        id: String,
-        /// Calldata words (the first is conventionally the opcode)
-        #[arg(value_name = "INPUTS")]
-        inputs: Vec<u128>,
-        /// Fee rate in sat/vB (default: estimated for configured target)
-        #[arg(long, value_name = "SAT_VB")]
-        fee_rate: Option<u64>,
-        /// Sats carried by the pointer output the call's assets land on
-        #[arg(long, value_name = "SATS", default_value_t = 546)]
-        postage: u64,
-        /// Skip the confirmation prompt
-        #[arg(short, long)]
-        yes: bool,
-    },
     /// Send an exact amount of one alkane: review, confirm, sign, broadcast
     Send {
         /// Alkane id (e.g. 32:0)
@@ -248,11 +230,11 @@ pub enum AlkanesCommand {
 
 #[derive(Subcommand)]
 pub enum TxCommand {
-    /// Broadcast a raw transaction hex file, or a saved transaction by
-    /// txid or unique prefix
+    /// Rebroadcast a saved transaction by txid or unique prefix, without
+    /// signing again
     Broadcast {
-        /// Raw transaction hex file, or a txid/prefix (`sats status` lists them)
-        #[arg(value_name = "FILE|TXID")]
+        /// Txid or unique prefix (`sats status` lists them)
+        #[arg(value_name = "TXID")]
         target: String,
     },
 }

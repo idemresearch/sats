@@ -19,7 +19,6 @@ pub mod build;
 pub mod call;
 pub mod decode;
 pub mod delta;
-pub mod execute;
 pub mod id;
 pub mod inspect;
 pub mod protostone;

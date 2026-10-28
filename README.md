@@ -117,8 +117,7 @@ won't spend on out-of-date Bitcoin data, and by default it never spends 546- or
 [Providers](docs/providers.md).
 
 Alkanes commands are included: `sats alkanes balance`, `inspect`, `simulate`,
-`execute`, and `send`. They require Subfrost; execution and transfers are
-human-authorized. Agents can propose BTC-to-frBTC wraps and Alkanes transfers
+and `send`. They require Subfrost; transfers are human-authorized. Agents can propose BTC-to-frBTC wraps and Alkanes transfers
 within their existing grant; you review and approve each request. With
 Subfrost selected, ordinary sends also exclude outputs
 carrying alkanes or not yet indexed. See [Alkanes](docs/cli.md#alkanes).

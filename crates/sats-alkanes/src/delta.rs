@@ -27,49 +27,6 @@ pub struct SimulationView {
     pub raw: serde_json::Value,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum SimulationError {
-    #[error("refusing execution: simulation did not report a recognized numeric success status")]
-    Unrecognized,
-    #[error("refusing execution: simulation reported failure status {0}")]
-    Failed(u64),
-    #[error("refusing execution: simulation reported an error")]
-    ReportedError,
-}
-
-impl SimulationView {
-    /// Execution accepts only the currently recognized numeric status-0
-    /// result, with no contradictory status or reported error in the known
-    /// result containers. This is an endpoint claim, never proof of effects.
-    /// Read-only callers may continue displaying any raw result.
-    pub fn require_success(&self) -> Result<(), SimulationError> {
-        for node in std::iter::once(&self.raw).chain(
-            ["execution", "result"]
-                .iter()
-                .filter_map(|key| self.raw.get(key)),
-        ) {
-            if node
-                .get("error")
-                .is_some_and(|error| !error.is_null() && error.as_str() != Some(""))
-            {
-                return Err(SimulationError::ReportedError);
-            }
-            if let Some(status) = node.get("status") {
-                match status.as_u64() {
-                    Some(0) => {}
-                    Some(status) => return Err(SimulationError::Failed(status)),
-                    None => return Err(SimulationError::Unrecognized),
-                }
-            }
-        }
-        match self.raw.get("status").and_then(serde_json::Value::as_u64) {
-            Some(0) => Ok(()),
-            Some(status) => Err(SimulationError::Failed(status)),
-            None => Err(SimulationError::Unrecognized),
-        }
-    }
-}
-
 pub fn parse_simulation(raw: &serde_json::Value) -> SimulationView {
     let status = raw.get("status").and_then(serde_json::Value::as_u64);
     let gas_used = raw
@@ -120,50 +77,6 @@ fn parse_u128(value: &serde_json::Value) -> Option<u128> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn execution_requires_unambiguous_recognized_success() {
-        use serde_json::json;
-        for raw in [
-            json!({"status": 0}),
-            json!({"status": 0, "error": null}),
-            json!({"status": 0, "execution": {"error": "", "status": 0}}),
-        ] {
-            assert_eq!(parse_simulation(&raw).require_success(), Ok(()));
-        }
-        for raw in [
-            json!(null),
-            json!({}),
-            json!({"status": "0"}),
-            json!({"status": -1}),
-            json!({"status": true}),
-            json!({"result": {"status": 0}}),
-        ] {
-            assert_eq!(
-                parse_simulation(&raw).require_success(),
-                Err(SimulationError::Unrecognized)
-            );
-        }
-        for raw in [
-            json!({"status": 1}),
-            json!({"status": 0, "execution": {"status": 1}}),
-        ] {
-            assert_eq!(
-                parse_simulation(&raw).require_success(),
-                Err(SimulationError::Failed(1))
-            );
-        }
-        for raw in [
-            json!({"status": 0, "error": "revert"}),
-            json!({"status": 0, "execution": {"error": {"message": "revert"}}}),
-            json!({"status": 0, "result": {"error": "revert"}}),
-        ] {
-            assert_eq!(
-                parse_simulation(&raw).require_success(),
-                Err(SimulationError::ReportedError)
-            );
-        }
-    }
 
     #[test]
     fn parses_recognized_transfer_shapes() {

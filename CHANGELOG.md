@@ -10,8 +10,13 @@ Notable changes to sats, newest first. Versions follow
 - Removed `sats send --export-psbt`, `sats psbt inspect`, and
   `sats psbt sign`. sats signs only transactions it prepared on fresh chain
   state with its postage and Alkanes exclusions; signing a PSBT built
-  elsewhere bypassed both. `sats tx broadcast` still rebroadcasts saved
-  transactions and raw hex files.
+  elsewhere bypassed both.
+- Removed `sats alkanes execute`. It called any contract with any calldata,
+  gated only by a provider's simulation; sats now signs only Alkanes
+  operations it composes and verifies (`alkanes send`, agent frBTC wraps
+  and transfers).
+- `sats tx broadcast` rebroadcasts only transactions sats signed and saved;
+  it no longer broadcasts raw hex files.
 
 ### Agent grants
 
@@ -56,8 +61,8 @@ Notable changes to sats, newest first. Versions follow
   as the wallet and network, avoiding an older `sats` earlier on PATH.
 
 - Standard builds include `sats alkanes balance`, `inspect`, `simulate`,
-  `execute`, and `send`, with no separate Cargo feature flags. Execution
-  and transfers require human authorization; MCP never executes spends.
+  and `send`, with no separate Cargo feature flags. Transfers require human
+  authorization; MCP never executes spends.
 - MCP provides `alkanes_balance`, `alkanes_inspect`, and `alkanes_simulate`
   under the connection's pinned network and live grant. Asset amounts and
   calldata use decimal strings; simulations remain advisory and never

@@ -718,6 +718,15 @@ fn tx_broadcast_needs_an_explicit_target() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("no transaction deadbeef"));
+    // Only transactions sats signed and saved: a raw hex file is not a
+    // target, it is just an unknown txid.
+    let raw = dir.path().join("raw.hex");
+    std::fs::write(&raw, "0200000000010000000000").unwrap();
+    sats(&dir)
+        .args(["tx", "broadcast", raw.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no transaction"));
 }
 
 #[test]
