@@ -1,0 +1,8 @@
+{"version": 2, "width": 110, "height": 24, "timestamp": 1793309949, "command": "sats alkanes send 32:0 40000 tb1p5lcyhl7cvzkh6u49jy2n2n6nyk3vyqw3xvksq3vljrvzhapq6k6spu0ds9", "title": "sats 0.0.4 (274a9a1)", "env": {"TERM": "xterm-256color", "SHELL": "/bin/sh"}}
+[0.081, "o", "syncing…\r        \r"]
+[0.101, "o", "Wallet   ~/.local/share/sats/signet/wallet.sqlite\r\nNetwork  signet\r\nSend     40000 of 32:0\r\nTo       tb1p5lcyhl7cvzkh6u49jy2n2n6nyk3vyqw3xvksq3vljrvzhapq6k6spu0ds9\r\nKept     1200 of 2:0, 210000 of 32:0\r\nPostage  546 sats to the recipient\r\nFee      566 sats\r\nTotal    1112 sats leave the wallet\r\nSign? [Y/n] "]
+[0.501, "i", "y\r"]
+[0.501, "o", "y\r\npassword: "]
+[0.903, "i", "***********\r"]
+[0.904, "o", "\r\n"]
+[4.005, "o", "\u001b[32m✓\u001b[39m broadcast  f335f2bd14bafa1299387bf6cdefb9d17289bd351a6a1cc01f786b2bec8e6f2a\r\n"]

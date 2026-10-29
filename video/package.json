@@ -1,0 +1,33 @@
+{
+  "name": "sats-video",
+  "version": "0.0.4",
+  "private": true,
+  "description": "Launch videos for sats, rendered with Remotion from real CLI recordings",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24"
+  },
+  "scripts": {
+    "capture": "python3 scripts/capture.py",
+    "sound": "tsx scripts/sound.ts",
+    "dev": "npm run sound && remotion studio",
+    "render": "npm run sound && tsx scripts/render.ts",
+    "check": "tsc"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.539",
+    "@remotion/fonts": "4.0.539",
+    "geist": "1.8.2",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.539"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.3",
+    "@types/react": "19.2.7",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  },
+  "allowScripts": {
+    "esbuild": false
+  }
+}

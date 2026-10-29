@@ -1,0 +1,50 @@
+{
+  "sats": "0.0.4",
+  "commit": "274a9a1",
+  "agent": "claude",
+  "calls": [
+    {
+      "tool": "request_alkanes_send",
+      "arguments": {
+        "id": "32:0",
+        "amount": "25000",
+        "address": "tb1pzgnyrr8eckt704cfnfn5mzvpeux3cfq87xngf85n2rvma2fu659qjfme75",
+        "idempotency_key": "pay-bob"
+      },
+      "result": {
+        "amount_sat": 546,
+        "asset_transfer": {
+          "amount": "25000",
+          "id": "32:0",
+          "protocol": "alkanes"
+        },
+        "message": "filed for human review — the human approves with: sats agent approve r-f1fb378c8a748bd4c4b5c9e06060523a; poll check_request to observe the result, and do not file it again",
+        "operation": "asset_transfer",
+        "recipient": "tb1pzgnyrr8eckt704cfnfn5mzvpeux3cfq87xngf85n2rvma2fu659qjfme75",
+        "request_id": "r-f1fb378c8a748bd4c4b5c9e06060523a",
+        "status": "pending_approval"
+      }
+    },
+    {
+      "tool": "check_request",
+      "arguments": {
+        "request_id": "r-f1fb378c8a748bd4c4b5c9e06060523a"
+      },
+      "result": {
+        "amount_sat": 546,
+        "asset_transfer": {
+          "amount": "25000",
+          "id": "32:0",
+          "protocol": "alkanes"
+        },
+        "fee_sat": 566,
+        "message": "asset transfer broadcast; receipt requires confirmation and indexing; do not file it again",
+        "operation": "asset_transfer",
+        "recipient": "tb1pzgnyrr8eckt704cfnfn5mzvpeux3cfq87xngf85n2rvma2fu659qjfme75",
+        "request_id": "r-f1fb378c8a748bd4c4b5c9e06060523a",
+        "status": "sent",
+        "txid": "9352acf9572c499feb4af6e38a1de2717a65d629e85057b00c6236a1d6273131"
+      }
+    }
+  ]
+}
