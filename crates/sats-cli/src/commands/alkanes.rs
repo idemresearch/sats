@@ -6,6 +6,7 @@ use anyhow::bail;
 use anyhow::{Result, anyhow};
 use sats_alkanes::call::AlkaneCall;
 use sats_alkanes::id::AlkaneId;
+use sats_alkanes::names;
 use sats_core::bitcoin::Network;
 use sats_core::fmt::format_sats;
 use sats_wallet::alkanes;
@@ -42,6 +43,7 @@ pub fn frbtc_info(services: &Services, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// The indexer's label for an asset, as the contract set it: display only.
 fn label(name: &str, symbol: &str) -> String {
     match (name.is_empty(), symbol.is_empty()) {
         (true, true) => String::new(),
@@ -50,6 +52,19 @@ fn label(name: &str, symbol: &str) -> String {
         (false, false) => format!("{name} ({symbol})"),
     }
 }
+
+/// A warning when an asset's label claims a name sats knows belongs to
+/// another id.
+fn impostor(id: AlkaneId, name: &str, symbol: &str) -> Option<String> {
+    names::impersonated(id, name, symbol).map(|known| {
+        format!(
+            "{id} calls itself {}, but {} is {}",
+            known.name, known.name, known.id
+        )
+    })
+}
+
+const UNVERIFIED: &str = "names are the indexer's labels, not verified: the id is the asset";
 
 pub fn balance(store: &Store, network: Network, services: &Services, json: bool) -> Result<()> {
     let scanned = alkanes::balance(store, network, services)?;
@@ -86,8 +101,11 @@ pub fn balance(store: &Store, network: Network, services: &Services, json: bool)
     if totals.is_empty() {
         ui::dim("no alkanes in this wallet");
     }
+    let mut labelled = false;
     for (id, (amount, name, symbol)) in &totals {
-        println!("  {id:<12} {amount:>24}  {}", label(name, symbol));
+        let label = label(name, symbol);
+        labelled |= !label.is_empty();
+        println!("  {id:<12} {amount:>24}  {label}");
     }
     for output in scanned.outputs.iter().filter(|o| !o.balances.is_empty()) {
         let held: Vec<String> = output
@@ -96,6 +114,14 @@ pub fn balance(store: &Store, network: Network, services: &Services, json: bool)
             .map(|b| format!("{} of {}", b.amount, b.id))
             .collect();
         ui::dim(&format!("{}  {}", output.outpoint, held.join(", ")));
+    }
+    if labelled {
+        ui::dim(UNVERIFIED);
+    }
+    for (id, (_, name, symbol)) in &totals {
+        if let Some(warning) = impostor(*id, name, symbol) {
+            ui::warn(&warning);
+        }
     }
     if !unknown.is_empty() {
         ui::warn(&format!(
@@ -244,7 +270,7 @@ fn authorize_and_commit(
         ),
     ];
     // The review borrow ends here, before commit consumes the operation.
-    {
+    let warning = {
         let review = staged.review();
         let name = label(&review.name, &review.symbol);
         let returned = review
@@ -253,20 +279,11 @@ fn authorize_and_commit(
             .iter()
             .map(|(id, amount)| format!("{amount} of {id}"))
             .collect::<Vec<_>>();
+        rows.push(("Send", format!("{} of {}", review.amount, review.asset)));
+        if !name.is_empty() {
+            rows.push(("Label", format!("{name}, the indexer's, not verified")));
+        }
         rows.extend([
-            (
-                "Send",
-                format!(
-                    "{} of {}{}",
-                    review.amount,
-                    review.asset,
-                    if name.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" {name}")
-                    }
-                ),
-            ),
             ("To", review.recipient.clone()),
             (
                 "Kept",
@@ -289,17 +306,26 @@ fn authorize_and_commit(
                 ),
             ),
         ]);
-    }
+        impostor(review.asset, &review.name, &review.symbol)
+    };
     if json {
         ui::kv_rows_stderr(&rows);
+        if let Some(warning) = &warning {
+            eprintln!("! {warning}");
+        }
     } else {
         ui::kv_rows(&rows);
+        if let Some(warning) = &warning {
+            ui::warn(warning);
+        }
     }
+    // Enter alone never signs an impostor.
+    let default = warning.is_none();
     let confirmed = yes
         || if json {
-            ui::confirm_stderr("Sign?", true)?
+            ui::confirm_stderr("Sign?", default)?
         } else {
-            ui::confirm("Sign?", true)?
+            ui::confirm("Sign?", default)?
         };
     if !confirmed {
         if json {

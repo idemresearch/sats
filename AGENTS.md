@@ -104,7 +104,7 @@ advice for exactly that file.
 | `crates/sats-cli/src/commands/` | Human CLI workflows and rendering |
 | `crates/sats-cli/src/mcp/` | MCP transport and schemas — reads the wallet and files requests |
 | `crates/sats-cli/tests/` | Native CLI and MCP integration tests |
-| `crates/sats-alkanes/src/` | Pure Alkanes protocol composition: ids, cellpacks, protostones and their decoding, transfers and their check, inspection, balance and simulation views |
+| `crates/sats-alkanes/src/` | Pure Alkanes protocol composition: ids, cellpacks, protostones and their decoding, transfers and their check, inspection, balance and simulation views, known asset names |
 | `crates/sats-playground/src/lib.rs` | Browser playground: wasm bindings over sats-core and the simulated chain |
 | `website/` | Project website, including the interactive playground terminal |
 

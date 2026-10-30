@@ -261,6 +261,129 @@ fn saved_transaction(dir: &TempDir) -> sats_core::bitcoin::Transaction {
     .unwrap()
 }
 
+/// Write the labels the mock indexer reports for each asset id.
+fn label_assets(mockdata: &std::path::Path, labels: &[(&str, &str, &str)]) {
+    let map: serde_json::Map<String, serde_json::Value> = labels
+        .iter()
+        .map(|(id, name, symbol)| {
+            (
+                id.to_string(),
+                serde_json::json!({"name": name, "symbol": symbol}),
+            )
+        })
+        .collect();
+    std::fs::write(
+        mockdata.join("alkanes-names.json"),
+        serde_json::Value::Object(map).to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn labels_are_unverified_and_an_frbtc_impostor_is_flagged() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+    let funded = common::fund_wallet(&dir, &[546, 546, 100_000]);
+    mark_outputs(
+        &mockdata,
+        &[
+            (funded[0], Some(&[("32:0", "5000")])),
+            (funded[1], Some(&[("2:9", "7")])),
+        ],
+    );
+    // 2:9 chose frBTC's name for itself.
+    label_assets(
+        &mockdata,
+        &[("32:0", "frBTC", "FRBTC"), ("2:9", "frBTC", "FRBTC")],
+    );
+    let recipient = common::foreign_address(bdk_wallet::bitcoin::Network::Signet);
+    let impostor = "2:9 calls itself frBTC, but frBTC is 32:0";
+
+    sats(&dir)
+        .args(["alkanes", "balance"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("frBTC (FRBTC)"))
+        .stdout(predicate::str::contains("indexer's labels, not verified"))
+        .stdout(predicate::str::contains(format!("! {impostor}")))
+        .stdout(predicate::str::contains("32:0 calls itself").not());
+    // Labels stay plain data in JSON.
+    let out = json_stdout(
+        sats(&dir)
+            .args(["alkanes", "balance", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(out["assets"][0]["id"], "2:9");
+    assert_eq!(out["assets"][0]["name"], "frBTC");
+
+    // Enter alone does not sign the impostor.
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/alkanes_impostor_pty.py"
+            ))
+            .arg(env!("CARGO_BIN_EXE_sats"))
+            .arg(dir.path())
+            .arg("2:9")
+            .arg(&recipient)
+            .output()
+            .expect("terminal tests require python3 (standard library only)");
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // The review names the label as the indexer's and warns, with --json on stderr.
+    sats(&dir)
+        .args([
+            "alkanes",
+            "send",
+            "2:9",
+            "7",
+            &recipient,
+            "--fee-rate",
+            "2",
+            "-y",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"asset\":\"2:9\""))
+        .stdout(predicate::str::contains("calls itself").not())
+        .stderr(predicate::str::contains("Send     7 of 2:9"))
+        .stderr(predicate::str::contains(
+            "Label    frBTC (FRBTC), the indexer's, not verified",
+        ))
+        .stderr(predicate::str::contains(format!("! {impostor}")));
+
+    // The real frBTC carries the same label without a warning.
+    sats(&dir)
+        .args([
+            "alkanes",
+            "send",
+            "32:0",
+            "1000",
+            &recipient,
+            "--fee-rate",
+            "2",
+            "-y",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Send     1000 of 32:0"))
+        .stdout(predicate::str::contains(
+            "Label    frBTC (FRBTC), the indexer's, not verified",
+        ))
+        .stdout(predicate::str::contains("calls itself").not());
+}
+
 #[test]
 fn balance_reports_assets_and_unindexed_outputs() {
     let dir = TempDir::new().unwrap();
