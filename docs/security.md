@@ -461,7 +461,9 @@ The core request is a generic `AssetTransfer` with a protocol-qualified asset
 id and exact positive u128 quantity serialized as a decimal string.
 The native executor currently accepts only canonical Alkanes transfers;
 unknown protocols fail before provider access. Names and symbols never
-select assets or grant authority. Request format 4 prevents older binaries
+select assets or grant authority. Where the CLI shows them, they are marked
+as the indexer's unverified labels, and a label claiming frBTC at any id but
+`32:0` is flagged. Request format 4 prevents older binaries
 from interpreting an asset transfer as an ordinary BTC payment.
 
 No protocol grant flags are added. The existing grant authorizes proposals;

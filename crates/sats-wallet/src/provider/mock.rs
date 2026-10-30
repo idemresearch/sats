@@ -15,6 +15,8 @@
 //! - `alkanes-outpoints.json`  `{"TXID:VOUT": {"BLOCK:TX": "amount"}}`;
 //!   an outpoint not listed holds no alkanes, one listed as `null` is
 //!   unknown to the indexer, and a missing file is a typed view error
+//! - `alkanes-names.json`  `{"BLOCK:TX": {"name": "..", "symbol": ".."}}`,
+//!   the labels the indexer reports; absent means none
 //!
 //! - `fees-via`, `broadcast-via`  an Esplora URL that serves that one role
 //!   instead, so tests reach the real HTTP transport behind a
@@ -159,6 +161,13 @@ impl MockProvider {
             .map_err(|e| self.view_err(e.to_string()))?;
         let map: HashMap<String, Option<HashMap<String, String>>> =
             serde_json::from_str(&text).map_err(|e| self.view_err(e.to_string()))?;
+        let labels: HashMap<String, HashMap<String, String>> =
+            match std::fs::read_to_string(self.dir.join("alkanes-names.json")) {
+                Ok(text) => {
+                    serde_json::from_str(&text).map_err(|e| self.view_err(e.to_string()))?
+                }
+                Err(_) => HashMap::new(),
+            };
         let balances = match map.get(&outpoint.to_string()) {
             Some(None) => return Ok(OutpointAssets::default()),
             Some(Some(entries)) => entries.clone(),
@@ -167,11 +176,18 @@ impl MockProvider {
         let mut balances = balances
             .into_iter()
             .map(|(id, amount)| {
+                let label = |field: &str| {
+                    labels
+                        .get(&id)
+                        .and_then(|l| l.get(field))
+                        .cloned()
+                        .unwrap_or_default()
+                };
                 Ok(AssetBalance {
                     id: id.parse().map_err(|e: String| self.view_err(e))?,
                     amount: amount.parse().map_err(|_| self.view_err(amount.clone()))?,
-                    name: String::new(),
-                    symbol: String::new(),
+                    name: label("name"),
+                    symbol: label("symbol"),
                 })
             })
             .collect::<Result<Vec<_>, ProviderError>>()?;

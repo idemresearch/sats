@@ -23,6 +23,10 @@ runs on test networks only.
   wallet, and shows its review before the password.
 - With an Alkanes provider, plain BTC sends exclude asset-bearing and
   unindexed outputs, and stop if the indexer is unavailable.
+- Asset names and symbols show as the indexer's unverified labels; the id
+  is the asset. An asset whose label claims frBTC at any id but `32:0` is
+  flagged in `sats alkanes balance` and in the `send` review, where Enter
+  alone cancels.
 - MCP `request_alkanes_send` files an exact transfer under the agent's
   existing grant. Approval reviews the asset quantity and what stays in the
   wallet separately from BTC postage and fee, and rechecks indexed balances

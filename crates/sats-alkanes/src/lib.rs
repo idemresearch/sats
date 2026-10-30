@@ -21,6 +21,7 @@ pub mod decode;
 pub mod delta;
 pub mod id;
 pub mod inspect;
+pub mod names;
 pub mod protostone;
 pub mod transfer;
 pub mod varint;

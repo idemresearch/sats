@@ -315,6 +315,12 @@ Use the contract's verified method and arguments.
 output carries, after a sync. An output the indexer doesn't confirm
 knowing (an unconfirmed one, for example) is listed as not yet indexed.
 
+An asset's name and symbol are whatever its contract chose, as the indexer
+reports them. sats shows them as unverified labels and identifies assets
+only by id. An asset at any id other than `32:0` whose label claims frBTC
+is flagged in `balance` and in the `send` review, where Enter alone
+cancels.
+
 When the selected provider serves Alkanes, every send also protects assets:
 an output carrying alkanes, or one the indexer hasn't confirmed, is never used to fund a
 plain BTC send, because a transaction without a protostone burns the
@@ -347,8 +353,9 @@ returns everything else those outputs carry to a wallet output. Before the
 review, sats decodes the built transaction and replays the indexer's
 transfer rules; it refuses unless the recipient gets exactly the amount and
 nothing else, and every other alkane stays in the wallet. The review shows
-the asset, amount, recipient, what stays, the postage, and the fee, and it
-precedes the password (on stderr with `--json`).
+the asset, amount, the indexer's label marked unverified, recipient, what
+stays, the postage, and the fee, and it precedes the password (on stderr
+with `--json`).
 
 ## JSON output
 

@@ -89,8 +89,9 @@ The `sats` binary: the human CLI and the MCP server.
 
 Pure Alkanes encoding: alkane ids, LEB128 varints, cellpacks, the
 protostone/runestone envelope and its decoder, bytecode hashing, the
-outpoint balance view, transfers and their check, and tolerant simulation
-views. Encodings follow the published alkanes-rs reference, frozen by unit
+outpoint balance view, transfers and their check, tolerant simulation
+views, and the asset names sats knows independently of the indexer (frBTC,
+for flagging labels that claim it). Encodings follow the published alkanes-rs reference, frozen by unit
 vectors. Like `sats-core`, it does no I/O. Standard builds include
 `sats alkanes balance`, `inspect`, `simulate`, and `send`. There is no
 generic contract call: sats signs only operations it composes and verifies.
