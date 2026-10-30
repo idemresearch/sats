@@ -3,7 +3,7 @@
 Notable changes to sats, newest first. Versions follow
 `workspace.package.version` in `Cargo.toml`.
 
-## 0.0.4 (2026-10-28)
+## 0.0.4 (2026-10-30)
 
 0.0.4 adds Alkanes and narrows what sats will sign. Agents can propose
 frBTC wraps and exact Alkanes transfers for your approval, a grant becomes a
