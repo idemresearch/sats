@@ -51,7 +51,12 @@ export const AgentCard: React.FC<{ timeline: Timeline; t: number }> = ({ timelin
   const { agent, layout, marks } = timeline;
   if (!agent) return null;
   const [request, check] = agent.capture.calls;
-  const filed = request.result as { status: string; request_id: string; message: string };
+  const filed = request.result as {
+    status: string;
+    request_id: string;
+    message: string;
+    asset_transfer: { protocol: string; id: string };
+  };
   const observed = check.result as { status: string; txid: string };
 
   const enter = progress(t, agent.enter, 0.75, ease.out);
@@ -142,6 +147,12 @@ export const AgentCard: React.FC<{ timeline: Timeline; t: number }> = ({ timelin
           <span style={{ color: color.subtle, opacity: result }}>←</span>
           <Badge text={filed.status} tone={color.accent} p={result} />
         </div>
+        {/* What sats recorded: a name typed by the agent becomes its id. */}
+        <Row
+          label="asset"
+          value={`${filed.asset_transfer.protocol}:${filed.asset_transfer.id}`}
+          p={progress(t, agent.result + 0.12, 0.45, ease.out)}
+        />
         <div
           style={{
             color: color.muted,

@@ -219,7 +219,8 @@ def main():
         balance = Recording(sats, ["alkanes", "balance"], terminal)
         write_cast("alkanes-balance", balance, balance.finish(home), version, commit)
 
-        send = Recording(sats, ["alkanes", "send", "32:0", "40000", alice], terminal)
+        # By name: frbtc is 32:0, and nobody needs to remember that.
+        send = Recording(sats, ["alkanes", "send", "frbtc", "40000", alice], terminal)
         send.expect("Sign? [Y/n]", "y")
         send.expect("password:", PASSWORD, secret=True)
         write_cast("alkanes-send", send, send.finish(home), version, commit)
@@ -228,7 +229,7 @@ def main():
         token = json.loads(run([sats, "--json", "agent", "grant", "claude", "--for", "24h",
                                 "--max-tx", "10k"], setup))["token"]
         mcp = Mcp(sats, terminal, token)
-        filed = mcp.tool("request_alkanes_send", {"id": "32:0", "amount": "25000",
+        filed = mcp.tool("request_alkanes_send", {"id": "frbtc", "amount": "25000",
                                                   "address": bob, "idempotency_key": "pay-bob"})
         assert filed["result"]["status"] == "pending_approval", filed
         request_id = filed["result"]["request_id"]
