@@ -1,0 +1,89 @@
+{
+  "sats": "0.0.4",
+  "commit": "05e6605",
+  "agent": "assistant",
+  "calls": [
+    {
+      "tool": "request_alkanes_send",
+      "arguments": {
+        "id": "frbtc",
+        "amount": "25000",
+        "address": "tb1pzgnyrr8eckt704cfnfn5mzvpeux3cfq87xngf85n2rvma2fu659qjfme75",
+        "idempotency_key": "send-bob"
+      },
+      "result": {
+        "amount_sat": 546,
+        "asset_transfer": {
+          "amount": "25000",
+          "id": "32:0",
+          "protocol": "alkanes"
+        },
+        "message": "filed for human review — the human approves with: sats agent approve r-04bb3fc9faf13254a64cea8073c521f5; poll check_request to observe the result, and do not file it again",
+        "operation": "asset_transfer",
+        "recipient": "tb1pzgnyrr8eckt704cfnfn5mzvpeux3cfq87xngf85n2rvma2fu659qjfme75",
+        "request_id": "r-04bb3fc9faf13254a64cea8073c521f5",
+        "status": "pending_approval"
+      }
+    },
+    {
+      "tool": "check_request",
+      "arguments": {
+        "request_id": "r-04bb3fc9faf13254a64cea8073c521f5"
+      },
+      "result": {
+        "amount_sat": 546,
+        "asset_transfer": {
+          "amount": "25000",
+          "id": "32:0",
+          "protocol": "alkanes"
+        },
+        "fee_sat": 566,
+        "message": "asset transfer broadcast; receipt requires confirmation and indexing; do not file it again",
+        "operation": "asset_transfer",
+        "recipient": "tb1pzgnyrr8eckt704cfnfn5mzvpeux3cfq87xngf85n2rvma2fu659qjfme75",
+        "request_id": "r-04bb3fc9faf13254a64cea8073c521f5",
+        "status": "sent",
+        "txid": "f1294eec0de9f930321081d8d13183bc180796a41ef77f96393d8e5da2105e8f"
+      }
+    },
+    {
+      "tool": "request_wrap_frbtc",
+      "arguments": {
+        "amount_sat": 10000,
+        "idempotency_key": "wrap-10k"
+      },
+      "result": {
+        "amount_sat": 10000,
+        "frbtc": {
+          "code_hash": "cd5d4935a48c0672cb06407bb443bc0087aff947c6b864bac886982c73b3027f",
+          "signer_address": "tb1pxp59vaz90sl25mffqjsngz4cq2txyh5vwvfl2nr2ulz3xx84scrs2c00m6"
+        },
+        "message": "filed for human review — the human approves with: sats agent approve r-79da4c875611f9785d92d658b1d3a5c0; poll check_request to observe the result, and do not file it again",
+        "operation": "frbtc_wrap",
+        "recipient": "tb1pxp59vaz90sl25mffqjsngz4cq2txyh5vwvfl2nr2ulz3xx84scrs2c00m6",
+        "request_id": "r-79da4c875611f9785d92d658b1d3a5c0",
+        "status": "pending_approval"
+      }
+    },
+    {
+      "tool": "check_request",
+      "arguments": {
+        "request_id": "r-79da4c875611f9785d92d658b1d3a5c0"
+      },
+      "result": {
+        "amount_sat": 10000,
+        "fee_sat": 447,
+        "frbtc": {
+          "code_hash": "cd5d4935a48c0672cb06407bb443bc0087aff947c6b864bac886982c73b3027f",
+          "signer_address": "tb1pxp59vaz90sl25mffqjsngz4cq2txyh5vwvfl2nr2ulz3xx84scrs2c00m6"
+        },
+        "message": "wrap transaction broadcast; frBTC receipt still requires confirmation and indexing; do not file it again",
+        "operation": "frbtc_wrap",
+        "recipient": "tb1pxp59vaz90sl25mffqjsngz4cq2txyh5vwvfl2nr2ulz3xx84scrs2c00m6",
+        "request_id": "r-79da4c875611f9785d92d658b1d3a5c0",
+        "status": "sent",
+        "txid": "5fcdb17faa334f5bd431dbda125f4057da070998bc587177edb36d559368dc7f"
+      }
+    }
+  ]
+}

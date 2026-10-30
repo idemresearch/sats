@@ -2,13 +2,22 @@
 
 Short launch videos for sats releases, rendered with
 [Remotion](https://www.remotion.dev) from terminal sessions recorded from
-the real binary. Nothing on screen is mocked up: every terminal line is
-output sats printed, replayed at a directed pace with a camera, highlights,
-and captions around it.
+the real binary. Every terminal line is output sats printed, and every MCP
+call an agent makes, with its result, is a real call to `sats agent serve`,
+replayed at a directed pace with a camera, highlights, and captions around
+it.
 
-The current video announces 0.0.4 and its Alkanes commands, in three shapes:
-landscape (1920×1080), square (1080×1080), and vertical (1080×1920), at
-60 fps.
+There are two videos for 0.0.4, each in three shapes: landscape
+(1920×1080), square (1080×1080), and vertical (1080×1920), at 60 fps.
+
+- `assistant-0.0.4`: a person asks an AI agent to send frBTC, then to wrap
+  BTC into frBTC. The agent files each request over MCP, and the person
+  approves it in the terminal. The chat window is a generic MCP client, not
+  any product's interface, and its wording, both the person's and the
+  agent's, is the video's script. The tool calls in it, their results, and
+  the approvals are recorded.
+- `alkanes-0.0.4`: the Alkanes commands themselves: balance, a send by name,
+  and an agent's transfer approved in the terminal.
 
 ## How it works
 
@@ -22,7 +31,9 @@ landscape (1920×1080), square (1080×1080), and vertical (1080×1920), at
    redactions: the disposable home directory shows as `~` and the password
    as asterisks.
 2. `src/demos/` holds one config per launch: the copy, which recordings
-   to play, what is typed or pasted, and where the camera looks.
+   to play, what is typed or pasted, the chat's turns, and where the
+   camera looks. A chat turn shows a recorded MCP call by its index, and a
+   reply can quote a recorded value, such as `{0.request_id}`.
 3. `src/lib/timeline.ts` turns a config and its recordings into one
    schedule: the terminal's byte stream, every keystroke, camera shots,
    highlights, and sounds. It checks that the typed text reproduces each
@@ -59,6 +70,9 @@ Copy `src/demos/alkanes.ts`, add the recordings it needs to
 `npm run sound`. Shots, highlights, and captions are anchored to marks the
 timeline emits, such as `send.output` (the first output line) or
 `send.input.0` (the first answer to a prompt), plus a delay in seconds.
+Chat turns add marks of their own: `ask.sent` when a typed message is
+sent, `send-call.result` when a tool answers, `send-reply.done` when a
+reply has streamed in.
 
 ## License
 

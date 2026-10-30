@@ -1,5 +1,8 @@
 // World geometry, in pixels before the camera scales anything: the
-// terminal window at the origin and the agent card to its right.
+// terminal window at the origin, and the agent card to its right or the
+// assistant's chat to its left.
+
+import { CHAT_GAP, CHAT_WIDTH } from "./chat";
 
 export const FONT_SIZE = 24;
 // Geist Mono advances every glyph 600/1000 em.
@@ -23,10 +26,11 @@ export type Layout = {
   window: Rect;
   card: Rect;
   cardResult: Rect;
+  chat: Rect | null;
   stage: Rect;
 };
 
-export const layout = (columns: number, rows: number): Layout => {
+export const layout = (columns: number, rows: number, chat = false): Layout => {
   const window = {
     x: 0,
     y: 0,
@@ -40,13 +44,17 @@ export const layout = (columns: number, rows: number): Layout => {
     h: CARD_HEIGHT,
   };
   const card = { ...cardResult, h: CARD_COMPACT };
+  const chatRect = chat ? { x: -(CHAT_GAP + CHAT_WIDTH), y: 0, w: CHAT_WIDTH, h: window.h } : null;
   return {
     columns,
     rows,
     window,
     card,
     cardResult,
-    stage: { x: 0, y: 0, w: card.x + card.w, h: window.h },
+    chat: chatRect,
+    stage: chatRect
+      ? { x: chatRect.x, y: 0, w: window.w - chatRect.x, h: window.h }
+      : { x: 0, y: 0, w: card.x + card.w, h: window.h },
   };
 };
 

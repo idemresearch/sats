@@ -1,0 +1,7 @@
+{"version": 2, "width": 110, "height": 24, "timestamp": 1793337579, "command": "sats agent approve r-79da4c875611f9785d92d658b1d3a5c0", "title": "sats 0.0.4 (05e6605)", "env": {"TERM": "xterm-256color", "SHELL": "/bin/sh"}}
+[0.071, "o", "syncing…\r        \rWallet              ~/.local/share/sats/signet/wallet.sqlite\r\nNetwork             signet\r\nApprove             r-79da4c875611f9785d92d658b1d3a5c0\r\nAgent               assistant\r\nRecipient           tb1pxp59vaz90sl25mffqjsngz4cq2txyh5vwvfl2nr2ulz3xx84scrs2c00m6\r\nAmount              10,000 sat\r\nFee                 447 sat\r\nTotal               10,447 sat\r\nOperation           Wrap BTC to frBTC (32:0, opcode 77)\r\nContract code hash  cd5d4935a48c0672cb06407bb443bc0087aff947c6b864bac886982c73b3027f\r\nfrBTC receive       tb1ptwu02r7yxyffs6440gdntnjhgv75syk20nwawp2khgas38ztks9qdn6ztw\r\nPredicted frBTC     9990 base units (advisory)\r\nPostage             546 sat retained by this wallet\r\nExcluded outputs    2\r\nApprove and sign? [Y/n] "]
+[0.485, "i", "y\r"]
+[0.485, "o", "y\r\npassword: "]
+[0.888, "i", "***********\r"]
+[0.888, "o", "\r\n"]
+[3.676, "o", "\r\n\u001b[32m✓\u001b[39m sent  r-79da4c875611f9785d92d658b1d3a5c0  5fcdb17faa334f5bd431dbda125f4057da070998bc587177edb36d559368dc7f\r\n"]

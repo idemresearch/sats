@@ -25,6 +25,7 @@ const HOME = 3; // Cmaj9 closes the video
 
 const score = (timeline: Timeline) => {
   const { marks } = timeline;
+  const when = (moment: { at: string; delay?: number }) => marks[moment.at] + (moment.delay ?? 0);
   const length = timeline.duration + 0.4;
   const random = rng(`${timeline.launch.id}:sound`);
   const pad = synth.stereo(length);
@@ -56,7 +57,8 @@ const score = (timeline: Timeline) => {
   // The groove: bass, kick, an arpeggio and quiet hats, from the first
   // command until the tagline.
   const grid = (t: number) => DOWNBEAT + Math.ceil((t - DOWNBEAT) / BEAT - 1e-6) * BEAT;
-  const from = grid(marks["balance.start"]);
+  const from = grid(when(timeline.launch.music.groove));
+  const hats = when(timeline.launch.music.hats);
   const until = marks["tagline.start"];
   const chordAt = (t: number) => Math.floor((t - DOWNBEAT) / (2 * BAR)) % CHORDS.length;
   for (let t = from; t < until - 0.01; t += BEAT) {
@@ -74,7 +76,7 @@ const score = (timeline: Timeline) => {
       const pluck = synth.pluck(note);
       synth.place(music, pluck, at, 0.06 * fadeIn, step % 2 ? 0.35 : -0.35);
       synth.place(room, pluck, at, 0.05 * fadeIn, step % 2 ? -0.3 : 0.3);
-      if (half === 0.5 && at >= marks["send.start"]) synth.place(music, synth.hat(random), at, 0.03, 0.2);
+      if (half === 0.5 && at >= hats) synth.place(music, synth.hat(random), at, 0.03, 0.2);
     }
   }
   // Into the end card.

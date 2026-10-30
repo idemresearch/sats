@@ -10,7 +10,7 @@ const FONT = 21;
 const middle = (value: string, keep: number) =>
   value.length <= keep * 2 + 1 ? value : `${value.slice(0, keep)}…${value.slice(-keep)}`;
 
-const Badge: React.FC<{ text: string; tone: string; p: number }> = ({ text, tone, p }) => (
+export const Badge: React.FC<{ text: string; tone: string; p: number }> = ({ text, tone, p }) => (
   <span
     style={{
       display: "inline-flex",
@@ -139,9 +139,9 @@ export const AgentCard: React.FC<{ timeline: Timeline; t: number }> = ({ timelin
           <span style={{ color: color.accent }}>→ </span>
           {request.tool}
         </div>
-        <Row label="id" value={request.arguments.id} p={step(agent.call, 1)} />
-        <Row label="amount" value={request.arguments.amount} p={step(agent.call, 2)} />
-        <Row label="address" value={middle(request.arguments.address, 14)} p={step(agent.call, 3)} />
+        <Row label="id" value={String(request.arguments.id)} p={step(agent.call, 1)} />
+        <Row label="amount" value={String(request.arguments.amount)} p={step(agent.call, 2)} />
+        <Row label="address" value={middle(String(request.arguments.address), 14)} p={step(agent.call, 3)} />
         <div style={{ height: 14 }} />
         <div style={{ display: "flex", alignItems: "center", gap: 14, opacity: result > 0 ? 1 : 0 }}>
           <span style={{ color: color.subtle, opacity: result }}>←</span>

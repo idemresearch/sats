@@ -7,7 +7,7 @@ the recordings by hand. The only edits are redactions: the disposable home
 directory is shown as `~`, and the password is recorded as asterisks.
 
 Writes asciicast v2 recordings (`asciinema play captures/<name>.cast`) and
-the agent's MCP exchange as JSON into video/captures/.
+the agent's MCP exchanges as JSON into video/captures/.
 
 Usage: python3 video/scripts/capture.py   (from anywhere; needs cargo)
 """
@@ -38,6 +38,13 @@ WALLET_PHRASE = " ".join(["abandon"] * 11 + ["about"])
 RECIPIENT_PHRASE = " ".join(["zoo"] * 11 + ["wrong"])
 # Confirmed outputs: two 546-sat carriers, then plain BTC for fees.
 FUNDING = [546, 546, 98_000, 60_000]
+# frBTC's public contract facts, as the Subfrost indexer reports them: the
+# fixtures crates/sats-cli/tests/mcp.rs wraps against.
+FRBTC_BYTECODE = {"32:0": "0x0061736d"}
+FRBTC_SIGNER = "0a241a22512030685674457c3eaa6d2904a1340ab80296625e8c7313f54c6ae7c51318f5860710e1fc02"
+FRBTC_WRAP = ("0a5e0a0d0a060a0208201200120308864e122b0a262f7365656e2fffdbcfe2faaab58dcfe6363d4cad67bf68cc"
+              "ae88d3e55e0a685a440e35a85f7412010112200a0c2f746f74616c737570706c7912107acbb22f01000000000000"
+              "00000000001093880f")
 
 
 def run(args, env, stdin=None, cwd=None):
@@ -148,8 +155,8 @@ def write_cast(name, recording, events, version, commit):
 class Mcp:
     """The agent's side: JSON-RPC over the served process's stdio."""
 
-    def __init__(self, sats, env, token):
-        self.proc = subprocess.Popen([sats, "agent", "serve", "claude"],
+    def __init__(self, sats, env, token, agent="claude"):
+        self.proc = subprocess.Popen([sats, "agent", "serve", agent],
                                      env=dict(env, SATS_AGENT_TOKEN=token),
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, text=True)
@@ -178,6 +185,74 @@ class Mcp:
         self.proc.wait(timeout=10)
 
 
+def funded_wallet(sats, cargo, sats_dir, env):
+    """The demo wallet: restored, funded, with alkanes on its two carriers."""
+    mockdata, setup = mock_wallet(sats, sats_dir, WALLET_PHRASE, env)
+    funded = run([cargo, "test", "-p", "sats-cli", "--locked", "--quiet", "--test", "video",
+                  "--", "--ignored", "--nocapture"],
+                 dict(os.environ, SATS_VIDEO_DIR=str(sats_dir),
+                      SATS_VIDEO_FUND=",".join(map(str, FUNDING))), cwd=ROOT)
+    outpoints = re.findall(r"^funded (\S+)$", funded, re.M)
+    assert len(outpoints) == len(FUNDING), funded
+    # The indexer's view: alkanes on the two carriers, nothing on the rest.
+    (mockdata / "alkanes-outpoints.json").write_text(json.dumps({
+        outpoints[0]: {"32:0": "250000", "2:0": "1200"},
+        outpoints[1]: {"32:0": "150000"},
+    }))
+    return mockdata, setup
+
+
+def approve(sats, request_id, terminal, home):
+    """The human's side of a request: review, confirm, unlock."""
+    recording = Recording(sats, ["agent", "approve", request_id], terminal)
+    recording.expect("Approve and sign? [Y/n]", "y")
+    recording.expect("password:", PASSWORD, secret=True)
+    return recording, recording.finish(home)
+
+
+def record_assistant(sats, cargo, work, env, bob, version, commit):
+    """The AI launch: a person asks an assistant, which files; the person approves.
+
+    The chat around these calls is the video's script; the calls, their
+    results, and the approvals are recorded here.
+    """
+    home = Path(work) / "assistant-home"
+    sats_dir = home / ".local" / "share" / "sats"
+    mockdata, setup = funded_wallet(sats, cargo, sats_dir, env)
+    (mockdata / "alkanes-bytecode.json").write_text(json.dumps(FRBTC_BYTECODE))
+    (mockdata / "alkanes-signer.hex").write_text(FRBTC_SIGNER)
+    (mockdata / "alkanes-wrap.hex").write_text(FRBTC_WRAP)
+    terminal = dict(env, SATS_DIR=str(sats_dir), HOME=str(home))
+
+    token = json.loads(run([sats, "--json", "agent", "grant", "assistant", "--for", "24h",
+                            "--max-tx", "20k"], setup))["token"]
+    mcp = Mcp(sats, terminal, token, agent="assistant")
+    calls = []
+
+    sent = mcp.tool("request_alkanes_send", {"id": "frbtc", "amount": "25000",
+                                             "address": bob, "idempotency_key": "send-bob"})
+    assert sent["result"]["status"] == "pending_approval", sent
+    calls.append(sent)
+    recording, events = approve(sats, sent["result"]["request_id"], terminal, home)
+    write_cast("assistant-approve-send", recording, events, version, commit)
+    calls.append(mcp.tool("check_request", {"request_id": sent["result"]["request_id"]}))
+    assert calls[-1]["result"]["status"] == "sent", calls[-1]
+
+    wrap = mcp.tool("request_wrap_frbtc", {"amount_sat": 10000, "idempotency_key": "wrap-10k"})
+    assert wrap["result"]["status"] == "pending_approval", wrap
+    calls.append(wrap)
+    recording, events = approve(sats, wrap["result"]["request_id"], terminal, home)
+    write_cast("assistant-approve-wrap", recording, events, version, commit)
+    calls.append(mcp.tool("check_request", {"request_id": wrap["result"]["request_id"]}))
+    assert calls[-1]["result"]["status"] == "sent", calls[-1]
+    mcp.close()
+
+    (OUT / "assistant-mcp.json").write_text(json.dumps({
+        "sats": version, "commit": commit, "agent": "assistant", "calls": calls,
+    }, indent=2, ensure_ascii=False) + "\n")
+    print("  assistant-mcp.json  " + ", ".join(call["tool"] for call in calls))
+
+
 def main():
     cargo = shutil.which("cargo") or sys.exit("capture needs cargo")
     # The debug build: release builds refuse the mock chain and read the
@@ -200,18 +275,7 @@ def main():
         alice = run([sats, "receive"], recipient_env).split()[0]
         bob = run([sats, "receive"], recipient_env).split()[0]
 
-        mockdata, setup = mock_wallet(sats, sats_dir, WALLET_PHRASE, env)
-        funded = run([cargo, "test", "-p", "sats-cli", "--locked", "--quiet", "--test", "video",
-                      "--", "--ignored", "--nocapture"],
-                     dict(os.environ, SATS_VIDEO_DIR=str(sats_dir),
-                          SATS_VIDEO_FUND=",".join(map(str, FUNDING))), cwd=ROOT)
-        outpoints = re.findall(r"^funded (\S+)$", funded, re.M)
-        assert len(outpoints) == len(FUNDING), funded
-        # The indexer's view: alkanes on the two carriers, nothing on the rest.
-        (mockdata / "alkanes-outpoints.json").write_text(json.dumps({
-            outpoints[0]: {"32:0": "250000", "2:0": "1200"},
-            outpoints[1]: {"32:0": "150000"},
-        }))
+        mockdata, setup = funded_wallet(sats, cargo, sats_dir, env)
 
         terminal = dict(env, SATS_DIR=str(sats_dir))
         print(f"sats {version} ({commit}), {COLUMNS}x{ROWS}:")
@@ -234,10 +298,8 @@ def main():
         assert filed["result"]["status"] == "pending_approval", filed
         request_id = filed["result"]["request_id"]
 
-        approve = Recording(sats, ["agent", "approve", request_id], terminal)
-        approve.expect("Approve and sign? [Y/n]", "y")
-        approve.expect("password:", PASSWORD, secret=True)
-        write_cast("agent-approve", approve, approve.finish(home), version, commit)
+        recording, events = approve(sats, request_id, terminal, home)
+        write_cast("agent-approve", recording, events, version, commit)
 
         checked = mcp.tool("check_request", {"request_id": request_id})
         assert checked["result"]["status"] == "sent", checked
@@ -247,6 +309,8 @@ def main():
             "calls": [filed, checked],
         }, indent=2, ensure_ascii=False) + "\n")
         print("  agent-mcp.json  request_alkanes_send, check_request")
+
+        record_assistant(sats, cargo, work, env, bob, version, commit)
 
 
 if __name__ == "__main__":

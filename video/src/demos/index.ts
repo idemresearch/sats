@@ -1,4 +1,5 @@
 import { alkanes } from "./alkanes";
+import { assistant } from "./assistant";
 
 /** Every launch the project renders, newest first. */
-export const launches = [alkanes];
+export const launches = [assistant, alkanes];

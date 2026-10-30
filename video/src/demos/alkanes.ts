@@ -143,6 +143,7 @@ export const alkanes: Launch = {
       },
     ],
   },
+  music: { groove: { at: "balance.start" }, hats: { at: "send.start" } },
   tagline: { lines: ["AI asks.", "You approve.", "Keys stay yours."], hold: 2.35 },
   end: {
     url: "sats.sh",

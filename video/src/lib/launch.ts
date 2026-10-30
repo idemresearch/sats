@@ -17,6 +17,9 @@ export type Target =
   // The agent's card; `result` frames it grown to show the outcome.
   | { kind: "card"; result?: boolean; zoom?: number }
   | { kind: "stage"; zoom?: number }
+  // The chat window, or messages `from` through `to` as they sit once
+  // `to` has arrived; `input` adds the input box under them.
+  | { kind: "chat"; from?: string; to?: string; input?: boolean; zoom?: number }
   | {
       kind: "lines";
       command: string;
@@ -65,7 +68,19 @@ export type AgentBeat = {
   update: At;
 };
 
-export type Step = Command | AgentBeat;
+/**
+ * A turn in the assistant's chat. `user` is typed into the input box and
+ * sent; `tool` shows `call` from the chat's MCP recording; `reply` streams
+ * in. A reply's text and command may name a recorded value as
+ * `{call.field}`, or `{call.field|short}` to keep only its ends; `copiedBy`
+ * is the command that pastes it.
+ */
+export type ChatTurn =
+  | { id: string; chat: "user"; text: string; hold?: number }
+  | { id: string; chat: "tool"; call: number; hold?: number }
+  | { id: string; chat: "reply"; text: string; command?: string; copiedBy?: string; hold?: number };
+
+export type Step = Command | AgentBeat | ChatTurn;
 
 export type Launch = {
   id: string;
@@ -81,8 +96,13 @@ export type Launch = {
     highlights: Highlight[];
     captions: Caption[];
   };
+  /** An assistant beside the terminal, its MCP exchange recorded in captures/. */
+  chat?: { capture: string; name: string; label: string; placeholder: string };
+  /** Where the soundtrack's groove starts, and its hats join. */
+  music: { groove: At; hats: At };
   tagline: { lines: string[]; hold: number };
   end: { url: string; install: string; footer: string; hold: number };
 };
 
-export const isAgent = (step: Step): step is AgentBeat => step.id === "agent";
+export const isChat = (step: Step): step is ChatTurn => "chat" in step;
+export const isAgent = (step: Step): step is AgentBeat => !isChat(step) && step.id === "agent";

@@ -5,11 +5,12 @@ import { cameraAt, framing } from "../lib/camera";
 import type { Timeline } from "../lib/timeline";
 import { color, ease } from "../theme";
 import { AgentCard } from "./AgentCard";
+import { Chat } from "./Chat";
 import { Terminal } from "./Terminal";
 
 type Props = { timeline: Timeline; t: number };
 
-/** The world the camera films: the terminal window, and the agent's card beside it. */
+/** The world the camera films: the terminal window, and the agent's card or chat beside it. */
 export const Stage: React.FC<Props> = ({ timeline, t }) => {
   const { width, height } = useVideoConfig();
   const [start, end] = timeline.acts.terminal;
@@ -55,6 +56,7 @@ export const Stage: React.FC<Props> = ({ timeline, t }) => {
           <Terminal timeline={timeline} t={t} />
         </div>
         <AgentCard timeline={timeline} t={t} />
+        <Chat timeline={timeline} t={t} rise={rise} />
       </div>
     </AbsoluteFill>
   );

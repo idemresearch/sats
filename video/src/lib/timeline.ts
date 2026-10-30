@@ -5,13 +5,24 @@
 
 import type { Cast } from "./cast";
 import {
+  CHAT_HEADER,
+  CHAT_INPUT,
+  type ChatItem,
+  ITEM_GAP,
+  chatLayout,
+  height,
+  middle,
+} from "./chat";
+import {
   type AgentBeat,
   type At,
+  type ChatTurn,
   type Command,
   type Launch,
   type LineRef,
   type Target,
   isAgent,
+  isChat,
 } from "./launch";
 import { type Layout, type Rect, layout, lineRect } from "./layout";
 import { rng } from "./random";
@@ -19,7 +30,7 @@ import { Screen } from "./screen";
 
 export type McpCall = {
   tool: string;
-  arguments: Record<string, string>;
+  arguments: Record<string, string | number>;
   result: Record<string, unknown>;
 };
 
@@ -74,6 +85,7 @@ export type Timeline = {
     result: number;
     update: number;
   };
+  chat: null | { capture: AgentCapture; items: ChatItem[] };
   sounds: Sound[];
 };
 
@@ -102,6 +114,10 @@ export const buildTimeline = (launch: Launch, captures: Captures): Timeline => {
   const screen = new Screen(terminal.columns);
   let agent: Timeline["agent"] = null;
   let agentStep: AgentBeat | null = null;
+  const chatCapture = launch.chat ? captures.agents[launch.chat.capture] : undefined;
+  if (launch.chat && !chatCapture) throw new Error(`no recording ${launch.chat.capture}.json`);
+  const chatItems: ChatItem[] = [];
+  const copies: { item: ChatItem & { kind: "reply" }; by: string }[] = [];
 
   const mark = (name: string, t: number) => {
     if (name in marks) throw new Error(`mark ${name} is set twice`);
@@ -245,6 +261,69 @@ export const buildTimeline = (launch: Launch, captures: Captures): Timeline => {
     return t + step.hold;
   };
 
+  // A recorded value in a reply: `{1.txid}`, or `{1.txid|short}` for its ends.
+  const fill = (text: string) =>
+    text.replace(/\{(\d+)\.(\w+)(\|short)?\}/g, (_, call: string, field: string, short?: string) => {
+      const value = chatCapture?.calls[Number(call)]?.result[field];
+      if (typeof value !== "string") throw new Error(`no recorded value ${call}.${field}`);
+      return short ? middle(value, 4) : value;
+    });
+
+  const chatTurn = (step: ChatTurn, start: number): number => {
+    if (!chatCapture) throw new Error(`${step.id}: this launch has no chat`);
+    mark(`${step.id}.start`, start);
+    if (step.chat === "user") {
+      let t = start + 0.25;
+      const keys: number[] = [];
+      for (const ch of step.text) {
+        keys.push(t);
+        sound(t, ch === " " ? "space" : "key");
+        t += typingGap(ch);
+      }
+      mark(`${step.id}.typed`, t);
+      t += 0.22;
+      sound(t, "enter");
+      mark(`${step.id}.sent`, t);
+      chatItems.push({ kind: "user", id: step.id, t, text: step.text, keys });
+      return t + (step.hold ?? 0.45);
+    }
+    if (step.chat === "tool") {
+      const call = chatCapture.calls[step.call];
+      if (!call) throw new Error(`${step.id}: no recorded call ${step.call}`);
+      // A status check shows only its answer; a request, what the agent asked for.
+      const rows: [string, string][] =
+        call.tool === "check_request"
+          ? []
+          : Object.entries(call.arguments)
+              .filter(([key]) => key !== "idempotency_key")
+              .map(([key, value]) => [key, key === "address" ? middle(String(value), 12) : String(value)]);
+      sound(start, "tick");
+      const result = start + (rows.length ? 0.75 + rows.length * 0.08 : 0.5);
+      sound(result, "pop");
+      mark(`${step.id}.result`, result);
+      chatItems.push({ kind: "tool", id: step.id, t: start, result, call, rows });
+      return result + (step.hold ?? 0.4);
+    }
+    const text = fill(step.text);
+    const words: number[] = [];
+    let t = start;
+    for (const word of text.split(/[ \n]/)) {
+      words.push(t);
+      t += 0.04 + Math.min(word.length, 10) * 0.004;
+    }
+    const item: ChatItem & { kind: "reply" } = { kind: "reply", id: step.id, t: start, text, words };
+    if (step.command) {
+      t += 0.12;
+      item.command = { text: fill(step.command), t };
+      sound(t, "tick");
+      t += 0.3;
+      if (step.copiedBy) copies.push({ item, by: step.copiedBy });
+    }
+    mark(`${step.id}.done`, t);
+    chatItems.push(item);
+    return t + (step.hold ?? 0.5);
+  };
+
   // Title, then the terminal rising as the title leaves.
   mark("title.start", 0);
   sound(0.3, "logo");
@@ -257,7 +336,9 @@ export const buildTimeline = (launch: Launch, captures: Captures): Timeline => {
   let t = terminalStart + WINDOW_IN;
   for (const step of terminal.steps) {
     const first = commands.length === 0;
-    if (isAgent(step)) {
+    if (isChat(step)) {
+      t = chatTurn(step, t);
+    } else if (isAgent(step)) {
       const capture = captures.agents[step.capture];
       if (!capture) throw new Error(`no recording ${step.capture}.json`);
       mark("agent.enter", t);
@@ -285,6 +366,10 @@ export const buildTimeline = (launch: Launch, captures: Captures): Timeline => {
     agent.update = at(agentStep.update);
     sound(agent.update, "pop");
   }
+  // The person copies a command from the chat until they paste it.
+  for (const { item, by } of copies) {
+    if (item.command) item.command.copied = [at({ at: `${by}.start` }), at({ at: `${by}.enter` })];
+  }
 
   const taglineStart = terminalEnd;
   mark("tagline.start", taglineStart);
@@ -295,7 +380,7 @@ export const buildTimeline = (launch: Launch, captures: Captures): Timeline => {
   const duration = endStart + launch.end.hold;
   mark("end", duration);
 
-  const geometry = layout(terminal.columns, terminal.rows);
+  const geometry = layout(terminal.columns, terminal.rows, Boolean(launch.chat));
   const lines = (id: string) => {
     const found = commands.find((c) => c.id === id);
     if (!found) throw new Error(`no command ${id}`);
@@ -321,7 +406,31 @@ export const buildTimeline = (launch: Launch, captures: Captures): Timeline => {
     }
     return start === Infinity ? [0, 1] : [start, end];
   };
-  const rect = (target: Target): { rect: Rect; zoom?: number; crop: boolean } => {
+  const chatRect = (target: Target & { kind: "chat" }, t: number): Rect => {
+    const chat = geometry.chat;
+    if (!chat) throw new Error("a chat shot in a launch without a chat");
+    const bottom = chat.y + chat.h;
+    if (!target.from) {
+      return target.input ? { x: chat.x, y: bottom - CHAT_INPUT - 150, w: chat.w, h: CHAT_INPUT + 150 } : chat;
+    }
+    const index = (id: string) => {
+      const i = chatItems.findIndex((item) => item.id === id);
+      if (i < 0) throw new Error(`no chat message ${id}`);
+      return i;
+    };
+    const first = index(target.from);
+    const last = index(target.to ?? target.from);
+    // Framed as the messages sit once the last of them has scrolled in.
+    const { tops, offset } = chatLayout(chatItems, chat.h, Math.max(t, chatItems[last].t) + 0.6);
+    const area = chat.y + CHAT_HEADER;
+    const top = Math.max(area, area + tops[first] - offset - ITEM_GAP);
+    const end = target.input
+      ? bottom
+      : Math.min(bottom - CHAT_INPUT, area + tops[last] - offset + height(chatItems[last]) + ITEM_GAP);
+    return { x: chat.x, y: top, w: chat.w, h: end - top };
+  };
+  const rect = (target: Target, t: number): { rect: Rect; zoom?: number; crop: boolean } => {
+    if (target.kind === "chat") return { rect: chatRect(target, t), zoom: target.zoom, crop: false };
     if (target.kind === "window") return { rect: geometry.window, zoom: target.zoom, crop: false };
     if (target.kind === "card") {
       return { rect: target.result ? geometry.cardResult : geometry.card, zoom: target.zoom, crop: false };
@@ -335,7 +444,7 @@ export const buildTimeline = (launch: Launch, captures: Captures): Timeline => {
   };
 
   const shots = terminal.shots
-    .map((shot) => ({ t: at(shot), move: shot.move ?? 0.8, ...rect(shot.target) }))
+    .map((shot) => ({ t: at(shot), move: shot.move ?? 0.8, ...rect(shot.target, at(shot)) }))
     .sort((a, b) => a.t - b.t);
   const highlights = terminal.highlights.map((h) => {
     const line = resolve(h.command, h.line);
@@ -377,6 +486,7 @@ export const buildTimeline = (launch: Launch, captures: Captures): Timeline => {
     highlights,
     captions,
     agent,
+    chat: chatCapture ? { capture: chatCapture, items: chatItems } : null,
     sounds,
   };
 };

@@ -121,8 +121,9 @@ sh scripts/build-og.sh
 
 ## Launch videos
 
-`video/` renders release videos with Remotion from terminal sessions
-recorded from the real binary; see [video/README.md](../video/README.md).
+`video/` renders release videos with Remotion from terminal sessions and
+MCP calls recorded from the real binary; see
+[video/README.md](../video/README.md).
 `npm run capture` there re-records them, funding a disposable wallet
 through the ignored test `crates/sats-cli/tests/video.rs`.
 

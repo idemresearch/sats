@@ -1,0 +1,7 @@
+{"version": 2, "width": 110, "height": 24, "timestamp": 1793337575, "command": "sats agent approve r-04bb3fc9faf13254a64cea8073c521f5", "title": "sats 0.0.4 (05e6605)", "env": {"TERM": "xterm-256color", "SHELL": "/bin/sh"}}
+[0.062, "o", "syncing…\r        \rWallet           ~/.local/share/sats/signet/wallet.sqlite\r\nNetwork          signet\r\nApprove          r-04bb3fc9faf13254a64cea8073c521f5\r\nAgent            assistant\r\nRecipient        tb1pzgnyrr8eckt704cfnfn5mzvpeux3cfq87xngf85n2rvma2fu659qjfme75\r\nAmount           546 sat\r\nFee              566 sat\r\nTotal            1,112 sat\r\nOperation        Asset transfer\r\nAsset            alkanes:32:0 (frBTC)\r\nAsset amount     25000 base units\r\nBTC postage      546 sat to recipient (included in Amount)\r\nReturned assets  2:0: 1200 base units, 32:0: 225000 base units\r\nApprove and sign? [Y/n] "]
+[0.477, "i", "y\r"]
+[0.478, "o", "y\r\npassword: "]
+[0.878, "i", "***********\r"]
+[0.879, "o", "\r\n"]
+[3.906, "o", "\r\n\u001b[32m✓\u001b[39m sent  r-04bb3fc9faf13254a64cea8073c521f5  f1294eec0de9f930321081d8d13183bc180796a41ef77f96393d8e5da2105e8f\r\n"]
