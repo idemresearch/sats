@@ -1,7 +1,8 @@
 //! Asset names. An alkane's name and symbol are whatever its contract
 //! chose, as the indexer reports them: labels, never identity. The id is
-//! the asset. The one name sats knows independently is frBTC's, at the
-//! fixed id the wrap flow already uses.
+//! the asset. sats knows a few names independently, each pinned here to
+//! the one id that has it on every network sats supports; those names may
+//! stand in for the id where a person or agent types one, and nowhere else.
 
 use crate::id::AlkaneId;
 use crate::wrap::FRBTC;
@@ -13,10 +14,37 @@ pub struct KnownAsset {
     pub id: AlkaneId,
 }
 
+/// Adding an asset here is a reviewed change: its name then selects its
+/// id in every command and request.
 const KNOWN: &[KnownAsset] = &[KnownAsset {
     name: "frBTC",
     id: FRBTC,
 }];
+
+/// The known asset at `id`, if any.
+pub fn known(id: AlkaneId) -> Option<KnownAsset> {
+    KNOWN.iter().copied().find(|k| k.id == id)
+}
+
+/// An asset as typed: a decimal `BLOCK:TX` id, or a known name in any
+/// case. Names resolve here, before anything is recorded, so requests,
+/// reviews, and receipts carry only ids.
+pub fn resolve(input: &str) -> Result<AlkaneId, String> {
+    if input.contains(':') {
+        return input.parse();
+    }
+    KNOWN
+        .iter()
+        .find(|k| k.name.eq_ignore_ascii_case(input))
+        .map(|k| k.id)
+        .ok_or_else(|| {
+            let names: Vec<String> = KNOWN.iter().map(|k| k.name.to_lowercase()).collect();
+            format!(
+                "unknown asset {input:?}: give its BLOCK:TX id, e.g. 2:1 (names sats knows: {})",
+                names.join(", ")
+            )
+        })
+}
 
 /// The known asset whose name the label of `id` claims, when `id` isn't
 /// that asset. Case, spacing, and punctuation don't hide a claim:
@@ -42,6 +70,32 @@ mod tests {
 
     fn id(s: &str) -> AlkaneId {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn names_resolve_to_their_ids_in_any_case() {
+        for name in ["frbtc", "frBTC", "FRBTC"] {
+            assert_eq!(resolve(name), Ok(FRBTC), "{name}");
+        }
+        assert_eq!(known(FRBTC).map(|k| k.name), Some("frBTC"));
+        assert_eq!(known(id("2:0")), None);
+    }
+
+    #[test]
+    fn ids_parse_as_before() {
+        assert_eq!(resolve("32:0"), Ok(FRBTC));
+        assert_eq!(resolve("032:00"), Ok(FRBTC));
+        assert_eq!(resolve("2:78528"), Ok(id("2:78528")));
+        assert!(resolve("2:x").unwrap_err().contains("invalid alkane id"));
+    }
+
+    #[test]
+    fn unknown_names_ask_for_the_id() {
+        for input in ["diesel", "frbtc ", "fr-btc", "", "wrapped frbtc"] {
+            let err = resolve(input).unwrap_err();
+            assert!(err.contains("give its BLOCK:TX id"), "{input:?}: {err}");
+            assert!(err.contains("frbtc"), "{err}");
+        }
     }
 
     #[test]

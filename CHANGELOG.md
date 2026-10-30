@@ -3,6 +3,17 @@
 Notable changes to sats, newest first. Versions follow
 `workspace.package.version` in `Cargo.toml`.
 
+## Unreleased
+
+### Alkanes
+
+- `frbtc` names `32:0`, in any case, wherever an Alkanes id is accepted:
+  `sats alkanes send`, `inspect`, and `simulate`, and MCP
+  `request_alkanes_send`, `alkanes_inspect`, and `alkanes_simulate`. The
+  name resolves before anything is recorded; requests, receipts, and JSON
+  carry `32:0`. frBTC shows by that name in `balance` and in the send and
+  approval reviews. Provider names still never select an asset.
+
 ## 0.0.4 (2026-10-28)
 
 0.0.4 adds Alkanes and narrows what sats will sign. Agents can propose

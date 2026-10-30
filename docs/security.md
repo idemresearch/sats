@@ -460,10 +460,12 @@ not prove minting: confirmation and indexing must be observed separately.
 The core request is a generic `AssetTransfer` with a protocol-qualified asset
 id and exact positive u128 quantity serialized as a decimal string.
 The native executor currently accepts only canonical Alkanes transfers;
-unknown protocols fail before provider access. Names and symbols never
-select assets or grant authority. Where the CLI shows them, they are marked
-as the indexer's unverified labels, and a label claiming frBTC at any id but
-`32:0` is flagged. Request format 4 prevents older binaries
+unknown protocols fail before provider access. Provider names and symbols
+never select assets or grant authority. Where the CLI shows them, they are
+marked as the indexer's unverified labels, and a label claiming frBTC at any
+id but `32:0` is flagged. The only name that selects an asset is one pinned
+in `sats-alkanes::names`, today `frbtc` for `32:0`; it resolves before a
+request is recorded, so records and digests carry only ids. Request format 4 prevents older binaries
 from interpreting an asset transfer as an ordinary BTC payment.
 
 No protocol grant flags are added. The existing grant authorizes proposals;

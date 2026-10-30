@@ -97,7 +97,13 @@ pub fn run(
     }
     if let Some(transfer) = staged.asset_transfer_review() {
         rows.push(("Operation", "Asset transfer".into()));
-        rows.push(("Asset", format!("alkanes:{}", transfer.asset)));
+        rows.push((
+            "Asset",
+            format!(
+                "alkanes:{}",
+                crate::commands::alkanes::asset(transfer.asset)
+            ),
+        ));
         rows.push(("Asset amount", format!("{} base units", transfer.amount)));
         rows.push((
             "BTC postage",
