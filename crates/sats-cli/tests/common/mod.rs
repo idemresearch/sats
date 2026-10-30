@@ -65,8 +65,12 @@ pub fn write_mock_provider(dir: &TempDir) -> std::path::PathBuf {
 /// Seed the CLI's persisted signet wallet with confirmed UTXOs. The mock
 /// provider's sync is a no-op, so these funds survive CLI syncs.
 pub fn fund_wallet(dir: &TempDir, values_sat: &[u64]) -> Vec<OutPoint> {
-    let db = dir.path().join("signet/wallet.sqlite");
-    let mut conn = rusqlite::Connection::open(&db).unwrap();
+    fund_wallet_db(&dir.path().join("signet/wallet.sqlite"), values_sat)
+}
+
+/// [`fund_wallet`] for a signet wallet database at any path.
+pub fn fund_wallet_db(db: &std::path::Path, values_sat: &[u64]) -> Vec<OutPoint> {
+    let mut conn = rusqlite::Connection::open(db).unwrap();
     let mut wallet = bdk_wallet::Wallet::load()
         .check_network(Network::Signet)
         .load_wallet(&mut conn)

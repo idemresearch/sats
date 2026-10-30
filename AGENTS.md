@@ -107,6 +107,7 @@ advice for exactly that file.
 | `crates/sats-alkanes/src/` | Pure Alkanes protocol composition: ids, cellpacks, protostones and their decoding, transfers and their check, inspection, balance and simulation views, known asset names |
 | `crates/sats-playground/src/lib.rs` | Browser playground: wasm bindings over sats-core and the simulated chain |
 | `website/` | Project website, including the interactive playground terminal |
+| `video/` | Launch videos, rendered from terminal sessions recorded from the real binary |
 
 `main.rs` is a composition root. Do not put feature logic there.
 
