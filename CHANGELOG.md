@@ -3,17 +3,6 @@
 Notable changes to sats, newest first. Versions follow
 `workspace.package.version` in `Cargo.toml`.
 
-## Unreleased
-
-### Alkanes
-
-- `frbtc` names `32:0`, in any case, wherever an Alkanes id is accepted:
-  `sats alkanes send`, `inspect`, and `simulate`, and MCP
-  `request_alkanes_send`, `alkanes_inspect`, and `alkanes_simulate`. The
-  name resolves before anything is recorded; requests, receipts, and JSON
-  carry `32:0`. frBTC shows by that name in `balance` and in the send and
-  approval reviews. Provider names still never select an asset.
-
 ## 0.0.4 (2026-10-28)
 
 0.0.4 adds Alkanes and narrows what sats will sign. Agents can propose
@@ -29,6 +18,13 @@ runs on test networks only.
   `send`, and `frbtc info`, with no separate Cargo feature flags. They need
   Subfrost as the network's provider. `simulate` is advisory and never
   prepares a spend.
+- `frbtc` names `32:0`, in any case, wherever an Alkanes id is accepted:
+  `sats alkanes send frbtc 40000 tb1p...` works without the id, as do
+  `inspect`, `simulate`, and MCP `request_alkanes_send`, `alkanes_inspect`,
+  and `alkanes_simulate`. The name resolves before anything is recorded;
+  requests, receipts, and JSON carry `32:0`. frBTC shows by that name in
+  `balance` and in the send and approval reviews. Provider names never
+  select an asset.
 - `sats alkanes send` transfers an exact amount of one alkane. It spends
   only indexed outputs holding the asset, returns every other alkane to the
   wallet, and shows its review before the password.

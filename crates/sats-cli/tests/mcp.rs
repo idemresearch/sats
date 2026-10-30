@@ -605,7 +605,7 @@ fn alkanes_send_request_is_local_keyless_human_approved_and_observed() {
     let review = String::from_utf8_lossy(&approval.stderr);
     for field in [
         "Asset transfer",
-        "alkanes:32:0",
+        "alkanes:32:0 (frBTC)",
         "1000 base units",
         "32:0: 4000",
         "2:0: 50",
