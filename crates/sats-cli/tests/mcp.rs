@@ -148,7 +148,8 @@ fn alkanes_reads_validate_inputs_and_fail_closed_on_provider_or_sync_failure() {
     // A bad provider cannot mask malformed arguments or turn them into I/O.
     std::fs::write(&config_path, "network = \"signet\"\n").unwrap();
     for id in [
-        "frBTC",
+        // Not a name sats knows: provider names never select contracts.
+        "DIESEL",
         "32:-1",
         "340282366920938463463374607431768211456:0",
     ] {
@@ -604,7 +605,7 @@ fn alkanes_send_request_is_local_keyless_human_approved_and_observed() {
     let review = String::from_utf8_lossy(&approval.stderr);
     for field in [
         "Asset transfer",
-        "alkanes:32:0",
+        "alkanes:32:0 (frBTC)",
         "1000 base units",
         "32:0: 4000",
         "2:0: 50",
@@ -635,6 +636,26 @@ fn alkanes_send_request_is_local_keyless_human_approved_and_observed() {
     );
 }
 
+/// A name sats knows stands in for its id, and the request records the id.
+#[test]
+fn alkanes_send_requests_record_a_known_name_as_its_id() {
+    let dir = TempDir::new().unwrap();
+    let fx = funded_setup(&dir, &[], &[100_000]);
+    let mut mcp = McpSession::start(&dir, "claude", &fx.token);
+    handshake(&mut mcp);
+    let args = |id: &str| serde_json::json!({"id":id,"amount":"1000","address":ADDRESS,"idempotency_key":"named"});
+    let by_name = mcp.call_tool(2, "request_alkanes_send", args("frbtc"));
+    assert_eq!(by_name["status"], "pending_approval", "{by_name}");
+    assert_eq!(
+        by_name["asset_transfer"],
+        serde_json::json!({"protocol":"alkanes","id":"32:0","amount":"1000"})
+    );
+    // The same proposal by id is the same request, not a conflict.
+    let by_id = mcp.call_tool(3, "request_alkanes_send", args("32:0"));
+    assert_eq!(by_id["request_id"], by_name["request_id"], "{by_id}");
+    assert_eq!(by_id["status"], "pending_approval");
+}
+
 #[test]
 fn alkanes_send_requests_preserve_u128_reject_extra_authority_and_obey_observe() {
     let dir = TempDir::new().unwrap();
@@ -656,7 +677,7 @@ fn alkanes_send_requests_preserve_u128_reject_extra_authority_and_obey_observe()
             .success()
     );
     for (field, code, value) in [
-        ("id", "invalid_alkane_id", "frBTC"),
+        ("id", "invalid_alkane_id", "DIESEL"),
         ("amount", "invalid_asset_amount", "0"),
         ("amount", "invalid_asset_amount", "-1"),
         (

@@ -1192,8 +1192,9 @@ mod tests {
                 "invalid_asset_amount"
             );
         }
+        // A provider-style name sats doesn't know never selects an asset.
         assert_eq!(
-            asset_request(&fx, &token, "asset", "frBTC", "1")
+            asset_request(&fx, &token, "asset", "DIESEL", "1")
                 .unwrap_err()
                 .code(),
             "invalid_alkane_id"

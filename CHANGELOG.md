@@ -18,11 +18,22 @@ runs on test networks only.
   `send`, and `frbtc info`, with no separate Cargo feature flags. They need
   Subfrost as the network's provider. `simulate` is advisory and never
   prepares a spend.
+- `frbtc` names `32:0`, in any case, wherever an Alkanes id is accepted:
+  `sats alkanes send frbtc 40000 tb1p...` works without the id, as do
+  `inspect`, `simulate`, and MCP `request_alkanes_send`, `alkanes_inspect`,
+  and `alkanes_simulate`. The name resolves before anything is recorded;
+  requests, receipts, and JSON carry `32:0`. frBTC shows by that name in
+  `balance` and in the send and approval reviews. Provider names never
+  select an asset.
 - `sats alkanes send` transfers an exact amount of one alkane. It spends
   only indexed outputs holding the asset, returns every other alkane to the
   wallet, and shows its review before the password.
 - With an Alkanes provider, plain BTC sends exclude asset-bearing and
   unindexed outputs, and stop if the indexer is unavailable.
+- Asset names and symbols show as the indexer's unverified labels; the id
+  is the asset. An asset whose label claims frBTC at any id but `32:0` is
+  flagged in `sats alkanes balance` and in the `send` review, where Enter
+  alone cancels.
 - MCP `request_alkanes_send` files an exact transfer under the agent's
   existing grant. Approval reviews the asset quantity and what stays in the
   wallet separately from BTC postage and fee, and rechecks indexed balances

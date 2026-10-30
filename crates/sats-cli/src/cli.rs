@@ -191,13 +191,13 @@ pub enum AlkanesCommand {
     Balance,
     /// Fetch a contract's bytecode and show its code hash
     Inspect {
-        /// Alkane id (e.g. 2:1)
+        /// Alkane id (e.g. 2:1), or a name sats knows: frbtc
         #[arg(value_name = "BLOCK:TX")]
         id: String,
     },
     /// Simulate a contract call and show the interpreted result
     Simulate {
-        /// Alkane id (e.g. 2:1)
+        /// Alkane id (e.g. 2:1), or a name sats knows: frbtc
         #[arg(value_name = "BLOCK:TX")]
         id: String,
         /// Calldata words (the first is conventionally the opcode)
@@ -206,8 +206,8 @@ pub enum AlkanesCommand {
     },
     /// Send an exact amount of one alkane: review, confirm, sign, broadcast
     Send {
-        /// Alkane id (e.g. 32:0)
-        #[arg(value_name = "BLOCK:TX")]
+        /// Alkane id (e.g. 32:0), or a name sats knows: frbtc
+        #[arg(value_name = "ASSET")]
         id: String,
         /// Amount in the asset's base units
         #[arg(value_name = "AMOUNT")]
