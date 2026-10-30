@@ -1,12 +1,12 @@
 {
   "sats": "0.0.4",
-  "commit": "274a9a1",
+  "commit": "a6a81b0",
   "agent": "claude",
   "calls": [
     {
       "tool": "request_alkanes_send",
       "arguments": {
-        "id": "32:0",
+        "id": "frbtc",
         "amount": "25000",
         "address": "tb1pzgnyrr8eckt704cfnfn5mzvpeux3cfq87xngf85n2rvma2fu659qjfme75",
         "idempotency_key": "pay-bob"
@@ -18,17 +18,17 @@
           "id": "32:0",
           "protocol": "alkanes"
         },
-        "message": "filed for human review — the human approves with: sats agent approve r-f1fb378c8a748bd4c4b5c9e06060523a; poll check_request to observe the result, and do not file it again",
+        "message": "filed for human review — the human approves with: sats agent approve r-d6dd28fc7272d1771be91ced126f25de; poll check_request to observe the result, and do not file it again",
         "operation": "asset_transfer",
         "recipient": "tb1pzgnyrr8eckt704cfnfn5mzvpeux3cfq87xngf85n2rvma2fu659qjfme75",
-        "request_id": "r-f1fb378c8a748bd4c4b5c9e06060523a",
+        "request_id": "r-d6dd28fc7272d1771be91ced126f25de",
         "status": "pending_approval"
       }
     },
     {
       "tool": "check_request",
       "arguments": {
-        "request_id": "r-f1fb378c8a748bd4c4b5c9e06060523a"
+        "request_id": "r-d6dd28fc7272d1771be91ced126f25de"
       },
       "result": {
         "amount_sat": 546,
@@ -41,9 +41,9 @@
         "message": "asset transfer broadcast; receipt requires confirmation and indexing; do not file it again",
         "operation": "asset_transfer",
         "recipient": "tb1pzgnyrr8eckt704cfnfn5mzvpeux3cfq87xngf85n2rvma2fu659qjfme75",
-        "request_id": "r-f1fb378c8a748bd4c4b5c9e06060523a",
+        "request_id": "r-d6dd28fc7272d1771be91ced126f25de",
         "status": "sent",
-        "txid": "9352acf9572c499feb4af6e38a1de2717a65d629e85057b00c6236a1d6273131"
+        "txid": "b7fc178e202c5a13cd382c47d53b9e13c2f8d4a7c39b3bfa0ace1eca4437d3aa"
       }
     }
   ]

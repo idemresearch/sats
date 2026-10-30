@@ -12,28 +12,28 @@ export const alkanes: Launch = {
     title: "sats",
     status: "signet",
     steps: [
-      { id: "balance", capture: "alkanes-balance", type: ["sats alkanes balance"], hold: 1.6 },
+      { id: "balance", capture: "alkanes-balance", type: ["sats alkanes balance"], hold: 1.45 },
       {
         id: "send",
         capture: "alkanes-send",
-        type: ["sats alkanes send 32:0 40000 ", { paste: true }],
-        think: [2.25, 0.35],
+        type: ["sats alkanes send frbtc 40000 ", { paste: true }],
+        think: [2.1, 0.35],
         wait: 0.5,
         hold: 0.85,
       },
       {
         id: "agent",
         capture: "agent-mcp",
-        hold: 2.4,
+        hold: 2.25,
         update: { at: "approve.done", delay: 0.55 },
       },
       {
         id: "approve",
         capture: "agent-approve",
         type: ["sats agent approve ", { paste: true }],
-        think: [1.85, 0.3],
+        think: [1.75, 0.3],
         wait: 0.5,
-        hold: 1.8,
+        hold: 1.65,
       },
     ],
     shots: [
@@ -64,13 +64,7 @@ export const alkanes: Launch = {
       },
       {
         at: "send.output",
-        delay: 0.1,
-        move: 0.8,
-        target: { kind: "lines", command: "send", from: "Wallet", to: "Sign?" },
-      },
-      {
-        at: "send.output",
-        delay: 0.8,
+        delay: 0.15,
         move: 0.9,
         target: { kind: "lines", command: "send", from: "Send", to: "Kept", cols: [0, 56], zoom: 2.2 },
       },
@@ -96,14 +90,8 @@ export const alkanes: Launch = {
       {
         at: "approve.output",
         delay: 0.1,
-        move: 0.8,
-        target: { kind: "lines", command: "approve", from: "Approve", to: "Recipient", cols: [0, 52], zoom: 2.0 },
-      },
-      {
-        at: "approve.output",
-        delay: 0.85,
-        move: 0.8,
-        target: { kind: "lines", command: "approve", from: "Operation", to: "Returned assets", cols: [0, 48], zoom: 2.0 },
+        move: 0.9,
+        target: { kind: "lines", command: "approve", from: "Agent", to: "Returned assets", cols: [0, 48], zoom: 2.0 },
       },
       {
         at: "approve.input.0",
@@ -120,12 +108,13 @@ export const alkanes: Launch = {
       { at: "approve.done", delay: 0.3, move: 1.0, target: { kind: "card", result: true } },
     ],
     highlights: [
-      { at: "balance.output", delay: 0.7, command: "balance", line: "32:0", hold: 1.15, note: "frBTC" },
-      { at: "send.output", delay: 1.05, command: "send", line: "Send", hold: 0.7 },
-      { at: "send.output", delay: 1.7, command: "send", line: "Kept", hold: 1.05, note: "stays with you" },
-      { at: "approve.output", delay: 0.35, command: "approve", line: "Agent", hold: 0.6 },
-      { at: "approve.output", delay: 1.15, command: "approve", line: "Asset amount", hold: 0.65 },
-      { at: "approve.output", delay: 1.7, command: "approve", line: "Returned assets", hold: 0.7 },
+      { at: "balance.output", delay: 0.65, command: "balance", line: "32:0", hold: 0.95 },
+      { at: "send.typed", delay: -0.15, command: "send", line: 0, cols: [20, 25], hold: 0.7 },
+      { at: "send.output", delay: 0.75, command: "send", line: "Send", hold: 0.75, note: "frbtc is 32:0" },
+      { at: "send.output", delay: 1.45, command: "send", line: "Kept", hold: 1.0, note: "stays with you" },
+      { at: "approve.output", delay: 0.4, command: "approve", line: "Agent", hold: 0.55 },
+      { at: "approve.output", delay: 0.95, command: "approve", line: "Asset", hold: 0.55 },
+      { at: "approve.output", delay: 1.5, command: "approve", line: "Returned assets", hold: 0.6 },
     ],
     captions: [
       {
@@ -137,7 +126,7 @@ export const alkanes: Launch = {
       {
         at: "send.start",
         delay: 0.15,
-        text: "Send an exact amount.\nKeep the rest.",
+        text: "Send frBTC by name.\nKeep the rest.",
         until: { at: "agent.enter", delay: -0.3 },
       },
       {
@@ -154,11 +143,11 @@ export const alkanes: Launch = {
       },
     ],
   },
-  tagline: { lines: ["AI asks.", "You approve.", "Keys stay yours."], hold: 2.5 },
+  tagline: { lines: ["AI asks.", "You approve.", "Keys stay yours."], hold: 2.35 },
   end: {
     url: "sats.sh",
     install: "curl -fsSL https://sats.sh/setup.sh | sh",
     footer: "v0.0.4 · signet · test networks only",
-    hold: 2.9,
+    hold: 2.75,
   },
 };

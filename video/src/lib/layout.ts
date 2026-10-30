@@ -12,8 +12,8 @@ export const PAD_BOTTOM = 28;
 export const CARD_GAP = 84;
 export const CARD_WIDTH = 760;
 // The card holds the request; it grows when the agent sees the outcome.
-export const CARD_HEIGHT = 530;
-export const CARD_COMPACT = 425;
+export const CARD_HEIGHT = 570;
+export const CARD_COMPACT = 465;
 
 export type Rect = { x: number; y: number; w: number; h: number };
 
