@@ -17,8 +17,17 @@ use sats_wallet::store::Store;
 use crate::keys;
 use crate::ui;
 
+/// A typed asset: an id, or a name sats knows.
 fn parse_id(id: &str) -> Result<AlkaneId> {
-    id.parse::<AlkaneId>().map_err(|e| anyhow!(e))
+    names::resolve(id).map_err(|e| anyhow!(e))
+}
+
+/// An id with its known name, when sats knows one: `32:0 (frBTC)`.
+pub(crate) fn asset(id: AlkaneId) -> String {
+    match names::known(id) {
+        Some(known) => format!("{id} ({})", known.name),
+        None => id.to_string(),
+    }
 }
 
 pub fn frbtc_info(services: &Services, json: bool) -> Result<()> {
@@ -103,8 +112,12 @@ pub fn balance(store: &Store, network: Network, services: &Services, json: bool)
     }
     let mut labelled = false;
     for (id, (amount, name, symbol)) in &totals {
-        let label = label(name, symbol);
-        labelled |= !label.is_empty();
+        // A known asset shows the name sats knows, not the indexer's.
+        let label = match names::known(*id) {
+            Some(known) => known.name.to_string(),
+            None => label(name, symbol),
+        };
+        labelled |= names::known(*id).is_none() && !label.is_empty();
         println!("  {id:<12} {amount:>24}  {label}");
     }
     for output in scanned.outputs.iter().filter(|o| !o.balances.is_empty()) {
@@ -279,8 +292,11 @@ fn authorize_and_commit(
             .iter()
             .map(|(id, amount)| format!("{amount} of {id}"))
             .collect::<Vec<_>>();
-        rows.push(("Send", format!("{} of {}", review.amount, review.asset)));
-        if !name.is_empty() {
+        rows.push((
+            "Send",
+            format!("{} of {}", review.amount, asset(review.asset)),
+        ));
+        if !name.is_empty() && names::known(review.asset).is_none() {
             rows.push(("Label", format!("{name}, the indexer's, not verified")));
         }
         rows.extend([

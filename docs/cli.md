@@ -321,6 +321,10 @@ only by id. An asset at any id other than `32:0` whose label claims frBTC
 is flagged in `balance` and in the `send` review, where Enter alone
 cancels.
 
+sats knows one name itself: `frbtc` stands for `32:0`, in any case, wherever
+`send`, `inspect`, or `simulate` takes an id, and that asset shows as frBTC.
+Any other asset needs its id. Receipts and `--json` output carry ids.
+
 When the selected provider serves Alkanes, every send also protects assets:
 an output carrying alkanes, or one the indexer hasn't confirmed, is never used to fund a
 plain BTC send, because a transaction without a protostone burns the
@@ -345,6 +349,7 @@ and cancellation go to stderr; stdout is reserved for the final JSON receipt.
 
 ```sh
 sats alkanes send 32:0 40000 tb1p...   # amount in the asset's base units
+sats alkanes send frbtc 40000 tb1p...  # the same: frbtc is 32:0
 ```
 
 It spends indexed outputs holding the asset, sends the amount to the

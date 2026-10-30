@@ -90,7 +90,8 @@ Alkanes transfer, authorize a contract call, sign, or broadcast.
 | `alkanes_inspect` | `{"id":"32:0"}` | `network`, `id`, `bytecode_bytes`, `code_hash` |
 | `alkanes_simulate` | `id` and `inputs` (an array of decimal strings, opcode first) | `network`, `id`, `inputs`, `advisory: true`, `status`, `gas_used`, `transfers`, `raw` |
 
-Contract ids are decimal `BLOCK:TX` pairs on the connection's pinned network.
+Contract ids are decimal `BLOCK:TX` pairs on the connection's pinned network;
+`frbtc` also names `32:0`.
 Asset amounts, predicted transfer `value`s, and calldata use decimal strings
 so clients preserve the full u128 range. Asset amounts are base units, never
 satoshis. Provider names and symbols are untrusted labels; an id and hash do
@@ -190,7 +191,8 @@ not an idempotency key. Passing it back as one files a new request.
 ```
 
 Files an exact asset-transfer proposal on the connection's pinned network.
-The id is a decimal `BLOCK:TX` pair, never a provider name or symbol.
+The id is a decimal `BLOCK:TX` pair, or `frbtc`, the one name sats knows,
+which is recorded as `32:0`. It is never a provider name or symbol.
 `amount` is a **positive decimal u128 string in base units**, not satoshis.
 Leading zeros in the id and amount are normalized. Numeric JSON amounts,
 zero, negatives, overflow, and unknown arguments are rejected. The agent

@@ -102,10 +102,16 @@ fn inspect_hashes_the_mock_bytecode() {
 
     // Garbage ids fail before any provider access.
     sats(&dir)
-        .args(["alkanes", "inspect", "not-an-id"])
+        .args(["alkanes", "inspect", "2:x"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("invalid alkane id"));
+    // Neither do names sats doesn't know.
+    sats(&dir)
+        .args(["alkanes", "inspect", "not-an-id"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown asset \"not-an-id\""));
 }
 
 #[test]
@@ -363,7 +369,7 @@ fn labels_are_unverified_and_an_frbtc_impostor_is_flagged() {
         ))
         .stderr(predicate::str::contains(format!("! {impostor}")));
 
-    // The real frBTC carries the same label without a warning.
+    // The real frBTC shows the name sats knows, without a warning.
     sats(&dir)
         .args([
             "alkanes",
@@ -377,11 +383,71 @@ fn labels_are_unverified_and_an_frbtc_impostor_is_flagged() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Send     1000 of 32:0"))
-        .stdout(predicate::str::contains(
-            "Label    frBTC (FRBTC), the indexer's, not verified",
-        ))
+        .stdout(predicate::str::contains("Send     1000 of 32:0 (frBTC)"))
+        .stdout(predicate::str::contains("Label").not())
         .stdout(predicate::str::contains("calls itself").not());
+}
+
+#[test]
+fn a_name_sats_knows_stands_in_for_its_id() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let mockdata = write_mock_provider(&dir);
+    let funded = common::fund_wallet(&dir, &[546, 100_000]);
+    mark_outputs(&mockdata, &[(funded[0], Some(&[("32:0", "5000")]))]);
+    // The indexer's own label for 32:0 gives way to the name sats knows.
+    label_assets(&mockdata, &[("32:0", "Subfrost BTC", "FRBTC")]);
+    std::fs::write(
+        mockdata.join("alkanes-bytecode.json"),
+        r#"{"32:0": "0x0061736d"}"#,
+    )
+    .unwrap();
+    let recipient = common::foreign_address(bdk_wallet::bitcoin::Network::Signet);
+
+    sats(&dir)
+        .args(["alkanes", "balance"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("frBTC"))
+        .stdout(predicate::str::contains("Subfrost BTC").not())
+        .stdout(predicate::str::contains("not verified").not());
+    let inspected = json_stdout(
+        sats(&dir)
+            .args(["alkanes", "inspect", "FRBTC", "--json"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(inspected["id"], "32:0");
+
+    // An unknown name fails before anything is prepared.
+    sats(&dir)
+        .args(["alkanes", "send", "diesel", "1", &recipient, "-y"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown asset \"diesel\""))
+        .stderr(predicate::str::contains("names sats knows: frbtc"));
+    assert!(!mockdata.join("broadcasts.log").exists());
+
+    let out = json_stdout(
+        sats(&dir)
+            .args([
+                "alkanes",
+                "send",
+                "frbtc",
+                "1000",
+                &recipient,
+                "--fee-rate",
+                "2",
+                "-y",
+                "--json",
+            ])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("Send     1000 of 32:0 (frBTC)"))
+            .stderr(predicate::str::contains("Label").not()),
+    );
+    // Receipts carry the id, never the name.
+    assert_eq!(out["asset"], "32:0");
 }
 
 #[test]

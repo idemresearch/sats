@@ -62,14 +62,16 @@ pub struct RequestSendParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AlkaneParams {
-    /// Contract id as decimal BLOCK:TX, e.g. 32:0. Names are not identities.
+    /// Contract id as decimal BLOCK:TX, e.g. 32:0, or a name sats knows
+    /// (frbtc). Provider names and symbols are not identities.
     pub id: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AlkaneSimulationParams {
-    /// Contract id as decimal BLOCK:TX on this connection's pinned network.
+    /// Contract id as decimal BLOCK:TX on this connection's pinned network,
+    /// or a name sats knows (frbtc).
     pub id: String,
     /// Calldata as decimal u128 strings, including the opcode first.
     /// Strings preserve integers larger than JavaScript's safe integer range.
@@ -80,7 +82,8 @@ pub struct AlkaneSimulationParams {
 #[derive(Debug, serde::Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RequestAlkanesSendParams {
-    /// Canonical contract/token identity BLOCK:TX (e.g. 32:0); never a name.
+    /// Canonical contract/token identity BLOCK:TX (e.g. 32:0), or a name sats
+    /// knows (frbtc), which is recorded as its id. Never a provider name.
     pub id: String,
     /// Positive decimal u128 string in base units, preserving full precision.
     pub amount: String,
@@ -467,8 +470,12 @@ fn read_failure(code: &'static str, error: impl std::fmt::Display) -> Refusal {
 }
 
 fn alkane_id(id: &str) -> Result<AlkaneId, Refusal> {
-    id.parse()
-        .map_err(|_| read_failure("invalid_alkane_id", "expected a decimal u128 BLOCK:TX id"))
+    sats_alkanes::names::resolve(id).map_err(|_| {
+        read_failure(
+            "invalid_alkane_id",
+            "expected a decimal u128 BLOCK:TX id or a name sats knows (frbtc)",
+        )
+    })
 }
 
 fn alkane_inputs(inputs: &[String]) -> Result<Vec<u128>, Refusal> {

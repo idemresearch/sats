@@ -277,10 +277,8 @@ pub fn create_alkanes_send(
     params: &CreateAlkanesSendParams,
 ) -> Result<AgentRequest, CreateError> {
     sats_core::network::ensure_test_network(network).map_err(|e| CreateError::Alkanes(e.into()))?;
-    let id = params
-        .id
-        .parse::<sats_alkanes::id::AlkaneId>()
-        .map_err(CreateError::InvalidAlkaneId)?;
+    // A known name resolves to its id here; the request records only ids.
+    let id = sats_alkanes::names::resolve(params.id).map_err(CreateError::InvalidAlkaneId)?;
     let amount =
         if params.amount.is_empty() || !params.amount.bytes().all(|b| b.is_ascii_digit()) {
             None
