@@ -3,7 +3,8 @@
 Connect an AI agent to sats over MCP. The agent can read the wallet and file
 Bitcoin payments, frBTC wraps, and Alkanes transfers; only you can approve them.
 
-`sats agent serve <name>` runs a stdio MCP server for one named agent, under
+`sats agent serve <name>` runs an MCP server for one named agent, over stdio
+or, with `--http`, over Streamable HTTP for remote clients, under
 the grant its token names. The server holds no key material and never
 prepares, signs, or broadcasts. The flow:
 
@@ -36,7 +37,8 @@ claude mcp add --transport stdio --scope local sats --env SATS_AGENT_TOKEN=<toke
 - **The token is shown once.** sats stores only its hash. If you lose it,
   re-issue the grant.
 - **Restart ChatGPT desktop** after adding the server. ChatGPT on the web
-  can't launch a local stdio server.
+  and on phones can't launch a local stdio server; use
+  [Remote clients over HTTP](#remote-clients-over-http).
 - **Claude Code uses local scope** and writes no repository `.mcp.json`.
   Run its setup command from the directory where you launch Claude. An
   entry added in another directory is not available in that session.
@@ -60,6 +62,39 @@ At startup the server checks that the grant exists and hasn't expired, that
 the configuration parses. Provider selection is deferred until a Bitcoin or Alkanes read, or a new
 frBTC wrap filing, needs it. Existing request observation and ordinary BTC
 and Alkanes transfer request filing do not depend on provider access.
+
+## Remote clients over HTTP
+
+A chat app on the web or a phone connects to MCP servers from its
+provider's servers, so it needs a public HTTPS URL. `--http` serves the
+same tools over MCP Streamable HTTP on a loopback address, and a tunnel
+you run publishes it:
+
+```sh
+SATS_AGENT_TOKEN=<token> sats agent serve chatgpt \
+  --http 127.0.0.1:8787 --public-host sats.example.com
+cloudflared tunnel --url http://127.0.0.1:8787   # or ngrok, Tailscale Funnel
+```
+
+Add `https://sats.example.com/mcp/<token>` to the client as a custom MCP
+server with no authentication. The token in the path is the credential.
+
+- **Loopback only.** sats refuses any `--http` address that isn't a
+  loopback address. TLS and public reachability are the tunnel's job.
+- **The path is the credential.** Only `/mcp/<token>` answers; every other
+  path is an empty 404. The URL is as sensitive as the token: the client,
+  the tunnel, and any proxy logs that record paths hold it. Re-issue the
+  grant to rotate it.
+- **`--public-host` names the tunnel's host.** Requests are accepted only
+  with a loopback `Host` header or one you list, which blocks DNS
+  rebinding. If you leave out the host your tunnel forwards, its requests
+  get 403.
+- **Nothing else changes.** The startup checks, the per-call grant re-read,
+  denials, idempotency, and approval are the same as on stdio. The human
+  still approves with `sats agent approve` on the wallet's machine, so the
+  machine must be running for the agent to file or observe.
+- **The startup log omits the token.** It prints the URL with
+  `<SATS_AGENT_TOKEN>` in its place.
 
 ## Tools
 
@@ -435,5 +470,6 @@ chain, and asserts every outcome it prints.
 
 ## Transport
 
-MCP frames use stdout, and startup messages and diagnostics use stderr.
-Code inside the server must never print to stdout.
+On stdio, MCP frames use stdout, and startup messages and diagnostics use
+stderr. Code inside the server must never print to stdout. With `--http`,
+MCP runs over HTTP and diagnostics still go to stderr.

@@ -355,11 +355,18 @@ pub enum AgentCommand {
         #[arg(long, value_name = "ID")]
         request: Option<String>,
     },
-    /// Serve the agent's wallet tools over MCP stdio as this agent
+    /// Serve the agent's wallet tools over MCP as this agent (stdio, or HTTP with --http)
     #[cfg(feature = "mcp")]
     Serve {
         /// Agent name the server acts as (must hold an active grant)
         name: String,
+        /// Serve MCP Streamable HTTP on this loopback address instead of stdio,
+        /// at /mcp/<token>; put an HTTPS tunnel in front for remote clients
+        #[arg(long, value_name = "ADDR")]
+        http: Option<std::net::SocketAddr>,
+        /// Host name your tunnel forwards (repeatable), fx sats.example.com
+        #[arg(long = "public-host", value_name = "HOST", requires = "http")]
+        public_hosts: Vec<String>,
     },
 }
 

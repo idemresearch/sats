@@ -301,6 +301,14 @@ never syncs, mutates records, reconciles, signs, or broadcasts. An
 absent execution lock never proves a request is unsigned. The full contract
 is in [MCP](mcp.md).
 
+`--http` serves the same tools on a loopback address only, at
+`/mcp/<token>`. Every other path gets an empty 404, the token is compared
+in constant time against its hash, and the `Host` header must be loopback
+or a host the human named, which blocks DNS rebinding. TLS and public
+reachability belong to the tunnel the human runs. Over HTTP the token
+travels in the URL, so the client's configuration, the tunnel, and any
+proxy logs that record paths can hold it.
+
 ## Providers and inscription postage
 
 Preparing a spend requires fresh chain state. A sync failure stops every send
@@ -390,6 +398,7 @@ to the recipient.
 | Lied-about amount or fee | Recomputed from the PSBT against the wallet's descriptors | An understated input yields an unrelayable transaction |
 | Inflated fee estimate | The real fee is in every approval review | Approving a high fee without reading it |
 | Compromised MCP process | Holds a token, never a key; forged approvals need the password | Same as a stolen token |
+| Leaked `--http` URL | The path is the token: same bounds as a stolen token | URL may persist in client, tunnel, or proxy logs; re-issue to rotate |
 | Debugger on an approving process | Key material lives only for one approval | Seed recoverable in that window where ptrace is allowed |
 | Pre-daemon wrapped-seed grant | Reported and refused | The file is a seed disclosure until the wallet is rotated |
 | Revoked agent | Grant and token rechecked on every MCP tool call and under the lock at execution | Transactions signed before revocation stay valid |
