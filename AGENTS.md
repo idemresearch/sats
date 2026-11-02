@@ -86,6 +86,7 @@ advice for exactly that file.
 | `crates/sats-core/src/network.rs` | The network policy: test networks only, mainnet refused |
 | `crates/sats-core/src/event.rs` | The causal event kinds appended per request transition |
 | `crates/sats-core/src/token.rs` | Agent capability tokens: mint, hash, constant-time verify |
+| `crates/sats-core/src/relay.rs` | The relay protocol: device relay key, signed capability, sealed filings, signed device calls |
 | `crates/sats-core/src/verify.rs` | Recomputing a PSBT's payments and fee from the wallet's own descriptors |
 | `crates/sats-core/src/plan.rs` | Ephemeral prepared spends and finalized transaction records |
 | `crates/sats-core/src/seed.rs` | BIP-39 seed handling and BIP-86 descriptors |
@@ -99,6 +100,8 @@ advice for exactly that file.
 | `crates/sats-wallet/src/alkanes/` | Views and human-authorized staging, review, signing, persistence, and broadcast workflows |
 | `crates/sats-wallet/src/request/` | The native request workflow: create, dismiss, reconcile, and the human-authorized executor |
 | `crates/sats-wallet/src/spend.rs` | The shared signing and broadcast tail: persist before broadcast, rebroadcast |
+| `crates/sats-wallet/src/relay.rs` | The device's side of a relay: link, mint agent URLs, sync filings through `request` |
+| `crates/sats-relay/` | The keyless relay binary: MCP for agents, the signed device API, the sealed mailbox |
 | `crates/sats-cli/src/main.rs` | Composition and command dispatch only |
 | `crates/sats-cli/src/cli.rs` | Clap command and flag definitions |
 | `crates/sats-cli/src/commands/` | Human CLI workflows and rendering |
@@ -247,6 +250,20 @@ A workflow two surfaces could need belongs here, not in a command.
   signs, executes, or broadcasts.
 - Agents must not receive `--allow-dust`, password, seed, or
   raw signing authority outside the grant contract.
+
+### Relay
+
+- A relay is an intermediary, never an authority. It holds no wallet,
+  seed, signer, or grant policy, and `sats-relay` must never depend on
+  `sats-wallet`. It serves no tool that approves, signs, or broadcasts.
+- The device decides every relayed filing through `request::create` (or
+  `create_wrap`) with the agent's token, exactly as a local filing.
+  Never trust a relay-supplied field without the same checks; treat
+  every filing as a proposal from an untrusted transport.
+- The device relay key is a communication credential only. Never derive
+  it from the seed or let it unlock anything.
+- What the device posts is the local `check_request` view; keep relay and
+  local results identical in shape.
 
 ### Providers and UTXO safety
 

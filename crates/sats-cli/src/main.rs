@@ -132,6 +132,20 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 mcp::run(&store, network, &name, overrides.clone(), transport)
             }
         },
+        #[cfg(feature = "mcp")]
+        Command::Relay { command } => match command {
+            cli::RelayCommand::Link { url, new_key } => {
+                commands::relay::link(&store, network, &url, new_key, json)
+            }
+            cli::RelayCommand::Sync { watch, every } => commands::relay::sync(
+                &store,
+                network,
+                &|| Ok(services(&config)?),
+                watch,
+                every,
+                json,
+            ),
+        },
         Command::Providers { command } => match command {
             None | Some(cli::ProvidersCommand::List) => {
                 commands::providers::list(&config, overrides.as_ref(), network, json)

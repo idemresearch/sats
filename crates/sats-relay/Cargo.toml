@@ -1,0 +1,34 @@
+[package]
+name = "sats-relay"
+description = "A keyless relay between sats agents and the human's signing device"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sats-relay"
+path = "src/main.rs"
+
+# Deliberately no sats-wallet: the relay can't open a wallet, unseal a
+# seed, or construct a signer, because none of that code is linked.
+[dependencies]
+sats-core = { workspace = true }
+rmcp = { workspace = true }
+schemars = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+humantime = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

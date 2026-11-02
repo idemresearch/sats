@@ -44,6 +44,7 @@ runtime. Callers pass in time and own the BDK wallet.
 | `network` | The network policy: test networks only, mainnet refused |
 | `event` | Event kinds appended per request transition |
 | `token` | Agent tokens: mint, hash, constant-time verify |
+| `relay` | The relay protocol: device key, signed capability, sealed filings, signed device calls |
 | `verify` | Recomputing a PSBT's payments and fee from the wallet's descriptors |
 | `engine` | PSBT preparation and conservative UTXO exclusion |
 | `plan` | Prepared spends and finalized transaction records |
@@ -72,6 +73,7 @@ config and data directories and never looks up a home directory.
 | `alkanes` | Contract views and the human-authorized stage/review/commit workflow |
 | `request` | Request create, dismiss, reconcile, and the executor (`stage`, `commit`) |
 | `spend` | The shared tail: sign, persist, then broadcast; rebroadcast a saved transaction |
+| `relay` | The device's side of a relay: link, mint agent URLs, sync filings through `request` |
 
 ### `sats-cli`
 
@@ -127,6 +129,14 @@ The digest binds both. Protocol-specific composition and checking stay in
 protocols. The common request executor reviews, rechecks indexed balances,
 and uses the same grant ladder and signing boundary as BTC sends.
 No protocol grant fields or agent-facing execution primitive are added.
+
+### `sats-relay`
+
+The keyless relay between sats agent and sats human ([Relay](relay.md)): MCP
+Streamable HTTP for agents at `/mcp/<capability>`, a signed device API
+(`/v1/inbox`, `/v1/results`), and a SQLite mailbox of sealed filings and
+posted results. It depends on `sats-core` only. It doesn't link
+`sats-wallet`, so it has no wallet, provider, or signer code.
 
 ### `sats-playground`
 

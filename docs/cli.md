@@ -25,6 +25,9 @@ exact options in your installed version.
 | `sats agent dismiss <ID>` | Decline a request |
 | `sats agent log [--limit N] [--request ID]` | Show the agent event log |
 | `sats agent serve <name> [--http ADDR] [--public-host HOST]` | Run the MCP server for an agent, over stdio or loopback HTTP ([MCP](mcp.md)) |
+| `sats agent grant <name> --relay` | Issue a grant and print the agent's MCP URL through the linked relay ([Relay](relay.md)) |
+| `sats relay link <URL> [--new-key]` | Link this device to a relay; `--new-key` rotates the device's relay key |
+| `sats relay sync [--watch] [--every SECS]` | File relayed requests here and post their state back |
 | `sats providers [list]` | Show the network's provider |
 | `sats providers add <subfrost\|esplora>` | Add a provider, asking for its key, and use it |
 | `sats providers use <mempool\|subfrost\|esplora>` | Switch the network's provider |

@@ -32,6 +32,7 @@ pub enum Transport {
 }
 
 pub use http::HttpOptions;
+pub use server::relay_view;
 
 pub fn run(
     store: &Store,

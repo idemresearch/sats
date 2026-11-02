@@ -4,6 +4,8 @@
 #![allow(dead_code)]
 
 #[cfg(feature = "mcp")]
+pub mod http;
+#[cfg(feature = "mcp")]
 pub mod mcp;
 
 use assert_cmd::Command;

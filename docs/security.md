@@ -309,6 +309,40 @@ reachability belong to the tunnel the human runs. Over HTTP the token
 travels in the URL, so the client's configuration, the tunnel, and any
 proxy logs that record paths can hold it.
 
+## The relay
+
+A relay ([Relay](relay.md)) carries requests between an agent and the
+device that holds the wallet. It's an intermediary, never an authority:
+
+- **The device's relay key is separate from the wallet.** It's a secp256k1
+  key, generated at `sats relay link`, that never derives from or unlocks
+  the seed. It names the device's mailbox and signs its calls.
+- **The capability is the agent's credential.** The device signs the agent
+  name, grant id, network (test networks only), expiry, and the grant's
+  token (BIP-340 Schnorr over a tagged hash). The URL carries the result.
+  The relay verifies the signature to route, so it keeps no table of
+  pairings, and an unverifiable capability gets an empty 404. The URL is as
+  sensitive as the token.
+- **Filings are sealed to the device.** Ephemeral ECDH to the device's key,
+  then ChaCha20-Poly1305 with the mailbox and request id as associated data.
+  The relay's store holds ciphertext, an operation digest for idempotency,
+  and the views the device posted.
+- **Device calls are signed.** Each sync call carries a signature over the
+  method, path, time, and body, accepted within 5 minutes of the relay's
+  clock. Results carry a strictly increasing revision, so a replayed result
+  can't roll an observation back.
+- **The device decides everything.** A relayed filing runs through
+  `request::create` like a local one: the token is checked against the
+  grant on file, the ladder runs, and you approve with the same review and
+  password. The device checks that the filing's request id matches the id
+  derived from its grant, agent, and key, and it validates every field the
+  relay supplies.
+
+A compromised relay sees the agent URLs, so it can file anything the
+grant allows, exactly like a stolen token. It can also drop, delay, or
+replay filings, and show the agent stale or false results. It can't sign,
+approve, widen a grant, or read your wallet.
+
 ## Providers and inscription postage
 
 Preparing a spend requires fresh chain state. A sync failure stops every send
@@ -399,6 +433,8 @@ to the recipient.
 | Inflated fee estimate | The real fee is in every approval review | Approving a high fee without reading it |
 | Compromised MCP process | Holds a token, never a key; forged approvals need the password | Same as a stolen token |
 | Leaked `--http` URL | The path is the token: same bounds as a stolen token | URL may persist in client, tunnel, or proxy logs; re-issue to rotate |
+| Compromised relay | Keyless; the device re-checks every filing against its own grant; you approve on the device | Same as a stolen token, plus dropped, delayed, or falsified observations |
+| Stolen device relay key | Opens only relay traffic for that device; never the seed | Can read queued filings and post false results until you run `sats relay link <URL> --new-key` |
 | Debugger on an approving process | Key material lives only for one approval | Seed recoverable in that window where ptrace is allowed |
 | Pre-daemon wrapped-seed grant | Reported and refused | The file is a seed disclosure until the wallet is rotated |
 | Revoked agent | Grant and token rechecked on every MCP tool call and under the lock at execution | Transactions signed before revocation stay valid |

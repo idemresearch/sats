@@ -14,6 +14,7 @@ pub mod fmt;
 pub mod intent;
 pub mod network;
 pub mod plan;
+pub mod relay;
 pub mod request;
 pub mod seal;
 pub mod seed;

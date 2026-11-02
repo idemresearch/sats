@@ -51,6 +51,8 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 minreq = { workspace = true }
+sats-relay = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net"] }
 tempfile = { workspace = true }
 rusqlite = { workspace = true }
 toml = { workspace = true }

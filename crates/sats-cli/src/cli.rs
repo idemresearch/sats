@@ -98,6 +98,12 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+    /// Link this device to a sats relay and sync relayed agent requests
+    #[cfg(feature = "mcp")]
+    Relay {
+        #[command(subcommand)]
+        command: RelayCommand,
+    },
     /// Show and choose each network's provider
     Providers {
         #[command(subcommand)]
@@ -286,6 +292,33 @@ pub struct GrantArgs {
     /// Without --to, every recipient may be proposed
     #[arg(long = "to", value_name = "ADDRESS")]
     pub to: Vec<String>,
+    /// Print an MCP URL that reaches this wallet through the linked relay
+    /// (see sats relay link), for agents that can't run sats locally
+    #[arg(long)]
+    pub relay: bool,
+}
+
+#[cfg(feature = "mcp")]
+#[derive(Subcommand)]
+pub enum RelayCommand {
+    /// Link this device to a relay (keeps this device's relay key)
+    Link {
+        /// The relay's origin, fx https://relay.example.com
+        url: String,
+        /// Replace this device's relay key; every agent URL minted with the
+        /// old key stops working
+        #[arg(long)]
+        new_key: bool,
+    },
+    /// Fetch relayed requests, file them here, and post their state back
+    Sync {
+        /// Keep syncing until interrupted
+        #[arg(long)]
+        watch: bool,
+        /// Seconds between syncs with --watch
+        #[arg(long, default_value_t = 10, value_name = "SECS")]
+        every: u64,
+    },
 }
 
 #[derive(Subcommand)]

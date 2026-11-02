@@ -1529,6 +1529,7 @@ dependencies = [
  "rusqlite",
  "sats-alkanes",
  "sats-core",
+ "sats-relay",
  "sats-wallet",
  "schemars",
  "serde",
@@ -1571,10 +1572,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "sats-relay"
+version = "0.0.4"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bytes",
+ "clap",
+ "http-body-util",
+ "humantime",
+ "hyper",
+ "hyper-util",
+ "rmcp",
+ "rusqlite",
+ "sats-core",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "sats-wallet"
 version = "0.0.4"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bdk_esplora",
  "bdk_wallet",
  "hex",
@@ -1588,6 +1612,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+ "zeroize",
 ]
 
 [[package]]
