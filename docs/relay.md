@@ -44,8 +44,11 @@ A relay listening beyond loopback refuses to start without `--public-host`,
 because every request would be refused for its `Host` header. `GET /healthz`
 answers `{"ok":true}`.
 
-The image contains only the relay binary. The relay crate doesn't link
-the wallet, so it can't open one, unseal a seed, or build a signer.
+The image contains the relay binary and a small entrypoint. Started as
+root, the entrypoint takes ownership of `/data`, since platforms often mount
+volumes owned by root, and then drops to the unprivileged `sats` user before
+the relay runs. The relay crate doesn't link the wallet, so it can't open
+one, unseal a seed, or build a signer.
 
 ## Connect an agent
 

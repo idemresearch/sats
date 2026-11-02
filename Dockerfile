@@ -21,11 +21,12 @@ FROM debian:bookworm-slim
 RUN useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin sats \
     && mkdir /data && chown sats /data
 COPY --from=build /src/target/release/sats-relay /usr/local/bin/sats-relay
-USER sats
+COPY docker/relay-entrypoint.sh /usr/local/bin/relay-entrypoint
 # Mount persistent storage at /data (docker run -v, or your platform's
 # volumes). There is deliberately no volume instruction: some platforms
-# refuse it and mount their own.
+# refuse it and mount their own, often owned by root. The entrypoint takes
+# ownership of /data and drops to the `sats` user before the relay starts.
 ENV SATS_RELAY_LISTEN=0.0.0.0:8080 \
     SATS_RELAY_DATA=/data
 EXPOSE 8080
-ENTRYPOINT ["sats-relay"]
+ENTRYPOINT ["relay-entrypoint"]
