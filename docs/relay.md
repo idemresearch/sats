@@ -25,8 +25,7 @@ from the repository's `Dockerfile`:
 
 ```sh
 docker build -t sats-relay .
-docker run -p 8080:8080 -v sats-relay:/data \
-  -e SATS_RELAY_PUBLIC_HOST=relay.example.com sats-relay
+docker run -p 8080:8080 -v sats-relay:/data sats-relay
 ```
 
 Put TLS in front of it with a reverse proxy or your platform's HTTPS.
@@ -35,14 +34,13 @@ Configuration is by flag or environment variable:
 | Flag | Environment | Default | Meaning |
 |---|---|---|---|
 | `--listen` | `SATS_RELAY_LISTEN` | `127.0.0.1:8080` (image: `0.0.0.0:8080`) | Address to listen on |
-| `--public-host` | `SATS_RELAY_PUBLIC_HOST` | none | Host name clients use (repeatable, comma-separated in the environment) |
 | `--data-dir` | `SATS_RELAY_DATA` | `./sats-relay-data` (image: `/data`) | Mailbox database directory |
 | `--filing-ttl` | `SATS_RELAY_FILING_TTL` | `7d` | How long a request waits for your device |
 | `--result-ttl` | `SATS_RELAY_RESULT_TTL` | `30d` | How long a result stays observable |
 
-A relay listening beyond loopback refuses to start without `--public-host`,
-because every request would be refused for its `Host` header. `GET /healthz`
-answers `{"ok":true}`.
+`GET /healthz` answers `{"ok":true}`. The relay accepts any `Host` header:
+every route except `/healthz` is authenticated by a signature, so a host
+allowlist would add nothing but breakage behind proxies.
 
 The image contains the relay binary and a small entrypoint. Started as
 root, the entrypoint takes ownership of `/data`, since platforms often mount

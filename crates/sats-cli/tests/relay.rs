@@ -19,7 +19,6 @@ use tempfile::TempDir;
 fn start_relay(data: &TempDir) -> String {
     let config = sats_relay::Config {
         listen: "127.0.0.1:0".parse().unwrap(),
-        public_hosts: Vec::new(),
         data_dir: data.path().to_path_buf(),
         filing_ttl: 3600,
         result_ttl: 3600,
@@ -232,4 +231,42 @@ fn a_relayed_grant_needs_a_linked_relay_reached_over_https() {
     let output = sats_output(&dir, &["relay", "link", "http://relay.example.com"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("https"));
+}
+
+/// Send one raw HTTP/1.1 request with a chosen Host header, as a proxy in
+/// front of the relay would; returns the status line.
+fn raw_status(relay: &str, method: &str, path: &str, host: &str, body: &str) -> String {
+    use std::io::{Read, Write};
+    let addr = relay.trim_start_matches("http://");
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    response.lines().next().unwrap_or_default().to_string()
+}
+
+#[test]
+fn the_relay_serves_whatever_host_a_proxy_forwards() {
+    let relay_data = TempDir::new().unwrap();
+    let relay = start_relay(&relay_data);
+    let dir = TempDir::new().unwrap();
+    wrap_ready_wallet(&dir);
+    let url = relayed_grant(&dir, &relay, "chatgpt");
+    let path = &url[relay.len()..];
+    let host = "sats-relay.up.example.app";
+    assert!(raw_status(&relay, "GET", "/healthz", host, "").contains(" 200 "));
+    let init = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+        "protocolVersion": common::http::PROTOCOL, "capabilities": {},
+        "clientInfo": {"name": "proxied", "version": "0"}}})
+    .to_string();
+    assert!(raw_status(&relay, "POST", path, host, &init).contains(" 200 "));
+    // Authentication, not the host, is what guards each route.
+    assert!(raw_status(&relay, "GET", "/v1/inbox", host, "").contains(" 401 "));
 }

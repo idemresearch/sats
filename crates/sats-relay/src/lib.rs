@@ -22,7 +22,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
@@ -47,38 +47,11 @@ const MAX_DEVICE_BODY: usize = 1 << 20;
 
 pub struct Config {
     pub listen: SocketAddr,
-    /// Host names clients use to reach the relay (the `Host` header).
-    pub public_hosts: Vec<String>,
     pub data_dir: PathBuf,
     /// Seconds a filing waits for the device.
     pub filing_ttl: u64,
     /// Seconds a result stays observable.
     pub result_ttl: u64,
-}
-
-impl Config {
-    /// Refuse a configuration that would answer every request with 403.
-    pub fn check(&self) -> Result<()> {
-        if !self.listen.ip().is_loopback() && self.public_hosts.is_empty() {
-            bail!(
-                "listening on {} needs the public host name clients use — pass --public-host \
-                 (or SATS_RELAY_PUBLIC_HOST), fx relay.example.com",
-                self.listen
-            );
-        }
-        for host in &self.public_hosts {
-            if host.is_empty() || host.contains(['/', '@', ' ']) {
-                bail!("public host {host:?} is not a host name — pass fx relay.example.com");
-            }
-        }
-        Ok(())
-    }
-
-    fn allowed_hosts(&self) -> Vec<String> {
-        let mut hosts: Vec<String> = ["localhost", "127.0.0.1", "::1"].map(String::from).to_vec();
-        hosts.extend(self.public_hosts.iter().cloned());
-        hosts
-    }
 }
 
 pub fn now() -> u64 {
@@ -116,12 +89,10 @@ fn refused(status: StatusCode, code: &str, message: &str) -> Response<Body> {
 struct Relay {
     mailbox: Arc<Mailbox>,
     mcp: StreamableHttpService<tools::RelayMcp, LocalSessionManager>,
-    hosts: Vec<String>,
 }
 
 /// Serve on an already-bound listener until the process ends.
 pub async fn serve(listener: tokio::net::TcpListener, config: Config) -> Result<()> {
-    config.check()?;
     std::fs::create_dir_all(&config.data_dir)
         .with_context(|| format!("cannot create {}", config.data_dir.display()))?;
     let mailbox = Arc::new(Mailbox::open(
@@ -133,13 +104,13 @@ pub async fn serve(listener: tokio::net::TcpListener, config: Config) -> Result<
     let mcp = StreamableHttpService::new(
         move || Ok(tools::RelayMcp::new(tools_mailbox.clone())),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default().with_allowed_hosts(config.allowed_hosts()),
+        // No Host allowlist (an empty list admits every host). Host checks
+        // defend unauthenticated loopback services against DNS rebinding;
+        // every relay route is authenticated by a signature instead, and
+        // proxies in front of a relay forward hosts it can't predict.
+        StreamableHttpServerConfig::default().with_allowed_hosts(Vec::<String>::new()),
     );
-    let relay = Arc::new(Relay {
-        mailbox,
-        mcp,
-        hosts: config.allowed_hosts(),
-    });
+    let relay = Arc::new(Relay { mailbox, mcp });
 
     loop {
         let (stream, _) = match listener.accept().await {
@@ -162,24 +133,6 @@ pub async fn serve(listener: tokio::net::TcpListener, config: Config) -> Result<
     }
 }
 
-fn host_allowed(relay: &Relay, request: &Request<Incoming>) -> bool {
-    let Some(host) = request
-        .headers()
-        .get(hyper::header::HOST)
-        .and_then(|h| h.to_str().ok())
-    else {
-        return false;
-    };
-    let bare = host
-        .strip_prefix('[')
-        .and_then(|h| h.split_once(']').map(|(h, _)| h))
-        .unwrap_or_else(|| host.rsplit_once(':').map_or(host, |(h, _)| h));
-    relay
-        .hosts
-        .iter()
-        .any(|allowed| allowed.eq_ignore_ascii_case(host) || allowed.eq_ignore_ascii_case(bare))
-}
-
 async fn route(relay: &Relay, mut request: Request<Incoming>) -> Response<Body> {
     let path = request.uri().path().to_string();
     if let Some(encoded) = path.strip_prefix(MCP_PREFIX) {
@@ -190,13 +143,6 @@ async fn route(relay: &Relay, mut request: Request<Incoming>) -> Response<Body> 
         };
         request.extensions_mut().insert(capability);
         return relay.mcp.handle(request).await;
-    }
-    if !host_allowed(relay, &request) {
-        return refused(
-            StatusCode::FORBIDDEN,
-            "forbidden_host",
-            "unknown Host header",
-        );
     }
     match (request.method().clone(), path.as_str()) {
         (Method::GET, "/healthz") => respond(StatusCode::OK, serde_json::json!({"ok": true})),
@@ -340,36 +286,4 @@ fn store_error(error: anyhow::Error) -> Response<Body> {
         "store_error",
         "the relay's store failed",
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn config(listen: &str, hosts: &[&str]) -> Config {
-        Config {
-            listen: listen.parse().unwrap(),
-            public_hosts: hosts.iter().map(|h| h.to_string()).collect(),
-            data_dir: PathBuf::from("/nonexistent"),
-            filing_ttl: 1,
-            result_ttl: 1,
-        }
-    }
-
-    #[test]
-    fn a_public_listener_needs_its_host_name() {
-        assert!(config("127.0.0.1:8080", &[]).check().is_ok());
-        let error = config("0.0.0.0:8080", &[]).check().unwrap_err().to_string();
-        assert!(error.contains("--public-host"), "{error}");
-        assert!(
-            config("0.0.0.0:8080", &["relay.example.com"])
-                .check()
-                .is_ok()
-        );
-        assert!(
-            config("0.0.0.0:8080", &["https://relay.example.com"])
-                .check()
-                .is_err()
-        );
-    }
 }

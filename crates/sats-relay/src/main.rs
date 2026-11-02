@@ -15,14 +15,6 @@ struct Args {
     /// Address to listen on
     #[arg(long, env = "SATS_RELAY_LISTEN", default_value = "127.0.0.1:8080")]
     listen: SocketAddr,
-    /// Host name clients reach the relay by (repeatable, or comma-separated in the environment)
-    #[arg(
-        long = "public-host",
-        env = "SATS_RELAY_PUBLIC_HOST",
-        value_delimiter = ',',
-        value_name = "HOST"
-    )]
-    public_hosts: Vec<String>,
     /// Directory for the mailbox database
     #[arg(long, env = "SATS_RELAY_DATA", default_value = "./sats-relay-data")]
     data_dir: PathBuf,
@@ -38,12 +30,10 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let config = sats_relay::Config {
         listen: args.listen,
-        public_hosts: args.public_hosts,
         data_dir: args.data_dir,
         filing_ttl: args.filing_ttl.as_secs(),
         result_ttl: args.result_ttl.as_secs(),
     };
-    config.check()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -54,9 +44,6 @@ fn main() -> Result<()> {
             .with_context(|| format!("cannot listen on {}", config.listen))?;
         let bound = listener.local_addr()?;
         eprintln!("sats-relay: listening on {bound}");
-        for host in &config.public_hosts {
-            eprintln!("sats-relay: agents connect to https://{host}/mcp/<capability>");
-        }
         sats_relay::serve(listener, config).await
     })
 }

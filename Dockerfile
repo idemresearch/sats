@@ -1,8 +1,7 @@
 # sats-relay: the keyless relay between sats agents and the human's device.
 #
 #   docker build -t sats-relay .
-#   docker run -p 8080:8080 -v sats-relay:/data \
-#     -e SATS_RELAY_PUBLIC_HOST=relay.example.com sats-relay
+#   docker run -p 8080:8080 -v sats-relay:/data sats-relay
 #
 # Terminate TLS in front of it (a reverse proxy or your platform's HTTPS).
 # The image contains only the relay binary: no wallet, signer, or seed code.
