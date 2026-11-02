@@ -11,6 +11,15 @@ use sats_wallet::store::Store;
 use crate::ui;
 
 pub fn run(store: &Store, network: Network, id_or_prefix: &str, json: bool) -> Result<()> {
+    #[cfg(feature = "mcp")]
+    return crate::commands::relay::after_decision(store, network, || {
+        dismiss(store, network, id_or_prefix, json)
+    });
+    #[cfg(not(feature = "mcp"))]
+    dismiss(store, network, id_or_prefix, json)
+}
+
+fn dismiss(store: &Store, network: Network, id_or_prefix: &str, json: bool) -> Result<()> {
     let dismissed = request::dismiss(store, network, id_or_prefix)?;
     if json {
         println!(

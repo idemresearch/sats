@@ -82,9 +82,12 @@ on a local server ([MCP](mcp.md)), with these differences:
   Your device decides it at its next sync: as `pending_approval` for you to
   review, `denied` at a grant boundary, or `status: "error"` if it refuses
   the filing (fx `no_grant` after you revoke).
-- **`check_request` returns what your device posted.** After a sync, it's
-  exactly what a local `check_request` would return, including `sent` and
-  its `txid`. Until then, a request reads `pending_approval`.
+- **`check_request` returns what your device posted.** It's exactly what a
+  local `check_request` would return, including `sent` and its `txid`.
+  `sats agent approve` and `sats agent dismiss` post the new state to the
+  relay as soon as they finish; if the relay can't be reached they warn,
+  and the next `sats relay sync` posts it. Until the device has synced a
+  new filing, it reads `pending_approval`.
 - **Idempotency holds across the relay.** The relay derives the same
   request id as your device, so a retried key returns the same request. A
   reused key with a different request gets `idempotency_key_conflict`.

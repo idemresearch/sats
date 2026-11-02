@@ -132,8 +132,7 @@ fn a_wrap_filed_through_the_relay_is_decided_and_approved_on_the_device() {
         "{}",
         String::from_utf8_lossy(&approval.stderr)
     );
-    assert_eq!(check(&mut agent, 8, &id)["status"], "pending_approval");
-    sync(&dir);
+    // Approval posts the outcome to the relay itself: no sync needed.
     let sent = check(&mut agent, 9, &id);
     assert_eq!(sent["status"], "sent", "{sent}");
     assert!(sent["txid"].is_string());
@@ -161,6 +160,12 @@ fn the_device_grant_decides_denials_and_revocation() {
     wrap_ready_wallet(&dir);
     let url = relayed_grant(&dir, &relay, "chatgpt");
     let mut agent = McpHttp::connect(&url, "sats-relay");
+
+    // A dismissal reaches the agent at once too.
+    let declined = id_of(&wrap(&mut agent, 6, 1_000, "small"));
+    sync(&dir);
+    run_sats(&dir, &["agent", "dismiss", &declined]);
+    assert_eq!(check(&mut agent, 7, &declined)["status"], "dismissed");
 
     // Over the device's 10k cap: the relay queues it, the device denies it.
     let over = id_of(&wrap(&mut agent, 2, 20_000, "big"));

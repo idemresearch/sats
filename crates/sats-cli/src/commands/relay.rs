@@ -9,6 +9,43 @@ use sats_wallet::store::Store;
 
 use crate::{mcp, ui};
 
+/// Run a human decision (approve, dismiss), then post every request whose
+/// state it changed to the linked relay, so a relayed agent sees the
+/// outcome at once. Best effort: the decision stands whatever the relay
+/// does, and the next sync posts it anyway.
+pub fn after_decision(
+    store: &Store,
+    network: Network,
+    decide: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let Ok(Some(link)) = relay::load(store, network) else {
+        return decide();
+    };
+    let net_name = sats_wallet::config::network_name(network);
+    let snapshot = |store: &Store| -> Vec<(String, String, String)> {
+        store
+            .list_agent_requests(net_name)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| (r.id.clone(), r.agent.clone(), r.state.status().to_string()))
+            .collect()
+    };
+    let before = snapshot(store);
+    let result = decide();
+    let changed: Vec<relay::Outcome> = snapshot(store)
+        .into_iter()
+        .filter(|entry| !before.contains(entry))
+        .map(|(request_id, agent, _)| relay::Outcome::Record { agent, request_id })
+        .collect();
+    let render = |outcome: &relay::Outcome| mcp::relay_view(store, network, outcome);
+    if let Err(error) = relay::post_outcomes(&link, &changed, &render) {
+        ui::warn(&format!(
+            "could not update the relay ({error:#}) — sats relay sync will post it"
+        ));
+    }
+    result
+}
+
 pub fn link(store: &Store, network: Network, url: &str, new_key: bool, json: bool) -> Result<()> {
     let link = relay::link(store, network, url, new_key)?;
     if json {

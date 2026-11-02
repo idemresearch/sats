@@ -371,6 +371,39 @@ pub fn sync(
     Ok(report)
 }
 
+/// Post the current view of requests this device already decided, fx
+/// right after the human approves or dismisses one, so the agent sees it
+/// without waiting for a sync. The relay ignores ids it never carried,
+/// so posting a local-only request is harmless. Returns how many the
+/// relay accepted.
+pub fn post_outcomes(
+    link: &RelayLink,
+    outcomes: &[Outcome],
+    render: &dyn Fn(&Outcome) -> serde_json::Value,
+) -> Result<usize> {
+    if outcomes.is_empty() {
+        return Ok(0);
+    }
+    let results: Vec<_> = outcomes
+        .iter()
+        .map(|outcome| {
+            let request_id = match outcome {
+                Outcome::Record { request_id, .. } | Outcome::Refused { request_id, .. } => {
+                    request_id
+                }
+            };
+            serde_json::json!({
+                "request_id": request_id,
+                "revision": revision(),
+                "view": render(outcome),
+            })
+        })
+        .collect();
+    let body = serde_json::to_vec(&serde_json::json!({"results": results}))?;
+    let answer = link.call("POST", "/v1/results", &body)?;
+    Ok(answer["accepted"].as_array().map_or(0, Vec::len))
+}
+
 /// A strictly increasing revision for this device's results.
 fn revision() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
