@@ -22,8 +22,10 @@ RUN useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin sats
     && mkdir /data && chown sats /data
 COPY --from=build /src/target/release/sats-relay /usr/local/bin/sats-relay
 USER sats
+# Mount persistent storage at /data (docker run -v, or your platform's
+# volumes). There is deliberately no volume instruction: some platforms
+# refuse it and mount their own.
 ENV SATS_RELAY_LISTEN=0.0.0.0:8080 \
     SATS_RELAY_DATA=/data
-VOLUME /data
 EXPOSE 8080
 ENTRYPOINT ["sats-relay"]
