@@ -21,6 +21,8 @@ use crate::ui;
 
 use self::server::TOKEN_ENV;
 
+pub use server::relay_view;
+
 pub fn run(
     store: &Store,
     network: Network,

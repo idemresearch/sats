@@ -16,6 +16,7 @@ pub mod assets;
 pub mod config;
 pub mod prepare;
 pub mod provider;
+pub mod relay;
 pub mod request;
 pub mod spend;
 pub mod store;

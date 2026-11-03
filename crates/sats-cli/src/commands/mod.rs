@@ -12,6 +12,8 @@ pub mod network;
 pub mod providers;
 pub mod receive;
 pub mod recipients;
+#[cfg(feature = "mcp")]
+pub mod relay;
 pub mod requests;
 pub mod revoke;
 pub mod send;

@@ -53,7 +53,16 @@ pub fn run(
     let replacing = store.load_grant(net_name, agent)?.is_some();
     // Resolve the launch context before issuing a token, so a path that
     // cannot be represented in shell instructions does not strand a grant.
-    let mcp_command = if json {
+    // A relay URL needs this device's relay link; check before the
+    // password, so a missing link strands nothing.
+    let relay = if args.relay {
+        Some(sats_wallet::relay::load(store, network)?.with_context(|| {
+            format!("no relay linked on {net_name} — run: sats relay link <URL>")
+        })?)
+    } else {
+        None
+    };
+    let mcp_command = if json || relay.is_some() {
         None
     } else {
         Some(mcp_launch_command(store, net_name, agent)?)
@@ -111,23 +120,29 @@ pub fn run(
         store.save_grant(net_name, &grant)?;
     }
 
+    let relay_url = relay
+        .as_ref()
+        .map(|link| link.agent_url(&grant, &issued.secret))
+        .transpose()?;
+
     if json {
         // The token is emitted once, here, because there is nowhere else
         // it could come from later: only its hash is stored.
-        println!(
-            "{}",
-            serde_json::json!({
-                "agent": grant.agent,
-                "mode": grant.mode.as_str(),
-                "allowed_recipients": grant.allowed_recipients,
-                "max_tx_sat": grant.max_tx_sat,
-                "expires_at": grant.expires_at,
-                "replaced": replacing,
-                "grant_id": grant.grant_id,
-                "token_id": grant.token_id,
-                "token": &*issued.secret,
-            })
-        );
+        let mut out = serde_json::json!({
+            "agent": grant.agent,
+            "mode": grant.mode.as_str(),
+            "allowed_recipients": grant.allowed_recipients,
+            "max_tx_sat": grant.max_tx_sat,
+            "expires_at": grant.expires_at,
+            "replaced": replacing,
+            "grant_id": grant.grant_id,
+            "token_id": grant.token_id,
+            "token": &*issued.secret,
+        });
+        if let Some(url) = &relay_url {
+            out["relay_url"] = serde_json::Value::String(url.to_string());
+        }
+        println!("{out}");
     } else {
         println!();
         if replacing {
@@ -138,6 +153,19 @@ pub fn run(
             ui::ok(&format!("granted  {agent}"));
         }
         println!();
+        if let Some(url) = &relay_url {
+            println!("Add this URL to your agent as a remote MCP server (no authentication).");
+            println!("It carries the token: copy it now, sats cannot show it again.");
+            println!();
+            println!("{}", url.as_str());
+            println!();
+            println!("Bring requests here: sats relay sync --watch");
+            if grant.mode == sats_core::authz::GrantMode::Ask {
+                println!("Approve:             sats agent approve");
+            }
+            println!("Revoke:              sats agent revoke {agent}");
+            return Ok(());
+        }
         println!("Copy one command now; sats cannot recover its embedded token.");
         println!();
         let token_env = shell_quote(&format!("SATS_AGENT_TOKEN={}", *issued.secret));

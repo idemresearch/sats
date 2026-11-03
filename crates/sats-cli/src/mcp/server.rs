@@ -1057,6 +1057,30 @@ impl SatsMcp {
     }
 }
 
+/// What a relay serves for one relayed filing: exactly what a local
+/// `check_request` would return for the same request on this device.
+pub fn relay_view(
+    store: &Store,
+    network: Network,
+    outcome: &sats_wallet::relay::Outcome,
+) -> serde_json::Value {
+    let view = match outcome {
+        sats_wallet::relay::Outcome::Record { agent, request_id } => {
+            check_request_record(store, network_name(network), agent, request_id)
+        }
+        sats_wallet::relay::Outcome::Refused {
+            request_id,
+            code,
+            message,
+        } => {
+            let mut view = RequestView::error(code, message.clone());
+            view.request_id = Some(request_id.clone());
+            view
+        }
+    };
+    serde_json::to_value(view).expect("serializable")
+}
+
 /// The read-only request lookup behind `check_request`.
 ///
 /// Lookup is by server request id only, scoped to this agent's own

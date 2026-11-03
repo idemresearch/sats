@@ -24,6 +24,22 @@ pub fn run(
     yes: bool,
     json: bool,
 ) -> Result<()> {
+    #[cfg(feature = "mcp")]
+    return crate::commands::relay::after_decision(store, network, || {
+        approve(store, network, resolve_services, id_or_prefix, yes, json)
+    });
+    #[cfg(not(feature = "mcp"))]
+    approve(store, network, resolve_services, id_or_prefix, yes, json)
+}
+
+fn approve(
+    store: &Store,
+    network: Network,
+    resolve_services: impl FnOnce() -> Result<Services>,
+    id_or_prefix: Option<&str>,
+    yes: bool,
+    json: bool,
+) -> Result<()> {
     let selected = if id_or_prefix.is_none() {
         match requests::select_for_review(store, network)? {
             Some(selected) => Some(selected),

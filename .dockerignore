@@ -1,0 +1,9 @@
+# Keep the build context to what the relay image builds from.
+target
+.git
+website
+video
+docs
+scripts
+*.sqlite
+.env

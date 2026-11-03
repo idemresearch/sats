@@ -7,6 +7,8 @@ Mainnet is refused.
 
 - [CLI reference](cli.md): commands, flags, configuration, and JSON output.
 - [MCP and agent grants](mcp.md): connect an agent and understand its tools.
+- [Relay](relay.md): reach the wallet from agents that can't run sats
+  locally, such as ChatGPT on a phone.
 - [Providers](providers.md): supported providers, where Bitcoin data comes
   from, and how to set up Subfrost.
 - [Security and trust model](security.md): keys, grants, signing, and failure

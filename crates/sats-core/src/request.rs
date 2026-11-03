@@ -23,6 +23,7 @@
 //! disk therefore means the signer may have run: recovery never signs
 //! again from that state.
 
+use bdk_wallet::bitcoin::hashes::{Hash, sha256};
 use serde::{Deserialize, Serialize};
 
 use crate::authz::DenyReason;
@@ -227,6 +228,43 @@ impl AgentRequest {
     pub fn status(&self) -> &'static str {
         self.state.status()
     }
+}
+
+/// The canonical rule for an agent-supplied idempotency key.
+pub const REQUEST_KEY_RULE: &str = "idempotency_key must be 1-64 characters of A-Za-z0-9_-";
+
+pub fn valid_request_key(key: &str) -> bool {
+    (1..=64).contains(&key.len())
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Whether `id` has the shape of a server request id: `r-` plus 32
+/// lowercase hex characters.
+pub fn is_request_id(id: &str) -> bool {
+    id.len() == 34
+        && id.starts_with("r-")
+        && id.as_bytes()[2..]
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+}
+
+/// The server request id a filing resolves to: 128 bits of SHA-256
+/// over the grant id, the agent, and the idempotency key. The grant id
+/// is in the preimage so a key reused after a revoke and re-issue names
+/// a new request — a new grant never inherits old requests — and two
+/// agents with the same key never share an id.
+pub fn keyed_request_id(grant_id: &str, agent: &str, key: &str) -> String {
+    let mut preimage = Vec::with_capacity(64);
+    preimage.extend_from_slice(b"sats-request-v1\0");
+    preimage.extend_from_slice(grant_id.as_bytes());
+    preimage.push(0);
+    preimage.extend_from_slice(agent.as_bytes());
+    preimage.push(0);
+    preimage.extend_from_slice(key.as_bytes());
+    let digest = sha256::Hash::hash(&preimage);
+    format!("r-{}", hex::encode(&digest.as_byte_array()[..16]))
 }
 
 #[cfg(test)]
