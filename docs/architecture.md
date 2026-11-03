@@ -27,7 +27,7 @@ exclusion, fee estimation, and the sign-then-persist-then-broadcast tail.
 `sats-core` owns deterministic wallet and authorization behavior.
 `sats-wallet` performs it against files, SQLite, and the network: storage,
 provider selection, preparation, and the request workflow. `sats-cli` owns
-the human: argument parsing, terminal output, passwords, and MCP transports.
+the human: argument parsing, terminal output, passwords, and MCP stdio.
 
 ## Crates
 
@@ -84,7 +84,7 @@ The `sats` binary: the human CLI and the MCP server.
 | `main`, `cli` | Flag parsing, network selection, dispatch. `main.rs` is a composition root only. |
 | `commands` | Human CLI workflows and their text and JSON output |
 | `keys`, `password` | Unsealing the seed; verifying the password without keeping anything |
-| `mcp` | The MCP server (stdio, and loopback Streamable HTTP) and tool schemas |
+| `mcp` | The MCP stdio server and tool schemas |
 | `ui` | Terminal presentation, the stderr warning sink, and the sync status line |
 
 ### `sats-alkanes`

@@ -1,5 +1,4 @@
-//! `sats agent serve` — serve wallet tools to an agent over MCP, on stdio
-//! or (with `--http`) Streamable HTTP on a loopback address.
+//! `sats agent serve` — serve wallet tools to an agent over MCP stdio.
 //!
 //! This process reads the wallet and files requests under the grant its
 //! bearer token names. It holds no key material and never prepares,
@@ -8,7 +7,6 @@
 //! The only tokio in the binary lives here (rmcp requires a runtime);
 //! every human-facing command stays synchronous.
 
-mod http;
 mod server;
 
 use anyhow::{Context, Result, bail};
@@ -23,15 +21,6 @@ use crate::ui;
 
 use self::server::TOKEN_ENV;
 
-/// How `sats agent serve` reaches its MCP client.
-pub enum Transport {
-    /// Newline-delimited JSON-RPC on stdin and stdout.
-    Stdio,
-    /// MCP Streamable HTTP on a loopback address, for a tunnel to expose.
-    Http(http::HttpOptions),
-}
-
-pub use http::HttpOptions;
 pub use server::relay_view;
 
 pub fn run(
@@ -39,7 +28,6 @@ pub fn run(
     network: Network,
     agent: &str,
     providers: Option<sats_wallet::provider::CliProvider>,
-    transport: Transport,
 ) -> Result<()> {
     let net_name = network_name(network);
 
@@ -74,11 +62,7 @@ pub fn run(
     // The wallet must exist. Provider selection belongs to chain-reading tools;
     // local filing and observation do not need a usable chain provider.
     walletd::open(store, network)?;
-    // Refuse a bad address before announcing anything.
-    if let Transport::Http(options) = &transport {
-        options.check()?;
-    }
-    // stdout is the stdio transport; all logging goes to stderr.
+    // stdout is the MCP transport; all logging goes to stderr.
     eprintln!(
         "sats agent serve: agent {agent:?} on {net_name} — {} grant, expires in {}",
         grant.mode.as_str(),
@@ -90,15 +74,12 @@ pub fn run(
         .enable_all()
         .build()
         .context("cannot start async runtime")?;
-    match transport {
-        Transport::Stdio => rt.block_on(async move {
-            let running = service
-                .serve(rmcp::transport::stdio())
-                .await
-                .context("mcp server failed to start")?;
-            running.waiting().await.context("mcp server crashed")?;
-            Ok(())
-        }),
-        Transport::Http(options) => rt.block_on(http::serve(service, options)),
-    }
+    rt.block_on(async move {
+        let running = service
+            .serve(rmcp::transport::stdio())
+            .await
+            .context("mcp server failed to start")?;
+        running.waiting().await.context("mcp server crashed")?;
+        Ok(())
+    })
 }

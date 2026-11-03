@@ -301,14 +301,6 @@ never syncs, mutates records, reconciles, signs, or broadcasts. An
 absent execution lock never proves a request is unsigned. The full contract
 is in [MCP](mcp.md).
 
-`--http` serves the same tools on a loopback address only, at
-`/mcp/<token>`. Every other path gets an empty 404, the token is compared
-in constant time against its hash, and the `Host` header must be loopback
-or a host the human named, which blocks DNS rebinding. TLS and public
-reachability belong to the tunnel the human runs. Over HTTP the token
-travels in the URL, so the client's configuration, the tunnel, and any
-proxy logs that record paths can hold it.
-
 ## The relay
 
 A relay ([Relay](relay.md)) carries requests between an agent and the
@@ -432,7 +424,6 @@ to the recipient.
 | Lied-about amount or fee | Recomputed from the PSBT against the wallet's descriptors | An understated input yields an unrelayable transaction |
 | Inflated fee estimate | The real fee is in every approval review | Approving a high fee without reading it |
 | Compromised MCP process | Holds a token, never a key; forged approvals need the password | Same as a stolen token |
-| Leaked `--http` URL | The path is the token: same bounds as a stolen token | URL may persist in client, tunnel, or proxy logs; re-issue to rotate |
 | Compromised relay | Keyless; the device re-checks every filing against its own grant; you approve on the device | Same as a stolen token, plus dropped, delayed, or falsified observations |
 | Stolen device relay key | Opens only relay traffic for that device; never the seed | Can read queued filings and post false results until you run `sats relay link <URL> --new-key` |
 | Debugger on an approving process | Key material lives only for one approval | Seed recoverable in that window where ptrace is allowed |
