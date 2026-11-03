@@ -605,12 +605,6 @@ impl SatsMcp {
         }
     }
 
-    /// The bearer token this server was started with, for a transport's
-    /// own gate.
-    pub fn token(&self) -> &str {
-        &self.token
-    }
-
     /// Run a blocking wallet operation off the async thread.
     async fn blocking<T, F>(&self, f: F) -> Result<T, ErrorData>
     where

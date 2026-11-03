@@ -15,15 +15,7 @@ path = "src/main.rs"
 default = ["mcp"]
 # The `sats agent serve` MCP server (rmcp + tokio). Disable for a smaller
 # human-only binary: cargo install --no-default-features
-mcp = [
-    "dep:rmcp",
-    "dep:tokio",
-    "dep:schemars",
-    "dep:hyper",
-    "dep:hyper-util",
-    "dep:http-body-util",
-    "dep:bytes",
-]
+mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
 
 [dependencies]
 sats-core = { workspace = true }
@@ -33,11 +25,7 @@ bdk_wallet = { workspace = true, features = ["rusqlite"] }
 clap = { workspace = true }
 rmcp = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true, features = ["net"] }
-hyper = { workspace = true, optional = true }
-hyper-util = { workspace = true, optional = true }
-http-body-util = { workspace = true, optional = true }
-bytes = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 owo-colors = { workspace = true }
 rpassword = { workspace = true }
 serde = { workspace = true }

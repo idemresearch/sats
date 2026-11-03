@@ -146,16 +146,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 commands::agent_log::run(&store, network, limit, request.as_deref(), json)
             }
             #[cfg(feature = "mcp")]
-            cli::AgentCommand::Serve {
-                name,
-                http,
-                public_hosts,
-            } => {
-                let transport = match http {
-                    None => mcp::Transport::Stdio,
-                    Some(addr) => mcp::Transport::Http(mcp::HttpOptions { addr, public_hosts }),
-                };
-                mcp::run(&store, network, &name, overrides.clone(), transport)
+            cli::AgentCommand::Serve { name } => {
+                mcp::run(&store, network, &name, overrides.clone())
             }
         },
         #[cfg(feature = "mcp")]
