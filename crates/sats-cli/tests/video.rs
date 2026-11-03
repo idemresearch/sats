@@ -17,7 +17,7 @@ fn fund_video_wallet() {
         .split(',')
         .map(|value| value.trim().parse().expect("a value in sats"))
         .collect();
-    let db = std::path::Path::new(&dir).join("signet/wallet.sqlite");
+    let db = std::path::Path::new(&dir).join("wallets/main/signet/wallet.sqlite");
     for outpoint in common::fund_wallet_db(&db, &values) {
         println!("funded {outpoint}");
     }

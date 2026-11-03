@@ -30,7 +30,9 @@ fn pending_saved_transactions_keep_chain_observations_and_report_sync_freshness(
     );
     let txid = sent["txid"].as_str().unwrap();
     // The network accepted this transaction; local bookkeeping was lost.
-    let path = dir.path().join(format!("signet/transactions/{txid}.json"));
+    let path = dir
+        .path()
+        .join(format!("wallets/main/signet/transactions/{txid}.json"));
     let mut record: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     record["status"] = "pending".into();
     fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
@@ -54,7 +56,8 @@ fn pending_saved_transactions_keep_chain_observations_and_report_sync_freshness(
         .stdout(predicate::str::contains("signed; broadcast unconfirmed"))
         .stdout(predicate::str::contains("in mempool"));
 
-    let mut conn = rusqlite::Connection::open(dir.path().join("signet/wallet.sqlite")).unwrap();
+    let mut conn =
+        rusqlite::Connection::open(dir.path().join("wallets/main/signet/wallet.sqlite")).unwrap();
     let mut wallet = bdk_wallet::Wallet::load()
         .check_network(Network::Signet)
         .load_wallet(&mut conn)

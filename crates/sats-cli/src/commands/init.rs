@@ -25,8 +25,9 @@ pub fn run(
     if store.seed_exists() {
         if restore {
             bail!(
-                "a seed already exists on this machine ({}) — restore needs an empty data \
-                 directory; to add {net_name} to the existing wallet, run `sats init`",
+                "this wallet already has a seed ({}) — restore another mnemonic as its own \
+                 wallet with `sats wallet import <name>`; to add {net_name} to this wallet, \
+                 run `sats init`",
                 store.seed_path().display()
             );
         }
@@ -49,7 +50,7 @@ fn extend_network(store: &Store, network: Network) -> Result<()> {
         bail!(
             "wallet already exists ({})\n\
              Use `sats balance` or `sats receive` to use this wallet.\n\
-             For a separate test wallet, set SATS_DIR to an empty directory and run `sats init`.",
+             For another wallet, run `sats wallet create <name>` or `sats wallet import <name>`.",
             store.seed_path().display()
         );
     }

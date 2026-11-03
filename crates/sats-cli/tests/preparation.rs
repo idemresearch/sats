@@ -62,7 +62,12 @@ impl Fixture {
             .assert()
             .success();
         let grant: serde_json::Value = serde_json::from_slice(
-            &fs::read(self.dir.path().join("signet/grants/claude.json")).unwrap(),
+            &fs::read(
+                self.dir
+                    .path()
+                    .join("wallets/main/signet/grants/claude.json"),
+            )
+            .unwrap(),
         )
         .unwrap();
         let id = "r-0123456789abcdef0123456789abcdef";
@@ -72,7 +77,10 @@ impl Fixture {
             recipient: ADDRESS.into(),
             amount_sat: 5_000,
         };
-        let requests = self.dir.path().join("signet/agent-requests/claude");
+        let requests = self
+            .dir
+            .path()
+            .join("wallets/main/signet/agent-requests/claude");
         fs::create_dir_all(&requests).unwrap();
         fs::write(
             requests.join(format!("{id}.json")),

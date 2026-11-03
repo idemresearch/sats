@@ -103,6 +103,6 @@ for json_mode, yes, cancel in [(False, False, False), (True, False, False),
         proc.stderr.close()
 
 assert not (root / "mockdata/broadcasts.log").exists()
-transactions = root / "signet/transactions"
+transactions = root / "wallets/main/signet/transactions"
 assert not transactions.exists() or not list(transactions.glob("*.json"))
 print("Alkanes review precedes confirmation/password in text, JSON and --yes modes")

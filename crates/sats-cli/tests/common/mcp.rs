@@ -212,7 +212,7 @@ pub fn read_json(path: &std::path::Path) -> serde_json::Value {
 pub fn request_record(dir: &TempDir, agent: &str, id: &str) -> serde_json::Value {
     read_json(
         &dir.path()
-            .join("signet/agent-requests")
+            .join("wallets/main/signet/agent-requests")
             .join(agent)
             .join(format!("{id}.json")),
     )
@@ -221,7 +221,7 @@ pub fn request_record(dir: &TempDir, agent: &str, id: &str) -> serde_json::Value
 /// Signed transactions on disk. sats persists every signature before
 /// broadcast, so this counts what was signed.
 pub fn saved_transactions(dir: &TempDir) -> usize {
-    std::fs::read_dir(dir.path().join("signet/transactions"))
+    std::fs::read_dir(dir.path().join("wallets/main/signet/transactions"))
         .map(|entries| {
             entries
                 .filter_map(Result::ok)
@@ -232,8 +232,8 @@ pub fn saved_transactions(dir: &TempDir) -> usize {
 }
 
 pub fn event_kinds(dir: &TempDir) -> Vec<String> {
-    let log =
-        std::fs::read_to_string(dir.path().join("signet/events/log.jsonl")).unwrap_or_default();
+    let log = std::fs::read_to_string(dir.path().join("wallets/main/signet/events/log.jsonl"))
+        .unwrap_or_default();
     log.lines()
         .map(|line| {
             serde_json::from_str::<serde_json::Value>(line).unwrap()["event"]

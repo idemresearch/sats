@@ -31,7 +31,8 @@ wallet.
 descriptors. Public descriptors back the persisted, watch-only BDK wallet.
 Private descriptors exist only in memory, during key derivation or signing.
 
-The mnemonic is stored in `seed.sealed`, encrypted with Argon2id and
+Each named wallet has its own seed, in `wallets/<name>/seed.sealed`. Wallet
+names are restricted to a safe path component. The mnemonic is encrypted with Argon2id and
 XChaCha20-Poly1305. The format is versioned and authenticated, and its
 associated data binds the blob to its purpose. The SQLite wallet holds public
 descriptors and chain state, never private keys.

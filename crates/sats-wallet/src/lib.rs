@@ -21,3 +21,4 @@ pub mod request;
 pub mod spend;
 pub mod store;
 pub mod walletd;
+pub mod wallets;

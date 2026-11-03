@@ -342,7 +342,13 @@ fn check_connection(
         String::from_utf8_lossy(&out.stderr)
     );
     let seed = find_named(fixture.root.path(), "seed.sealed");
-    let data = seed.parent().unwrap();
+    // The seed lives in <data root>/wallets/main/.
+    let data = seed.parent().unwrap().parent().unwrap().parent().unwrap();
+    assert!(
+        seed.ends_with("wallets/main/seed.sealed"),
+        "{}",
+        seed.display()
+    );
     // Find the actual config through the created wallet, without making test
     // assumptions about directories' platform-specific default layout.
     let config = if let Some(dir) = directory.as_deref() {
@@ -436,6 +442,7 @@ fn check_connection(
     // An unresolvable provider setup proves startup, filing and observation
     // stay local.
     let grant_path = data
+        .join("wallets/main")
         .join(network)
         .join("grants")
         .join(format!("{agent}.json"));
@@ -468,7 +475,12 @@ fn check_connection(
     // restarted MCP client would. The original grant and token still work.
     switch(conflicting);
 
-    let mut expected = vec!["--network".to_owned(), network.to_owned()];
+    let mut expected = vec![
+        "--network".to_owned(),
+        network.to_owned(),
+        "--wallet".to_owned(),
+        "main".to_owned(),
+    ];
     let shared_default = directory.is_none() && config.parent() == Some(data);
     let pinned_dir = if let Some(dir) = &directory {
         Some(if dir.is_absolute() {
@@ -561,6 +573,7 @@ fn check_connection(
         assert_eq!(filed["status"], "pending_approval");
         let id = filed["request_id"].as_str().unwrap();
         let path = data
+            .join("wallets/main")
             .join(network)
             .join("agent-requests")
             .join(agent)

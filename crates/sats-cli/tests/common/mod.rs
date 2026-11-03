@@ -67,7 +67,10 @@ pub fn write_mock_provider(dir: &TempDir) -> std::path::PathBuf {
 /// Seed the CLI's persisted signet wallet with confirmed UTXOs. The mock
 /// provider's sync is a no-op, so these funds survive CLI syncs.
 pub fn fund_wallet(dir: &TempDir, values_sat: &[u64]) -> Vec<OutPoint> {
-    fund_wallet_db(&dir.path().join("signet/wallet.sqlite"), values_sat)
+    fund_wallet_db(
+        &dir.path().join("wallets/main/signet/wallet.sqlite"),
+        values_sat,
+    )
 }
 
 /// [`fund_wallet`] for a signet wallet database at any path.

@@ -63,6 +63,9 @@ pub struct RequestClaim {
 pub struct Store {
     config_dir: PathBuf,
     data_dir: PathBuf,
+    /// The named wallet this store is, when opened through
+    /// [`crate::wallets::Wallets`], and the data root that holds it.
+    wallet: Option<(String, PathBuf)>,
 }
 
 impl Store {
@@ -76,7 +79,34 @@ impl Store {
         Store {
             config_dir: config_dir.to_path_buf(),
             data_dir: data_dir.to_path_buf(),
+            wallet: None,
         }
+    }
+
+    /// The named wallet `name` under `data_root`, sharing `config_dir`.
+    pub(crate) fn named(config_dir: &Path, data_root: &Path, name: &str) -> Store {
+        Store {
+            config_dir: config_dir.to_path_buf(),
+            data_dir: data_root.join("wallets").join(name),
+            wallet: Some((name.to_string(), data_root.to_path_buf())),
+        }
+    }
+
+    /// The wallet's name, when this store is a named wallet.
+    pub fn wallet_name(&self) -> Option<&str> {
+        self.wallet.as_ref().map(|(name, _)| name.as_str())
+    }
+
+    /// The directory that holds every wallet (the `--dir` a launch command
+    /// pins), or this store's own data directory when it isn't named.
+    pub fn data_root(&self) -> &Path {
+        self.wallet
+            .as_ref()
+            .map_or(&self.data_dir, |(_, root)| root)
+    }
+
+    pub fn config_dir(&self) -> &Path {
+        &self.config_dir
     }
 
     /// Create `dir` and restrict it — and every component from the data
