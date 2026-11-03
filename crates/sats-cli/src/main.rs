@@ -12,7 +12,7 @@ use std::path::Path;
 use anyhow::Context;
 use sats_wallet::config::{Config, parse_network};
 use sats_wallet::provider;
-use sats_wallet::store::Store;
+use sats_wallet::wallets::Wallets;
 
 use crate::cli::{Cli, Command};
 
@@ -28,20 +28,26 @@ fn main() {
 /// `--dir` or `SATS_DIR` puts configuration and data in one directory.
 /// Otherwise the platform's: XDG on Linux (`~/.config/sats` +
 /// `~/.local/share/sats`), `~/Library/Application Support/sats` on macOS.
-fn open_store(dir: Option<&Path>) -> anyhow::Result<Store> {
+/// Named wallets live under the data directory (`wallets/<name>`).
+fn open_wallets(dir: Option<&Path>) -> anyhow::Result<Wallets> {
     Ok(match dir {
-        Some(dir) => Store::open(dir),
+        Some(dir) => Wallets::new(dir, dir),
         None => {
             let dirs = directories::ProjectDirs::from("", "", "sats")
                 .context("cannot determine home directory")?;
-            Store::with_dirs(dirs.config_dir(), dirs.data_dir())
+            Wallets::new(dirs.config_dir(), dirs.data_dir())
         }
     })
 }
 
 fn run(cli: Cli) -> anyhow::Result<()> {
-    let store = open_store(cli.dir.as_deref())?;
-    let config = Config::load(&store)?;
+    let wallets = open_wallets(cli.dir.as_deref())?;
+    if let Some(message) = wallets.legacy_layout_error() {
+        anyhow::bail!("{message}");
+    }
+    let config = Config::load(&wallets.config_store())?;
+    let wallet = wallets.select(cli.wallet.as_deref(), config.wallet.as_deref())?;
+    let store = wallets.store(&wallet)?;
     let net_name = cli
         .network
         .clone()
@@ -64,6 +70,26 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             commands::balance::run(&store, network, || Ok(services(&config)?), offline, json)
         }
         Command::Receive => commands::receive::run(&store, network, json),
+        Command::Wallet { command } => match command {
+            None => commands::wallet::show(&wallets, &config, &wallet, network, json),
+            Some(cli::WalletCommand::List) => {
+                commands::wallet::list(&wallets, &config, &wallet, json)
+            }
+            Some(cli::WalletCommand::Create { name, words }) => commands::wallet::create(
+                &wallets,
+                config,
+                network,
+                &name,
+                words,
+                overrides.as_ref(),
+            ),
+            Some(cli::WalletCommand::Import { name }) => {
+                commands::wallet::import(&wallets, config, network, &name, overrides.as_ref())
+            }
+            Some(cli::WalletCommand::Use { name }) => {
+                commands::wallet::use_wallet(&wallets, config, &name, json)
+            }
+        },
         Command::Network { command } => match command {
             None => commands::network::show(&config, network, json),
             Some(cli::NetworkCommand::Use { target }) => {

@@ -47,9 +47,7 @@ fn init_refuses_existing_wallet() {
         .stderr(predicate::str::contains(
             "Use `sats balance` or `sats receive`",
         ))
-        .stderr(predicate::str::contains(
-            "set SATS_DIR to an empty directory",
-        ))
+        .stderr(predicate::str::contains("sats wallet create <name>"))
         .stderr(predicate::str::contains("delete").not());
 }
 
@@ -137,7 +135,8 @@ fn restore_refuses_existing_seed() {
         .write_stdin("ignored\n")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("already exists"));
+        .stderr(predicate::str::contains("already has a seed"))
+        .stderr(predicate::str::contains("sats wallet import <name>"));
 }
 
 /// The test-network policy holds at every entry point: the flag, the
@@ -152,12 +151,15 @@ fn mainnet_is_refused_everywhere() {
             .failure()
             .stderr(predicate::str::contains("mainnet is not supported"))
             .stderr(predicate::str::contains(expect));
-        assert!(!dir.path().join("mainnet").exists(), "{args:?}");
+        assert!(
+            !dir.path().join("wallets/main/mainnet").exists(),
+            "{args:?}"
+        );
     };
 
     let fresh = TempDir::new().unwrap();
     refused(&fresh, &["--network", "mainnet", "init"], "use signet");
-    assert!(!fresh.path().join("seed.sealed").exists());
+    assert!(!fresh.path().join("wallets/main/seed.sealed").exists());
     assert!(!fresh.path().join("config.toml").exists());
 
     let dir = TempDir::new().unwrap();
@@ -279,8 +281,10 @@ fn network_use_selects_wallet_and_preserves_provider_settings_and_grants() {
         .args(["agent", "grant", "claude"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("sats --network signet --dir"));
-    let grant_path = dir.path().join("signet/grants/claude.json");
+        .stdout(predicate::str::contains(
+            "sats --network signet --wallet main --dir",
+        ));
+    let grant_path = dir.path().join("wallets/main/signet/grants/claude.json");
     let grant = std::fs::read(&grant_path).unwrap();
     let signet_address = json_stdout(sats(&dir).args(["receive", "--json"]).assert().success());
     assert_eq!(signet_address["index"], 0);
@@ -308,7 +312,7 @@ fn network_use_selects_wallet_and_preserves_provider_settings_and_grants() {
     after["network"] = before["network"].clone();
     assert_eq!(after, before);
     assert_eq!(std::fs::read(&grant_path).unwrap(), grant);
-    assert!(!dir.path().join("testnet4/grants").exists());
+    assert!(!dir.path().join("wallets/main/testnet4/grants").exists());
     let address = json_stdout(sats(&dir).args(["receive", "--json"]).assert().success());
     assert_eq!(address["index"], 0);
     let overridden = json_stdout(
@@ -531,7 +535,7 @@ fn provider_resolution_is_only_required_for_online_commands() {
 
     fabricate_pending_request(&dir, "claude", "r-pending");
     let request_before = request_json(&dir, "r-pending");
-    let grant_path = dir.path().join("signet/grants/claude.json");
+    let grant_path = dir.path().join("wallets/main/signet/grants/claude.json");
     let grant_before = std::fs::read(&grant_path).unwrap();
     for args in [
         vec!["balance", "--json"],
@@ -564,7 +568,7 @@ fn provider_resolution_is_only_required_for_online_commands() {
         .failure()
         .stderr(predicate::str::contains("no transaction"));
     assert_eq!(std::fs::read(grant_path).unwrap(), grant_before);
-    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(!dir.path().join("wallets/main/signet/transactions").exists());
     common::assert_no_provider_calls(&servers);
 }
 
@@ -589,7 +593,7 @@ fn provider_resolution_follows_settled_and_revoked_approval_checks() {
     fabricate_pending_request(&dir, "claude", "r-revoked");
     let servers = common::write_unresolvable_providers(&dir);
     let record_before = request_json(&dir, "r-sent");
-    let grant_path = dir.path().join("signet/grants/claude.json");
+    let grant_path = dir.path().join("wallets/main/signet/grants/claude.json");
     let grant_before = std::fs::read(&grant_path).unwrap();
 
     sats(&dir)
@@ -618,7 +622,7 @@ fn provider_resolution_follows_settled_and_revoked_approval_checks() {
     assert_eq!(revoked["deny"]["reason"], "revoked");
     assert!(!grant_path.exists());
     assert_eq!(
-        std::fs::read_dir(dir.path().join("signet/transactions"))
+        std::fs::read_dir(dir.path().join("wallets/main/signet/transactions"))
             .unwrap()
             .count(),
         1
@@ -763,7 +767,7 @@ fn grant_list_revoke_lifecycle() {
         .stdout(predicate::str::contains("granted  claude"));
 
     // Grant file is a 0600 secret holding the wrapped seed.
-    let grant_path = dir.path().join("signet/grants/claude.json");
+    let grant_path = dir.path().join("wallets/main/signet/grants/claude.json");
     assert!(grant_path.exists());
     #[cfg(unix)]
     {
@@ -890,7 +894,7 @@ fn missing_wallet_points_to_init() {
 #[test]
 fn agent_requests_lists_pending_requests() {
     let dir = TempDir::new().unwrap();
-    let requests_dir = dir.path().join("signet/agent-requests/claude");
+    let requests_dir = dir.path().join("wallets/main/signet/agent-requests/claude");
     std::fs::create_dir_all(&requests_dir).unwrap();
     // Fabricate records the way the MCP server writes them: one pending
     // review, one denied at creation, one already sent.
@@ -989,7 +993,7 @@ fn agent_requests_lists_pending_requests() {
 #[test]
 fn agent_log_renders_events_and_filters_by_request() {
     let dir = TempDir::new().unwrap();
-    let events_dir = dir.path().join("signet/events");
+    let events_dir = dir.path().join("wallets/main/signet/events");
     std::fs::create_dir_all(&events_dir).unwrap();
     let line = |request_id: &str, event: serde_json::Value| {
         let mut object = serde_json::json!({
@@ -1028,7 +1032,7 @@ fn agent_log_renders_events_and_filters_by_request() {
     .join("\n");
     std::fs::write(events_dir.join("log.jsonl"), log).unwrap();
     // The --request filter resolves ids through the request records.
-    let requests_dir = dir.path().join("signet/agent-requests/claude");
+    let requests_dir = dir.path().join("wallets/main/signet/agent-requests/claude");
     std::fs::create_dir_all(&requests_dir).unwrap();
     std::fs::write(
         requests_dir.join("r-big-1.json"),
@@ -1108,7 +1112,9 @@ fn grant_writes_the_current_format() {
         .assert()
         .code(2);
     assert!(
-        !dir.path().join("signet/grants/claude.json").exists(),
+        !dir.path()
+            .join("wallets/main/signet/grants/claude.json")
+            .exists(),
         "a refused grant writes nothing"
     );
 
@@ -1120,7 +1126,8 @@ fn grant_writes_the_current_format() {
     );
     assert_eq!(issued["max_tx_sat"], 10_000);
     let grant: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(dir.path().join("signet/grants/claude.json")).unwrap(),
+        &std::fs::read_to_string(dir.path().join("wallets/main/signet/grants/claude.json"))
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(grant["max_tx_sat"], 10_000);
@@ -1149,7 +1156,7 @@ fn agent_requests_watch_streams_newly_pending_requests() {
         .success();
 
     let fabricate_hard = |id: &str| {
-        let requests_dir = dir.path().join("signet/agent-requests/claude");
+        let requests_dir = dir.path().join("wallets/main/signet/agent-requests/claude");
         std::fs::create_dir_all(&requests_dir).unwrap();
         let record = serde_json::json!({
             "format_version": 1, "id": id, "network": "signet", "agent": "claude",
@@ -1227,7 +1234,8 @@ fn agent_requests_watch_streams_newly_pending_requests() {
 
     // A torn record is skipped, and the stream survives it.
     std::fs::write(
-        dir.path().join("signet/agent-requests/claude/r-torn.json"),
+        dir.path()
+            .join("wallets/main/signet/agent-requests/claude/r-torn.json"),
         "{ not json",
     )
     .unwrap();
@@ -1289,7 +1297,8 @@ fn agent_mode_transitions_gate_on_widening() {
     assert_eq!(issued["mode"], "ask");
     let grant_mode = |dir: &TempDir| {
         serde_json::from_str::<serde_json::Value>(
-            &std::fs::read_to_string(dir.path().join("signet/grants/claude.json")).unwrap(),
+            &std::fs::read_to_string(dir.path().join("wallets/main/signet/grants/claude.json"))
+                .unwrap(),
         )
         .unwrap()["mode"]
             .clone()
@@ -1387,7 +1396,7 @@ fn unreleased_auto_state_fails_closed_and_is_recreated() {
         .args(["agent", "grant", "claude"])
         .assert()
         .success();
-    let grant_path = dir.path().join("signet/grants/claude.json");
+    let grant_path = dir.path().join("wallets/main/signet/grants/claude.json");
     let mut grant: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&grant_path).unwrap()).unwrap();
     grant["mode"] = serde_json::json!("auto");
@@ -1476,7 +1485,8 @@ fn agent_allowlist_edits_gate_on_widening() {
 
     let allowed_in_file = |dir: &TempDir| {
         serde_json::from_str::<serde_json::Value>(
-            &std::fs::read_to_string(dir.path().join("signet/grants/claude.json")).unwrap(),
+            &std::fs::read_to_string(dir.path().join("wallets/main/signet/grants/claude.json"))
+                .unwrap(),
         )
         .unwrap()["allowed_recipients"]
             .as_array()
@@ -1574,12 +1584,18 @@ fn agent_allowlist_edits_gate_on_widening() {
 /// Fabricate a pending request the way the MCP server files one, bound
 /// to the agent's current grant when one exists.
 fn fabricate_pending_request(dir: &TempDir, agent: &str, id: &str) {
-    let grant_id = std::fs::read(dir.path().join(format!("signet/grants/{agent}.json")))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|grant| grant["grant_id"].as_str().map(str::to_string))
-        .unwrap_or_else(|| "no-grant".to_string());
-    let requests_dir = dir.path().join("signet/agent-requests").join(agent);
+    let grant_id = std::fs::read(
+        dir.path()
+            .join(format!("wallets/main/signet/grants/{agent}.json")),
+    )
+    .ok()
+    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    .and_then(|grant| grant["grant_id"].as_str().map(str::to_string))
+    .unwrap_or_else(|| "no-grant".to_string());
+    let requests_dir = dir
+        .path()
+        .join("wallets/main/signet/agent-requests")
+        .join(agent);
     std::fs::create_dir_all(&requests_dir).unwrap();
     let digest = sats_core::intent::SendIntent {
         network: "signet".into(),
@@ -1608,7 +1624,7 @@ fn request_json(dir: &TempDir, id: &str) -> serde_json::Value {
     serde_json::from_slice(
         &std::fs::read(
             dir.path()
-                .join("signet/agent-requests/claude")
+                .join("wallets/main/signet/agent-requests/claude")
                 .join(format!("{id}.json")),
         )
         .unwrap(),
@@ -1661,7 +1677,7 @@ fn approve_executes_with_the_password() {
         .assert()
         .failure();
     assert_eq!(request_json(&dir, "r-pay-1")["status"], "pending_approval");
-    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(!dir.path().join("wallets/main/signet/transactions").exists());
 
     // The right password signs, persists, broadcasts, and settles. In
     // --json mode the review still reaches the human, on stderr, before
@@ -1687,7 +1703,7 @@ fn approve_executes_with_the_password() {
     assert_eq!(record["txid"], txid);
     assert!(
         dir.path()
-            .join(format!("signet/transactions/{txid}.json"))
+            .join(format!("wallets/main/signet/transactions/{txid}.json"))
             .exists()
     );
 
@@ -1698,7 +1714,7 @@ fn approve_executes_with_the_password() {
         .failure()
         .stderr(predicate::str::contains("already sent"));
     assert_eq!(
-        std::fs::read_dir(dir.path().join("signet/transactions"))
+        std::fs::read_dir(dir.path().join("wallets/main/signet/transactions"))
             .unwrap()
             .count(),
         1
@@ -1736,7 +1752,7 @@ fn approve_honors_a_policy_change_that_lands_while_it_waits_for_the_lock() {
 
     // Hold the real grant lock so the approving process cannot read the
     // grant until this concurrent policy change has finished.
-    let lock = std::fs::File::create(dir.path().join("signet/grants/.lock")).unwrap();
+    let lock = std::fs::File::create(dir.path().join("wallets/main/signet/grants/.lock")).unwrap();
     lock.lock().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_sats"))
         .args(["agent", "approve", "r-race-1", "--yes"])
@@ -1752,7 +1768,7 @@ fn approve_honors_a_policy_change_that_lands_while_it_waits_for_the_lock() {
     // it exists, the approve is past its lookup and waiting on us.
     let claim_path = dir
         .path()
-        .join("signet/agent-requests/claude/r-race-1.lock");
+        .join("wallets/main/signet/agent-requests/claude/r-race-1.lock");
     let deadline = Instant::now() + Duration::from_secs(15);
     let claimed = loop {
         if claim_path.exists() {
@@ -1763,7 +1779,7 @@ fn approve_honors_a_policy_change_that_lands_while_it_waits_for_the_lock() {
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let grant_path = dir.path().join("signet/grants/claude.json");
+    let grant_path = dir.path().join("wallets/main/signet/grants/claude.json");
     let mut grant: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&grant_path).unwrap()).unwrap();
     grant["mode"] = serde_json::json!("observe");
@@ -1781,7 +1797,7 @@ fn approve_honors_a_policy_change_that_lands_while_it_waits_for_the_lock() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("observe_only"));
     assert_eq!(request_json(&dir, "r-race-1")["status"], "denied");
     assert!(
-        !dir.path().join("signet/transactions").exists(),
+        !dir.path().join("wallets/main/signet/transactions").exists(),
         "nothing signed"
     );
 }
@@ -1847,7 +1863,7 @@ fn pending_saved_transaction_requires_providers_but_receipt_repair_does_not() {
         .assert()
         .failure();
     std::fs::remove_file(mockdata.join("broadcast-fail")).unwrap();
-    let saved: Vec<_> = std::fs::read_dir(dir.path().join("signet/transactions"))
+    let saved: Vec<_> = std::fs::read_dir(dir.path().join("wallets/main/signet/transactions"))
         .unwrap()
         .map(|e| e.unwrap().path())
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
@@ -1855,7 +1871,9 @@ fn pending_saved_transaction_requires_providers_but_receipt_repair_does_not() {
     assert_eq!(saved.len(), 1);
     let txid = saved[0].file_stem().unwrap().to_str().unwrap().to_string();
     let txid = txid.as_str();
-    let record_path = dir.path().join(format!("signet/transactions/{txid}.json"));
+    let record_path = dir
+        .path()
+        .join(format!("wallets/main/signet/transactions/{txid}.json"));
     let before = std::fs::read(&record_path).unwrap();
     let servers = common::write_unresolvable_providers(&dir);
     sats(&dir)
@@ -1874,4 +1892,136 @@ fn pending_saved_transaction_requires_providers_but_receipt_repair_does_not() {
         .assert()
         .success();
     common::assert_no_provider_calls(&servers);
+}
+
+/// Named wallets: one seed each, selected independently of the network.
+#[test]
+fn named_wallets_are_created_listed_switched_and_pinned() {
+    let dir = TempDir::new().unwrap();
+    sats(&dir)
+        .args(["wallet", "create", "main"])
+        .assert()
+        .success();
+    sats(&dir)
+        .args(["--network", "testnet4", "init"])
+        .assert()
+        .success();
+    sats(&dir)
+        .args(["wallet", "create", "test"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sats wallet use test"));
+    let listed = json_stdout(
+        sats(&dir)
+            .args(["--json", "wallet", "list"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(listed["selected"], "main", "{listed}");
+    assert_eq!(listed["default_wallet"], "main");
+    assert_eq!(
+        listed["wallets"],
+        serde_json::json!([
+            {"name": "main", "networks": ["signet", "testnet4"]},
+            {"name": "test", "networks": ["signet"]},
+        ])
+    );
+
+    // Separate seeds: separate addresses on the same network.
+    let main = json_stdout(sats(&dir).args(["--json", "receive"]).assert().success());
+    let test = json_stdout(
+        sats(&dir)
+            .args(["--wallet", "test", "--json", "receive"])
+            .assert()
+            .success(),
+    );
+    assert_ne!(main["address"], test["address"]);
+
+    // The default switches; a one-command flag and SATS_WALLET override it.
+    sats(&dir)
+        .args(["wallet", "use", "test"])
+        .assert()
+        .success();
+    let shown = json_stdout(sats(&dir).args(["--json", "wallet"]).assert().success());
+    assert_eq!(shown["wallet"], "test");
+    let shown = json_stdout(
+        sats(&dir)
+            .env("SATS_WALLET", "main")
+            .args(["--json", "wallet"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(shown["wallet"], "main");
+
+    // Grants and their MCP commands are pinned to the wallet they were made in.
+    sats(&dir)
+        .args(["agent", "grant", "claude"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "--network signet --wallet test --dir",
+        ));
+    assert!(
+        dir.path()
+            .join("wallets/test/signet/grants/claude.json")
+            .exists()
+    );
+    assert!(
+        !dir.path()
+            .join("wallets/main/signet/grants/claude.json")
+            .exists()
+    );
+
+    // Refusals: unknown, duplicate, and unsafe names.
+    sats(&dir)
+        .args(["wallet", "use", "nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no wallet named \"nope\""));
+    sats(&dir)
+        .args(["wallet", "create", "test"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+    for bad in ["../x", "Main", "-x"] {
+        sats(&dir)
+            .args(["--wallet", bad, "receive"])
+            .assert()
+            .failure();
+    }
+    assert!(!dir.path().join("x").exists());
+}
+
+#[test]
+fn a_pre_wallets_data_directory_is_refused_with_the_move_that_adopts_it() {
+    let dir = TempDir::new().unwrap();
+    init_wallet(&dir);
+    let first = json_stdout(sats(&dir).args(["--json", "receive"]).assert().success());
+    assert_eq!(first["index"], 0);
+    // Recreate the old layout: the seed and network folders at the top level.
+    let main = dir.path().join("wallets/main");
+    std::fs::rename(main.join("seed.sealed"), dir.path().join("seed.sealed")).unwrap();
+    std::fs::rename(main.join("signet"), dir.path().join("signet")).unwrap();
+    let refused = sats(&dir).args(["balance", "--offline"]).assert().failure();
+    let stderr = String::from_utf8(refused.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("predates named wallets"), "{stderr}");
+    assert!(stderr.contains("wallets/main"), "{stderr}");
+    // Nothing was moved for us.
+    assert!(dir.path().join("seed.sealed").exists());
+    // The printed move restores the same wallet.
+    std::fs::rename(dir.path().join("seed.sealed"), main.join("seed.sealed")).unwrap();
+    std::fs::rename(dir.path().join("signet"), main.join("signet")).unwrap();
+    // The same wallet is back: the next receive address follows on from index 0.
+    let again = json_stdout(sats(&dir).args(["--json", "receive"]).assert().success());
+    assert_eq!(again["index"], 1, "{again}");
+    let listed = json_stdout(
+        sats(&dir)
+            .args(["--json", "wallet", "list"])
+            .assert()
+            .success(),
+    );
+    assert_eq!(
+        listed["wallets"],
+        serde_json::json!([{"name": "main", "networks": ["signet"]}])
+    );
 }

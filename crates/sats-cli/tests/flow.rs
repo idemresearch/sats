@@ -97,8 +97,8 @@ fn dry_run_persists_nothing_and_needs_no_password() {
     assert!(json["fee_sat"].as_u64().unwrap() > 0);
 
     // Nothing was signed or saved.
-    assert!(!dir.path().join("signet/transactions").exists());
-    assert!(!dir.path().join("signet/psbts").exists());
+    assert!(!dir.path().join("wallets/main/signet/transactions").exists());
+    assert!(!dir.path().join("wallets/main/signet/psbts").exists());
 
     // A real send still works afterwards.
     sats(&dir)

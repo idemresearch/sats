@@ -15,6 +15,9 @@ use crate::store::{Store, write_atomic};
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub network: String,
+    /// The default named wallet (see `crate::wallets`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subfrost: Option<SubfrostConfig>,
     #[serde(default, skip_serializing_if = "NetworkConfig::is_empty")]
@@ -131,6 +134,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             network: "signet".into(),
+            wallet: None,
             subfrost: None,
             signet: NetworkConfig::default(),
             testnet4: NetworkConfig::default(),
@@ -309,6 +313,9 @@ pub fn network_name(network: Network) -> &'static str {
         _ => "testnet",
     }
 }
+
+/// Every network this build serves.
+pub const NETWORKS: [Network; 3] = [Network::Signet, Network::Testnet4, Network::Regtest];
 
 /// The networks this build serves; mainnet is refused by
 /// [`sats_core::network`].

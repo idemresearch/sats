@@ -93,6 +93,7 @@ advice for exactly that file.
 | `crates/sats-core/src/seal.rs` | Versioned authenticated secret sealing |
 | `crates/sats-core/src/signer.rs` | Signer trait and local in-memory signer |
 | `crates/sats-wallet/src/provider/` | Native chain providers and per-network resolution |
+| `crates/sats-wallet/src/wallets.rs` | Named wallets: one seed each under `wallets/<name>/`, selection, the pre-wallets layout refusal |
 | `crates/sats-wallet/src/store.rs` | Paths, atomic files, permissions, finalized transactions, grants, requests, and the event log |
 | `crates/sats-wallet/src/walletd.rs` | SQLite-backed watch-only BDK wallet |
 | `crates/sats-wallet/src/prepare.rs` | The shared preparation pipeline: validate, sync, exclude dust, estimate, build |

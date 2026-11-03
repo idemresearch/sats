@@ -19,3 +19,4 @@ pub mod revoke;
 pub mod send;
 pub mod status;
 pub mod tx;
+pub mod wallet;

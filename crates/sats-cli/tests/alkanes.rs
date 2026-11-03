@@ -32,8 +32,8 @@ fn standard_build_includes_all_alkanes_commands() {
         .args(["alkanes", "execute", "2:1", "77", "-y"])
         .assert()
         .code(2);
-    assert!(!dir.path().join("seed.sealed").exists());
-    assert!(!dir.path().join("signet").exists());
+    assert!(!dir.path().join("wallets/main/seed.sealed").exists());
+    assert!(!dir.path().join("wallets/main/signet").exists());
 }
 
 #[test]
@@ -64,8 +64,8 @@ fn frbtc_info_is_read_only_and_obsolete_names_and_grant_flags_are_removed() {
         .args(["agent", "grant", "claude", "--allow-alkanes-wrap"])
         .assert()
         .failure();
-    assert!(!dir.path().join("seed.sealed").exists());
-    assert!(!dir.path().join("signet").exists());
+    assert!(!dir.path().join("wallets/main/seed.sealed").exists());
+    assert!(!dir.path().join("wallets/main/signet").exists());
 }
 
 #[test]
@@ -254,7 +254,7 @@ fn mark_outputs(mockdata: &std::path::Path, outputs: &[MockOutput<'_>]) {
 
 /// The one transaction the CLI saved.
 fn saved_transaction(dir: &TempDir) -> sats_core::bitcoin::Transaction {
-    let entries: Vec<_> = std::fs::read_dir(dir.path().join("signet/transactions"))
+    let entries: Vec<_> = std::fs::read_dir(dir.path().join("wallets/main/signet/transactions"))
         .unwrap()
         .collect();
     assert_eq!(entries.len(), 1, "exactly one saved transaction");
@@ -553,7 +553,7 @@ fn a_plain_send_fails_closed_without_the_indexer() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("alkanes view failed"));
-    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(!dir.path().join("wallets/main/signet/transactions").exists());
 }
 
 #[test]
@@ -681,5 +681,5 @@ fn alkanes_send_refuses_what_the_wallet_cannot_prove_it_holds() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("amount must be positive"));
-    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(!dir.path().join("wallets/main/signet/transactions").exists());
 }

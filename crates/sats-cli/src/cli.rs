@@ -14,6 +14,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "NET")]
     pub network: Option<String>,
 
+    /// Wallet to use for this run (overrides the default; see sats wallet)
+    #[arg(long, global = true, env = "SATS_WALLET", value_name = "NAME")]
+    pub wallet: Option<String>,
+
     /// Provider for this run only: --provider esplora=URL or
     /// --provider subfrost=URL
     #[arg(long, global = true, value_name = "KIND=URL",
@@ -109,6 +113,11 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<ProvidersCommand>,
     },
+    /// Show, create, import, and switch named wallets (one seed each)
+    Wallet {
+        #[command(subcommand)]
+        command: Option<WalletCommand>,
+    },
     /// Show the active network or change the CLI's default
     Network {
         #[command(subcommand)]
@@ -118,6 +127,30 @@ pub enum Command {
     Alkanes {
         #[command(subcommand)]
         command: AlkanesCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum WalletCommand {
+    /// List wallets and the networks each is set up on
+    List,
+    /// Create a wallet with a new mnemonic, on the active network
+    Create {
+        /// Wallet name (a-z, 0-9, _ and -)
+        name: String,
+        /// Mnemonic length (12 or 24 words)
+        #[arg(long, default_value_t = 12, value_parser = clap::value_parser!(u8).range(12..=24))]
+        words: u8,
+    },
+    /// Restore a wallet from its mnemonic backup, as a new named wallet
+    Import {
+        /// Wallet name (a-z, 0-9, _ and -)
+        name: String,
+    },
+    /// Set the default wallet; existing MCP connections and grants stay pinned
+    Use {
+        /// Wallet name
+        name: String,
     },
 }
 

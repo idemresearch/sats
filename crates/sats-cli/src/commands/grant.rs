@@ -186,19 +186,17 @@ pub fn run(
     Ok(())
 }
 
-/// Pin the same configuration and data locations the grant used. When the
+/// Pin the same configuration and data locations, wallet, and network the
+/// grant used. When the
 /// config and data directories are identical (`--dir`, `SATS_DIR`, or the
 /// macOS default), one explicit --dir is the shortest equivalent command.
 /// A split default layout retains the directory resolver's roots and
 /// removes a future client's SATS_DIR in the launched process itself.
 fn mcp_launch_command(store: &Store, network: &str, agent: &str) -> Result<String> {
     let mut args = Vec::new();
-    let config_path = store.config_path();
-    let seed_path = store.seed_path();
-    let pinned_dir = match (config_path.parent(), seed_path.parent()) {
-        (Some(config_dir), Some(data_dir)) if config_dir == data_dir => Some(data_dir),
-        _ => None,
-    };
+    let config_dir = store.config_dir();
+    let data_root = store.data_root();
+    let pinned_dir = (config_dir == data_root).then_some(data_root);
 
     if pinned_dir.is_none() {
         let dirs = directories::BaseDirs::new().context("cannot determine home directory")?;
@@ -218,6 +216,11 @@ fn mcp_launch_command(store: &Store, network: &str, agent: &str) -> Result<Strin
         "--network".into(),
         network.into(),
     ]);
+    // The wallet is pinned like the network: switching the default wallet
+    // never moves an agent to another seed.
+    if let Some(wallet) = store.wallet_name() {
+        args.extend(["--wallet".into(), wallet.into()]);
+    }
     if let Some(dir) = pinned_dir {
         args.extend(["--dir".into(), absolute_shell_path(dir)?]);
     }

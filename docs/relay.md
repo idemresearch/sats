@@ -60,7 +60,7 @@ sats relay sync --watch
 
 - `relay link` creates this device's relay key and records the relay. The
   key is used only to talk to the relay, never to sign transactions. It's
-  stored per network in `relay.json`, with owner-only permissions.
+  stored per wallet and network in `relay.json`, with owner-only permissions.
   Linking again keeps the key; `--new-key` replaces it, which retires every
   agent URL minted with the old one.
 - `agent grant --relay` creates an ordinary grant and prints the agent's MCP

@@ -37,6 +37,11 @@ exact options in your installed version.
 | `sats alkanes simulate <ID> <INPUTS>...` | Show an advisory simulation |
 | `sats alkanes send <ID> <AMOUNT> <ADDRESS>` | Transfer an asset in its base units |
 | `sats alkanes frbtc info` | Read the frBTC contract hash and BTC signer |
+| `sats wallet` | Show the active wallet and network |
+| `sats wallet list` | List wallets and the networks each is set up on |
+| `sats wallet create <NAME> [--words 24]` | Create a wallet with a new mnemonic |
+| `sats wallet import <NAME>` | Restore a mnemonic as a new named wallet |
+| `sats wallet use <NAME>` | Set the CLI's default wallet |
 | `sats network` | Show the active network and saved default |
 | `sats network use <signet\|testnet4\|regtest>` | Set the CLI's default network |
 
@@ -45,12 +50,14 @@ exact options in your installed version.
 | Option | Meaning |
 |---|---|
 | `--network <NET>` | `signet`, `testnet4`, or `regtest`. Overrides the config. Mainnet is refused. |
+| `--wallet <NAME>` | Use this wallet for one command. Overrides the config; also `SATS_WALLET`. |
 | `--provider <KIND=URL>` | Replace the network's provider for this run. See [Providers](providers.md#one-off-overrides). |
 | `--json` | Machine-readable output, where supported |
 
 | Variable | Meaning |
 |---|---|
-| `SATS_DIR` | Put all configuration and data under one directory. Useful for test wallets. |
+| `SATS_DIR` | Put all configuration and data under one directory. |
+| `SATS_WALLET` | The wallet to use, like `--wallet`. |
 
 **Amounts** are whole satoshis. `25000`, `25k`, and `1.5m` (1,500,000) all
 work. Suffixes are case-insensitive, and shorthand must resolve to a whole
@@ -62,14 +69,39 @@ sat.
 sats init                     # asks: create a new wallet, or restore one
 sats init --words 24          # create, with a 24-word mnemonic
 sats init --restore           # restore from a mnemonic backup
-sats --network testnet4 init  # add another test network
+sats --network testnet4 init  # add another test network to this wallet
 ```
 
 `init` shows a new mnemonic once. Write it down before you continue. One seed
-serves every network: on a machine that already has a seed, `init` with
-another `--network` adds that network's wallet. If a wallet already exists,
-use `sats balance` or `sats receive`. For a separate test wallet, point
-`SATS_DIR` at an empty directory.
+serves every network: on a wallet that already has a seed, `init` with
+another `--network` adds that network. If a wallet already exists, use
+`sats balance` or `sats receive`.
+
+### Wallets
+
+Each named wallet has its own seed. The wallet and the network are separate
+choices, each with a saved default and a one-command override:
+
+```sh
+sats wallet list                    # * main   signet, testnet4
+sats wallet create test             # a new mnemonic, on the active network
+sats wallet import old              # restore a mnemonic as wallet "old"
+sats wallet use test                # save the default wallet
+sats --wallet main balance          # use another wallet for one command
+sats wallet                         # which wallet and network is active
+```
+
+The active wallet is `--wallet` (or `SATS_WALLET`), else the saved default,
+else the only wallet there is, else `main`. Plain `sats init` with no wallet
+yet creates `main`. The first wallet you create or import becomes the
+default; later ones don't until you `sats wallet use` them.
+
+Grants, requests, saved transactions, and relay links belong to one wallet
+on one network. MCP setup commands pin `--wallet` as well as `--network`, so
+switching the default never moves an agent to another seed.
+
+Wallet names are 1–32 characters of `a-z`, `0-9`, `_`, and `-`, starting with
+a letter or digit.
 
 ### Switching networks
 
@@ -98,7 +130,8 @@ argument. It validates the BIP-39 checksum before writing anything, names the
 mistyped word when it can, seals the seed with a new password, and rescans the
 chain on first sync.
 
-- Restore needs an empty data directory.
+- Restore into a wallet without a seed: `sats wallet import <NAME>` makes a
+  new one.
 - sats derives BIP-86 Taproot addresses only (`bc1p…`, `tb1p…`). Coins on
   other address types won't appear, but they aren't lost.
 - Restore only a seed made for testing. sats refuses mainnet, and a seed it
@@ -384,10 +417,16 @@ no JSON mode, so the mnemonic never lands on a machine-readable stream.
 | Linux | `~/.config/sats/config.toml` | `~/.local/share/sats/` |
 | macOS | `~/Library/Application Support/sats/config.toml` | same directory |
 
-`SATS_DIR` replaces both with one directory.
+`SATS_DIR` replaces both with one directory. Wallets live under the data
+directory, one folder each: `wallets/<name>/`.
+
+A data directory from before named wallets keeps its seed at the top level.
+sats refuses it and prints the exact `mv` that makes it the wallet `main`;
+nothing is moved for you.
 
 ```toml
 network = "signet"        # default network
+wallet = "main"           # default wallet
 
 [signet]
 fee_target = 1008         # confirmation target in blocks (1–1008, default 2)

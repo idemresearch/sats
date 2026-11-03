@@ -66,14 +66,14 @@ fn alkanes_reads_preserve_precision_unknown_results_and_the_pinned_network_witho
     )
     .unwrap();
     let token = grant_token(&dir, "claude", &["--mode", "observe"]);
-    let grant_path = dir.path().join("signet/grants/claude.json");
+    let grant_path = dir.path().join("wallets/main/signet/grants/claude.json");
     let grant_before = std::fs::read(&grant_path).unwrap();
     let mut mcp = McpSession::start(&dir, "claude", &token);
     handshake(&mut mcp);
 
     // Reads cannot depend on a seed. Changing the CLI default cannot move
     // an existing connection or its grant to another network.
-    std::fs::remove_file(dir.path().join("seed.sealed")).unwrap();
+    std::fs::remove_file(dir.path().join("wallets/main/seed.sealed")).unwrap();
     let config_path = dir.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path).unwrap();
     std::fs::write(
@@ -131,10 +131,14 @@ fn alkanes_reads_preserve_precision_unknown_results_and_the_pinned_network_witho
         }
     }
     assert_eq!(std::fs::read(grant_path).unwrap(), grant_before);
-    assert!(!dir.path().join("signet/agent-requests").exists());
-    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(
+        !dir.path()
+            .join("wallets/main/signet/agent-requests")
+            .exists()
+    );
+    assert!(!dir.path().join("wallets/main/signet/transactions").exists());
     assert!(!mock.join("broadcasts.log").exists());
-    assert!(!dir.path().join("testnet4").exists());
+    assert!(!dir.path().join("wallets/main/testnet4").exists());
 }
 
 #[test]
@@ -229,7 +233,7 @@ fn alkanes_reads_validate_inputs_and_fail_closed_on_provider_or_sync_failure() {
         mcp.call_tool(10, "get_grant", serde_json::json!({}))["active"],
         true
     );
-    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(!dir.path().join("wallets/main/signet/transactions").exists());
     assert!(!fx.mockdata.join("broadcasts.log").exists());
 }
 
@@ -335,7 +339,7 @@ fn alkanes_reads_check_the_provider_network_preserve_wire_precision_and_redact_f
                 .all(|rpc| rpc["method"] == "esplora_block-height")
         );
     }
-    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(!dir.path().join("wallets/main/signet/transactions").exists());
 }
 
 #[test]
@@ -543,7 +547,7 @@ fn alkanes_send_request_is_local_keyless_human_approved_and_observed() {
     let token = grant_token(&dir, "claude", &["--max-tx", "546"]);
     let mut mcp = McpSession::start(&dir, "claude", &token);
     handshake(&mut mcp);
-    let seed_path = dir.path().join("seed.sealed");
+    let seed_path = dir.path().join("wallets/main/seed.sealed");
     let sealed = std::fs::read(&seed_path).unwrap();
     let config_path = dir.path().join("config.toml");
     let config = std::fs::read(&config_path).unwrap();
@@ -571,7 +575,7 @@ fn alkanes_send_request_is_local_keyless_human_approved_and_observed() {
         "idempotency_key_conflict"
     );
     assert!(!mock.join("broadcasts.log").exists());
-    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(!dir.path().join("wallets/main/signet/transactions").exists());
     std::fs::write(&config_path, config).unwrap();
     std::fs::write(&seed_path, sealed).unwrap();
 
@@ -724,7 +728,7 @@ fn alkanes_send_requests_preserve_u128_reject_extra_authority_and_obey_observe()
     }
     assert_eq!(saved_transactions(&dir), 0);
     assert!(!fx.mockdata.join("broadcasts.log").exists());
-    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(!dir.path().join("wallets/main/signet/transactions").exists());
 }
 
 #[test]
@@ -763,7 +767,7 @@ fn frbtc_wrap_request_is_human_approved_and_observed_end_to_end() {
     let view = mcp.call_tool(2, "get_grant", serde_json::json!({}));
     assert!(view.get("alkanes_wrap").is_none());
     // Filing reads public contract facts without loading a seed or preparing.
-    let seed_path = dir.path().join("seed.sealed");
+    let seed_path = dir.path().join("wallets/main/seed.sealed");
     let sealed = std::fs::read(&seed_path).unwrap();
     std::fs::remove_file(&seed_path).unwrap();
     let config_path = dir.path().join("config.toml");
@@ -786,7 +790,7 @@ fn frbtc_wrap_request_is_human_approved_and_observed_end_to_end() {
         "idempotency_key_conflict"
     );
     assert!(!mock.join("broadcasts.log").exists());
-    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(!dir.path().join("wallets/main/signet/transactions").exists());
     std::fs::write(&config_path, config).unwrap();
     std::fs::write(&seed_path, sealed).unwrap();
     let approval = sats_output(&dir, &["--json", "agent", "approve", &id, "--yes"]);
@@ -907,8 +911,8 @@ fn request_send_files_pending_and_approve_executes() {
     assert!(filed.get("txid").is_none());
     assert_eq!(event_kinds(&dir), ["request_received"]);
     assert!(
-        !dir.path().join("signet/transactions").exists()
-            || std::fs::read_dir(dir.path().join("signet/transactions"))
+        !dir.path().join("wallets/main/signet/transactions").exists()
+            || std::fs::read_dir(dir.path().join("wallets/main/signet/transactions"))
                 .unwrap()
                 .count()
                 == 0,
@@ -916,11 +920,12 @@ fn request_send_files_pending_and_approve_executes() {
     );
 
     // Observing is free: the record and the log are untouched.
-    let record_path = dir
-        .path()
-        .join(format!("signet/agent-requests/claude/{id}.json"));
+    let record_path = dir.path().join(format!(
+        "wallets/main/signet/agent-requests/claude/{id}.json"
+    ));
     let record_before = std::fs::read(&record_path).unwrap();
-    let events_before = std::fs::read(dir.path().join("signet/events/log.jsonl")).unwrap();
+    let events_before =
+        std::fs::read(dir.path().join("wallets/main/signet/events/log.jsonl")).unwrap();
     for call in [3, 4] {
         let view = mcp.check_request(call, &id);
         assert_eq!(view["status"], "pending_approval", "got: {view}");
@@ -937,7 +942,7 @@ fn request_send_files_pending_and_approve_executes() {
     );
     assert_eq!(std::fs::read(&record_path).unwrap(), record_before);
     assert_eq!(
-        std::fs::read(dir.path().join("signet/events/log.jsonl")).unwrap(),
+        std::fs::read(dir.path().join("wallets/main/signet/events/log.jsonl")).unwrap(),
         events_before
     );
 
@@ -962,7 +967,10 @@ fn request_send_files_pending_and_approve_executes() {
     assert_eq!(view["fee_sat"], fee);
 
     // Attribution and accounting.
-    let record = read_json(&dir.path().join(format!("signet/transactions/{txid}.json")));
+    let record = read_json(
+        &dir.path()
+            .join(format!("wallets/main/signet/transactions/{txid}.json")),
+    );
     assert_eq!(record["status"], "broadcast");
     assert_eq!(record["origin"]["surface"], "agent");
     assert_eq!(record["origin"]["agent"], "claude");
@@ -1120,7 +1128,7 @@ fn revocation_takes_effect_mid_session() {
     let filed = mcp.request_send(2, 1_000, "before");
     assert_eq!(filed["status"], "pending_approval");
     let before = id_of(&filed);
-    let requests_dir = dir.path().join("signet/agent-requests/claude");
+    let requests_dir = dir.path().join("wallets/main/signet/agent-requests/claude");
     let records = || {
         std::fs::read_dir(&requests_dir)
             .unwrap()
@@ -1209,7 +1217,10 @@ fn broadcast_failure_observes_as_broadcast_pending_until_rebroadcast() {
             .unwrap()
             .contains("signed transaction is saved")
     );
-    let record = read_json(&dir.path().join(format!("signet/transactions/{txid}.json")));
+    let record = read_json(
+        &dir.path()
+            .join(format!("wallets/main/signet/transactions/{txid}.json")),
+    );
     assert_eq!(record["status"], "pending");
     let view = mcp.check_request(3, &flaky);
     assert_eq!(view["status"], "broadcast_pending", "got: {view}");
@@ -1224,7 +1235,7 @@ fn broadcast_failure_observes_as_broadcast_pending_until_rebroadcast() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("sats tx broadcast"));
     assert_eq!(
-        std::fs::read_dir(dir.path().join("signet/transactions"))
+        std::fs::read_dir(dir.path().join("wallets/main/signet/transactions"))
             .unwrap()
             .count(),
         1
@@ -1318,16 +1329,18 @@ fn a_replaced_grant_refuses_the_old_session_without_writing() {
     );
 
     let _fresh = grant_token(&dir, "claude", &[]);
-    let requests_before = std::fs::read_dir(dir.path().join("signet/agent-requests/claude"))
-        .unwrap()
-        .count();
+    let requests_before =
+        std::fs::read_dir(dir.path().join("wallets/main/signet/agent-requests/claude"))
+            .unwrap()
+            .count();
     let refused = mcp.request_send(3, 1_000, "stale-1");
     assert_eq!(refused["status"], "error", "got: {refused}");
     assert_eq!(refused["error_code"], "unauthorized");
     assert!(refused.get("reason").is_none(), "not a policy denial");
-    let requests_after = std::fs::read_dir(dir.path().join("signet/agent-requests/claude"))
-        .unwrap()
-        .count();
+    let requests_after =
+        std::fs::read_dir(dir.path().join("wallets/main/signet/agent-requests/claude"))
+            .unwrap()
+            .count();
     assert_eq!(
         requests_before, requests_after,
         "an unauthorized caller must not create request records"
@@ -1360,7 +1373,7 @@ fn expiry_cuts_off_a_running_session() {
     let address = mcp.call_tool(3, "get_receive_address", serde_json::json!({}));
     let index = address["index"].as_u64().unwrap();
 
-    let grant_path = dir.path().join("signet/grants/claude.json");
+    let grant_path = dir.path().join("wallets/main/signet/grants/claude.json");
     let mut grant = read_json(&grant_path);
     grant["expires_at"] = serde_json::json!(1);
     std::fs::write(&grant_path, grant.to_string()).unwrap();
@@ -1396,7 +1409,7 @@ fn a_request_pending_at_expiry_is_denied_at_approval() {
     assert_eq!(filed["status"], "pending_approval");
     let late = id_of(&filed);
 
-    let grant_path = dir.path().join("signet/grants/claude.json");
+    let grant_path = dir.path().join("wallets/main/signet/grants/claude.json");
     let mut grant = read_json(&grant_path);
     grant["expires_at"] = serde_json::json!(1);
     std::fs::write(&grant_path, grant.to_string()).unwrap();
@@ -1408,7 +1421,7 @@ fn a_request_pending_at_expiry_is_denied_at_approval() {
     assert_eq!(request_record(&dir, "claude", &late)["status"], "denied");
     assert_eq!(saved_transactions(&dir), 0);
     assert_eq!(event_kinds(&dir), ["request_received", "denied"]);
-    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(!dir.path().join("wallets/main/signet/transactions").exists());
 
     // The expired session observes nothing; a fresh grant's session sees
     // the old request as denied, with the reason.
@@ -1468,11 +1481,12 @@ fn provider_resolution_is_deferred_until_an_mcp_chain_read() {
     assert_eq!(filed["status"], "pending_approval");
     let id = id_of(&filed);
     let paths = [
-        dir.path()
-            .join(format!("signet/agent-requests/claude/{id}.json")),
-        dir.path().join("signet/grants/claude.json"),
-        dir.path().join("signet/events/log.jsonl"),
-        dir.path().join("signet/wallet.sqlite"),
+        dir.path().join(format!(
+            "wallets/main/signet/agent-requests/claude/{id}.json"
+        )),
+        dir.path().join("wallets/main/signet/grants/claude.json"),
+        dir.path().join("wallets/main/signet/events/log.jsonl"),
+        dir.path().join("wallets/main/signet/wallet.sqlite"),
     ];
     let before: Vec<_> = paths.iter().map(|p| std::fs::read(p).unwrap()).collect();
     assert_eq!(mcp.check_request(6, &id), filed);
@@ -1486,7 +1500,7 @@ fn provider_resolution_is_deferred_until_an_mcp_chain_read() {
     // an identical retry above write nothing.
     assert_eq!(event_kinds(&dir), ["request_received", "conflicted"]);
     assert_eq!(saved_transactions(&dir), 0);
-    assert!(!dir.path().join("signet/transactions").exists());
+    assert!(!dir.path().join("wallets/main/signet/transactions").exists());
 
     let balance = mcp.call_tool_raw(9, "get_balance", serde_json::json!({}));
     assert!(
@@ -1645,7 +1659,10 @@ fn broadcast_timeout_keeps_the_signed_transaction() {
     let approved = approve(&dir, &id);
     assert_eq!(approved["status"], "broadcast_pending", "got: {approved}");
     let txid = approved["txid"].as_str().unwrap();
-    let record = read_json(&dir.path().join(format!("signet/transactions/{txid}.json")));
+    let record = read_json(
+        &dir.path()
+            .join(format!("wallets/main/signet/transactions/{txid}.json")),
+    );
     assert_eq!(record["status"], "pending");
     assert_eq!(saved_transactions(&dir), 1);
     assert_eq!(
@@ -1693,11 +1710,11 @@ fn preparation_receipts_redact_provider_secrets_and_observation_stays_local() {
         std::fs::write(config_path, toml::to_string(&config).unwrap()).unwrap();
         let output = sats_output(&dir, &["agent", "approve", &id, "--yes"]);
         assert!(!output.status.success());
-        let request_path = dir
-            .path()
-            .join(format!("signet/agent-requests/claude/{id}.json"));
-        let grant_path = dir.path().join("signet/grants/claude.json");
-        let events_path = dir.path().join("signet/events/log.jsonl");
+        let request_path = dir.path().join(format!(
+            "wallets/main/signet/agent-requests/claude/{id}.json"
+        ));
+        let grant_path = dir.path().join("wallets/main/signet/grants/claude.json");
+        let events_path = dir.path().join("wallets/main/signet/events/log.jsonl");
         let before: Vec<_> = [&request_path, &grant_path, &events_path]
             .iter()
             .map(|p| std::fs::read(p).unwrap())

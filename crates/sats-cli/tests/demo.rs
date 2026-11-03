@@ -82,7 +82,7 @@ fn mcp_demo() {
 
     scene("3. Expiry: a request pending when its grant expires is denied at approval");
     let (dir, _fx, mut mcp, id) = filed(&[]);
-    let grant_path = dir.path().join("signet/grants/claude.json");
+    let grant_path = dir.path().join("wallets/main/signet/grants/claude.json");
     let mut grant = read_json(&grant_path);
     grant["expires_at"] = serde_json::json!(1);
     std::fs::write(&grant_path, grant.to_string()).unwrap();

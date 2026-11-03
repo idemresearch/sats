@@ -33,7 +33,7 @@ def read_record(request_id):
 
 
 def record_path(request_id):
-    return ROOT / "signet/agent-requests/claude" / (request_id + ".json")
+    return ROOT / "wallets/main/signet/agent-requests/claude" / (request_id + ".json")
 
 
 def write_record(record):
@@ -186,7 +186,7 @@ class Terminal:
 
 def unchanged(request_id, status="pending_approval"):
     assert read_record(request_id)["status"] == status
-    saved = ROOT / "signet/transactions"
+    saved = ROOT / "wallets/main/signet/transactions"
     assert not saved.exists() or not list(saved.glob("*.json"))
 
 
@@ -222,7 +222,7 @@ try:
     unchanged(request_id)
     for field in ["Wallet", "Network", "signet", ADDRESS, "Amount", "Fee", "Total"]:
         assert field in review.transcript(), review.transcript()
-    assert str((ROOT / "signet/wallet.sqlite").resolve()) in review.transcript()
+    assert str((ROOT / "wallets/main/signet/wallet.sqlite").resolve()) in review.transcript()
     review.send("n\n")
     review.finish()
     unchanged(request_id)
@@ -329,11 +329,11 @@ try:
     assert PASSWORD not in happy.transcript(), "password was echoed"
     observed = mcp.check(request_id)
     assert observed["status"] == "sent" and observed["txid"] == approved["txid"], observed
-    events = [json.loads(line) for line in (ROOT / "signet/events/log.jsonl").read_text().splitlines()]
+    events = [json.loads(line) for line in (ROOT / "wallets/main/signet/events/log.jsonl").read_text().splitlines()]
     kinds = [e["event"] for e in events if e.get("request_id") == request_id]
     for kind in ["request_received", "approved", "signed", "broadcast"]:
         assert kinds.count(kind) == 1, kinds
-    assert len(list((ROOT / "signet/transactions").glob("*.json"))) == 1
+    assert len(list((ROOT / "wallets/main/signet/transactions").glob("*.json"))) == 1
     cli("agent", "approve", request_id, "--yes", ok=False)
 
     # Revocation and re-issue between selection and action stay hard boundaries

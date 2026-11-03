@@ -65,6 +65,7 @@ config and data directories and never looks up a home directory.
 | Module | Owns |
 |---|---|
 | `config` | TOML configuration and network names |
+| `wallets` | Named wallets under one data root: names, listing, selection, the pre-wallets layout refusal |
 | `store` | Paths, atomic files, permissions, transactions, grants, requests, the event log |
 | `walletd` | The SQLite-backed watch-only BDK wallet |
 | `provider` | Per-network provider, driver resolution, chain access, Alkanes views |
@@ -151,11 +152,12 @@ and must never gain filesystem, network, or store dependencies.
 
 `config.toml` lives in the config directory and everything else in the data
 directory (see [CLI](cli.md#configuration)). `SATS_DIR` puts both in one
-directory.
+directory. Each named wallet is a folder, `wallets/<name>/`, and the paths
+below are relative to it, except `config.toml`, which every wallet shares.
 
 | State | Path | Contents |
 |---|---|---|
-| Configuration | `config.toml` (owner-only) | Default network, fee targets, providers and their credentials |
+| Configuration | `config.toml` (owner-only) | Default wallet and network, fee targets, providers and their credentials |
 | Seed | `seed.sealed` | Password-sealed mnemonic, shared by every network |
 | Wallet | `<network>/wallet.sqlite` | Public descriptors and BDK chain state |
 | Transactions | `<network>/transactions/<txid>.json` | Raw signed hex, broadcast status, payment metadata, `origin` |
