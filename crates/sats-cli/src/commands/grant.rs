@@ -141,6 +141,9 @@ pub fn run(
         });
         if let Some(url) = &relay_url {
             out["relay_url"] = serde_json::Value::String(url.to_string());
+            if let Some(link) = &relay {
+                out["relay_mcp_url"] = serde_json::Value::String(link.mcp_url());
+            }
         }
         println!("{out}");
     } else {
@@ -153,11 +156,18 @@ pub fn run(
             ui::ok(&format!("granted  {agent}"));
         }
         println!();
-        if let Some(url) = &relay_url {
-            println!("Add this URL to your agent as a remote MCP server (no authentication).");
-            println!("It carries the token: copy it now, sats cannot show it again.");
+        if let (Some(url), Some(link)) = (&relay_url, &relay) {
+            println!("Add this MCP server to your agent (sign in with OAuth):");
+            println!();
+            println!("  {}", link.mcp_url());
+            println!();
+            println!("When it asks you to sign in, paste this connection code. It carries the");
+            println!("token: copy it now, sats cannot show it again.");
             println!();
             println!("{}", url.as_str());
+            println!();
+            println!("An agent without OAuth can use the code itself as its MCP URL, with no");
+            println!("authentication.");
             println!();
             println!("Bring requests here: sats relay sync --watch");
             if grant.mode == sats_core::authz::GrantMode::Ask {

@@ -129,6 +129,11 @@ impl RelayLink {
         self.key.public_hex()
     }
 
+    /// The relay's MCP endpoint for agents that sign in with OAuth.
+    pub fn mcp_url(&self) -> String {
+        format!("{}/mcp", self.url)
+    }
+
     /// The MCP URL an agent uses to file under `grant` through the relay.
     /// It carries the grant's token: treat it like the token.
     pub fn agent_url(&self, grant: &Grant, token: &str) -> Result<Zeroizing<String>> {

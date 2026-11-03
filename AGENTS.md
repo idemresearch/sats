@@ -102,7 +102,7 @@ advice for exactly that file.
 | `crates/sats-wallet/src/request/` | The native request workflow: create, dismiss, reconcile, and the human-authorized executor |
 | `crates/sats-wallet/src/spend.rs` | The shared signing and broadcast tail: persist before broadcast, rebroadcast |
 | `crates/sats-wallet/src/relay.rs` | The device's side of a relay: link, mint agent URLs, sync filings through `request` |
-| `crates/sats-relay/` | The keyless relay binary: MCP for agents, the signed device API, the sealed mailbox |
+| `crates/sats-relay/` | The keyless relay binary: MCP for agents (OAuth or capability URL), the signed device API, the sealed mailbox |
 | `crates/sats-cli/src/main.rs` | Composition and command dispatch only |
 | `crates/sats-cli/src/cli.rs` | Clap command and flag definitions |
 | `crates/sats-cli/src/commands/` | Human CLI workflows and rendering |

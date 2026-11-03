@@ -134,7 +134,8 @@ No protocol grant fields or agent-facing execution primitive are added.
 ### `sats-relay`
 
 The keyless relay between sats agent and sats human ([Relay](relay.md)): MCP
-Streamable HTTP for agents at `/mcp/<capability>`, a signed device API
+Streamable HTTP for agents at `/mcp` (OAuth sign-in) or `/mcp/<capability>`,
+an OAuth authorization server whose consent is the pasted capability, a signed device API
 (`/v1/inbox`, `/v1/results`), and a SQLite mailbox of sealed filings and
 posted results. It depends on `sats-core` only. It doesn't link
 `sats-wallet`, so it has no wallet, provider, or signer code.

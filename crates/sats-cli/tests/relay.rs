@@ -275,3 +275,273 @@ fn the_relay_serves_whatever_host_a_proxy_forwards() {
     // Authentication, not the host, is what guards each route.
     assert!(raw_status(&relay, "GET", "/v1/inbox", host, "").contains(" 401 "));
 }
+
+/// One raw HTTP/1.1 exchange, so redirects are seen rather than followed.
+/// Returns (status code, headers, body).
+fn raw(
+    relay: &str,
+    method: &str,
+    path: &str,
+    content_type: &str,
+    body: &str,
+) -> (u16, String, String) {
+    use std::io::{Read, Write};
+    let addr = relay.trim_start_matches("http://");
+    let mut stream = std::net::TcpStream::connect(addr).unwrap();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: {content_type}\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut response = String::new();
+    let _ = stream.read_to_string(&mut response);
+    let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+    let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (status, head.to_string(), body.to_string())
+}
+
+fn form(pairs: &[(&str, &str)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{k}={}", sats_relay::oauth::encode(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn location_param(head: &str, name: &str) -> Option<String> {
+    let location = head.lines().find_map(|line| {
+        line.strip_prefix("location: ")
+            .or_else(|| line.strip_prefix("Location: "))
+    })?;
+    let query = location.split_once('?')?.1;
+    sats_relay::oauth::parse_form(query)
+        .into_iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v)
+}
+
+/// The OAuth flow as ChatGPT runs it: discover, register, sign in with the
+/// connection code, trade the code for tokens with PKCE, then file.
+#[test]
+fn an_agent_signs_in_with_oauth_and_files_with_a_bearer_token() {
+    let relay_data = TempDir::new().unwrap();
+    let relay = start_relay(&relay_data);
+    let dir = TempDir::new().unwrap();
+    wrap_ready_wallet(&dir);
+    let grant = sats_json(&dir, &["--json", "relay", "link", &relay]);
+    assert_eq!(grant["url"], relay);
+    let grant = sats_json(
+        &dir,
+        &[
+            "--json", "agent", "grant", "chatgpt", "--max-tx", "10000", "--relay",
+        ],
+    );
+    let code_text = grant["relay_url"].as_str().unwrap().to_string();
+    assert_eq!(grant["relay_mcp_url"], format!("{relay}/mcp"));
+
+    // 1. An unauthenticated call points at the metadata.
+    let (status, head, _) = raw(&relay, "POST", "/mcp", "application/json", "{}");
+    assert_eq!(status, 401);
+    assert!(
+        head.to_lowercase().contains(&format!(
+            "www-authenticate: bearer resource_metadata=\"{relay}/.well-known/oauth-protected-resource\""
+        )),
+        "{head}"
+    );
+    // 2-3. Discovery.
+    let resource: serde_json::Value =
+        minreq::get(format!("{relay}/.well-known/oauth-protected-resource"))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+    assert_eq!(resource["resource"], format!("{relay}/mcp"));
+    assert_eq!(resource["authorization_servers"][0], relay);
+    let server: serde_json::Value =
+        minreq::get(format!("{relay}/.well-known/oauth-authorization-server"))
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+    assert_eq!(
+        server["code_challenge_methods_supported"],
+        serde_json::json!(["S256"])
+    );
+    // 4. Dynamic client registration.
+    let redirect = "https://chatgpt.com/connector_platform_oauth_redirect";
+    let registered: serde_json::Value =
+        minreq::post(server["registration_endpoint"].as_str().unwrap())
+            .with_json(&serde_json::json!({"redirect_uris": [redirect], "client_name": "ChatGPT"}))
+            .unwrap()
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+    let client_id = registered["client_id"].as_str().unwrap().to_string();
+    let (status, _, _) = raw(
+        &relay,
+        "POST",
+        "/oauth/register",
+        "application/json",
+        r#"{"redirect_uris":["http://evil.example/cb"]}"#,
+    );
+    assert_eq!(status, 400);
+
+    // 5. The sign-in page, then the human pastes the connection code.
+    let verifier = "a-pkce-verifier-that-is-long-enough-to-satisfy-rfc-7636";
+    let challenge = sats_relay::oauth::pkce_challenge(verifier);
+    let params = |extra: &[(&str, &str)]| {
+        let mut pairs = vec![
+            ("response_type", "code"),
+            ("client_id", client_id.as_str()),
+            ("redirect_uri", redirect),
+            ("state", "xyz"),
+            ("code_challenge", challenge.as_str()),
+            ("code_challenge_method", "S256"),
+        ];
+        pairs.extend_from_slice(extra);
+        form(&pairs)
+    };
+    let (status, head, page) = raw(
+        &relay,
+        "GET",
+        &format!("/oauth/authorize?{}", params(&[])),
+        "text/plain",
+        "",
+    );
+    assert_eq!(status, 200);
+    assert!(
+        page.contains("chatgpt.com") && page.contains("sats agent grant"),
+        "{page}"
+    );
+    assert!(head.to_lowercase().contains("x-frame-options: deny"));
+    let wrong = raw(
+        &relay,
+        "GET",
+        &format!(
+            "/oauth/authorize?{}",
+            form(&[
+                ("response_type", "code"),
+                ("client_id", &client_id),
+                ("redirect_uri", "https://evil.example/cb"),
+                ("code_challenge", &challenge),
+                ("code_challenge_method", "S256"),
+            ])
+        ),
+        "text/plain",
+        "",
+    );
+    assert_eq!(wrong.0, 400, "an unregistered redirect never gets a form");
+    let (status, _, page) = raw(
+        &relay,
+        "POST",
+        "/oauth/authorize",
+        "application/x-www-form-urlencoded",
+        &params(&[("code", "not-a-code")]),
+    );
+    assert_eq!(status, 400);
+    assert!(page.contains("valid connection code"));
+    let authorize = |relay: &str| {
+        let (status, head, _) = raw(
+            relay,
+            "POST",
+            "/oauth/authorize",
+            "application/x-www-form-urlencoded",
+            &params(&[("code", &code_text)]),
+        );
+        assert_eq!(status, 302, "{head}");
+        assert_eq!(location_param(&head, "state").as_deref(), Some("xyz"));
+        location_param(&head, "code").unwrap()
+    };
+
+    // 6. Code for tokens: PKCE must match, and a code works once.
+    let token = |pairs: &[(&str, &str)]| {
+        let (status, _, body) = raw(
+            &relay,
+            "POST",
+            "/oauth/token",
+            "application/x-www-form-urlencoded",
+            &form(pairs),
+        );
+        (
+            status,
+            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+        )
+    };
+    let first = authorize(&relay);
+    let wrong_verifier = "another-pkce-verifier-that-is-long-enough-for-rfc-7636";
+    let (status, body) = token(&[
+        ("grant_type", "authorization_code"),
+        ("code", &first),
+        ("redirect_uri", redirect),
+        ("client_id", &client_id),
+        ("code_verifier", wrong_verifier),
+    ]);
+    assert_eq!(
+        (status, body["error"].as_str()),
+        (400, Some("invalid_grant"))
+    );
+    let (status, _) = token(&[
+        ("grant_type", "authorization_code"),
+        ("code", &first),
+        ("redirect_uri", redirect),
+        ("client_id", &client_id),
+        ("code_verifier", verifier),
+    ]);
+    assert_eq!(status, 400, "a code is spent by its first use");
+    let code = authorize(&relay);
+    let (status, tokens) = token(&[
+        ("grant_type", "authorization_code"),
+        ("code", &code),
+        ("redirect_uri", redirect),
+        ("client_id", &client_id),
+        ("code_verifier", verifier),
+    ]);
+    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(tokens["token_type"], "Bearer");
+    let access = tokens["access_token"].as_str().unwrap().to_string();
+    let refresh = tokens["refresh_token"].as_str().unwrap().to_string();
+
+    // 7. File and observe with the bearer token on the plain /mcp URL.
+    let mut agent = McpHttp::connect_as(&format!("{relay}/mcp"), "sats-relay", Some(&access));
+    let filed = wrap(&mut agent, 2, 10_000, "oauth-wrap");
+    assert_eq!(filed["status"], "pending_approval", "{filed}");
+    let id = id_of(&filed);
+    assert_eq!(sync(&dir)["created"], serde_json::json!([id]));
+    assert_eq!(check(&mut agent, 3, &id)["operation"], "frbtc_wrap");
+    let (status, _, _) = raw(&relay, "POST", "/mcp", "application/json", "{}");
+    assert_eq!(status, 401);
+
+    // 8. Refresh rotates: the old refresh token is spent.
+    let (status, rotated) = token(&[
+        ("grant_type", "refresh_token"),
+        ("refresh_token", &refresh),
+        ("client_id", &client_id),
+    ]);
+    assert_eq!(status, 200, "{rotated}");
+    assert_ne!(rotated["refresh_token"], refresh.as_str());
+    let (status, _) = token(&[
+        ("grant_type", "refresh_token"),
+        ("refresh_token", &refresh),
+        ("client_id", &client_id),
+    ]);
+    assert_eq!(status, 400);
+    let mut renewed = McpHttp::connect_as(
+        &format!("{relay}/mcp"),
+        "sats-relay",
+        rotated["access_token"].as_str(),
+    );
+    assert_eq!(check(&mut renewed, 2, &id)["request_id"], id);
+
+    // At rest, the relay holds no token, code, capability, or grant token.
+    let db = std::fs::read(relay_data.path().join("relay.db")).unwrap();
+    let capability = code_text.rsplit('/').next().unwrap().to_string();
+    for secret in [&access, &refresh, &capability] {
+        assert!(
+            !db.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "relay store leaked a credential"
+        );
+    }
+}

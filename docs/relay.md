@@ -63,14 +63,40 @@ sats relay sync --watch
   stored per wallet and network in `relay.json`, with owner-only permissions.
   Linking again keeps the key; `--new-key` replaces it, which retires every
   agent URL minted with the old one.
-- `agent grant --relay` creates an ordinary grant and prints the agent's MCP
-  URL, `https://relay.example.com/mcp/<capability>`. Add it to your agent as
-  a remote MCP server with no authentication. With `--json` the URL is
-  `relay_url`.
+- `agent grant --relay` creates an ordinary grant and prints two things:
+  the relay's MCP URL, `https://relay.example.com/mcp`, and a connection
+  code, `https://relay.example.com/mcp/<capability>`. The code carries the
+  grant's token, and sats shows it only once. With `--json` they are
+  `relay_mcp_url` and `relay_url`.
 - `relay sync` fetches what agents filed and decides each filing here. It
   then posts each request's state back so the agent can observe it.
   `--watch` repeats every `--every` seconds (default 10). Approve as usual
   with `sats agent approve`.
+
+### Sign in with OAuth
+
+Add `https://relay.example.com/mcp` to your agent as a remote MCP server
+that signs in with OAuth (in ChatGPT, a custom MCP server with OAuth). The
+agent registers itself with the relay and opens a sign-in page. Paste the
+connection code there, as the bare code or the whole line. That paste is
+your consent. The page names the app asking, from its redirect address.
+
+- The agent gets an access token (one hour) and a refresh token (replaced
+  on every use). Neither outlives the grant's expiry.
+- Each token stands for the connection code you pasted: every call checks
+  its signature and expiry again, and your device still decides every
+  filing against its grant.
+- To cut an agent off, revoke or re-issue the grant on your device as
+  usual. Its filings are refused at your next sync, and its tokens stop
+  working when the grant expires.
+- The relay supports dynamic client registration and PKCE (`S256`) for
+  public clients. Redirect addresses must be HTTPS, or HTTP to loopback.
+
+### Without OAuth
+
+An agent that can't sign in can use the connection code itself as its MCP
+URL, with no authentication. The URL is then the credential: it may be kept
+in the agent's settings and in logs that record paths.
 
 ## What the agent can do
 

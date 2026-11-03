@@ -316,6 +316,18 @@ device that holds the wallet. It's an intermediary, never an authority:
   The relay verifies the signature to route, so it keeps no table of
   pairings, and an unverifiable capability gets an empty 404. The URL is as
   sensitive as the token.
+- **OAuth swaps the capability for tokens.** An agent signing in with OAuth
+  pastes the capability once on the relay's sign-in page, so its MCP URL
+  carries no secret.
+  - Clients register dynamically and must use PKCE (`S256`).
+  - A code is single-use and lives five minutes.
+  - Access tokens last an hour, and refresh tokens rotate on every use.
+    Neither outlives the capability.
+  - The relay stores each token's record sealed under a key derived from the
+    token itself (ChaCha20-Poly1305), filed under a second derivation, so
+    its database holds neither tokens nor capabilities.
+  - The sign-in page refuses to be framed, and it shows a form only for a
+    registered client and redirect address.
 - **Filings are sealed to the device.** Ephemeral ECDH to the device's key,
   then ChaCha20-Poly1305 with the mailbox and request id as associated data.
   The relay's store holds ciphertext, an operation digest for idempotency,
@@ -425,6 +437,7 @@ to the recipient.
 | Lied-about amount or fee | Recomputed from the PSBT against the wallet's descriptors | An understated input yields an unrelayable transaction |
 | Inflated fee estimate | The real fee is in every approval review | Approving a high fee without reading it |
 | Compromised MCP process | Holds a token, never a key; forged approvals need the password | Same as a stolen token |
+| Stolen relay OAuth token | Bound to one capability; access tokens expire in an hour, refresh tokens rotate | Same as a stolen token until it expires or the grant is revoked |
 | Compromised relay | Keyless; the device re-checks every filing against its own grant; you approve on the device | Same as a stolen token, plus dropped, delayed, or falsified observations |
 | Stolen device relay key | Opens only relay traffic for that device; never the seed | Can read queued filings and post false results until you run `sats relay link <URL> --new-key` |
 | Debugger on an approving process | Key material lives only for one approval | Seed recoverable in that window where ptrace is allowed |

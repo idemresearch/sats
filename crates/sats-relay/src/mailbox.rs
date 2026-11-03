@@ -67,6 +67,8 @@ impl Mailbox {
     pub fn open(path: &Path, filing_ttl: u64, result_ttl: u64) -> Result<Mailbox> {
         let conn =
             Connection::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        // The OAuth store shares this file.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              CREATE TABLE IF NOT EXISTS filings (

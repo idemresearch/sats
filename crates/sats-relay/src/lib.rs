@@ -9,12 +9,19 @@
 //! its own grant and the human approves there.
 //!
 //! Routes:
-//! - `/mcp/<capability>`: MCP Streamable HTTP for the agent.
+//! - `/mcp`: MCP Streamable HTTP for an agent signed in with OAuth
+//!   ([`oauth`]): `Authorization: Bearer <access token>`.
+//! - `/mcp/<capability>`: the same, for clients without OAuth.
+//! - `/.well-known/oauth-protected-resource`,
+//!   `/.well-known/oauth-authorization-server`, `/oauth/register`,
+//!   `/oauth/authorize`, `/oauth/token`: the OAuth flow.
 //! - `GET /v1/inbox`, `POST /v1/results`: the device, each call signed
 //!   with its relay key ([`sats_core::relay::AUTH_HEADER`]).
 //! - `GET /healthz`: liveness.
 
+mod auth_routes;
 pub mod mailbox;
+pub mod oauth;
 mod tools;
 
 use std::convert::Infallible;
@@ -61,9 +68,9 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
-type Body = BoxBody<Bytes, Infallible>;
+pub(crate) type Body = BoxBody<Bytes, Infallible>;
 
-fn respond(status: StatusCode, body: serde_json::Value) -> Response<Body> {
+pub(crate) fn respond(status: StatusCode, body: serde_json::Value) -> Response<Body> {
     let mut response = Response::new(Full::new(Bytes::from(body.to_string())).boxed());
     *response.status_mut() = status;
     response.headers_mut().insert(
@@ -86,8 +93,9 @@ fn refused(status: StatusCode, code: &str, message: &str) -> Response<Body> {
     )
 }
 
-struct Relay {
+pub(crate) struct Relay {
     mailbox: Arc<Mailbox>,
+    pub(crate) oauth: oauth::OAuth,
     mcp: StreamableHttpService<tools::RelayMcp, LocalSessionManager>,
 }
 
@@ -110,7 +118,12 @@ pub async fn serve(listener: tokio::net::TcpListener, config: Config) -> Result<
         // proxies in front of a relay forward hosts it can't predict.
         StreamableHttpServerConfig::default().with_allowed_hosts(Vec::<String>::new()),
     );
-    let relay = Arc::new(Relay { mailbox, mcp });
+    let oauth = oauth::OAuth::open(&config.data_dir.join("relay.db"))?;
+    let relay = Arc::new(Relay {
+        mailbox,
+        oauth,
+        mcp,
+    });
 
     loop {
         let (stream, _) = match listener.accept().await {
@@ -124,7 +137,7 @@ pub async fn serve(listener: tokio::net::TcpListener, config: Config) -> Result<
         tokio::spawn(async move {
             let handler = service_fn(move |request: Request<Incoming>| {
                 let relay = relay.clone();
-                async move { Ok::<_, Infallible>(route(&relay, request).await) }
+                async move { Ok::<_, Infallible>(with_cors(route(&relay, request).await)) }
             });
             let _ = http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), handler)
@@ -133,8 +146,45 @@ pub async fn serve(listener: tokio::net::TcpListener, config: Config) -> Result<
     }
 }
 
+/// Let browser-based MCP clients call the relay. Every route is
+/// authenticated by a token or signature, never by cookies.
+fn with_cors(mut response: Response<Body>) -> Response<Body> {
+    use hyper::header::HeaderValue;
+    let headers = response.headers_mut();
+    headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    headers.insert(
+        "access-control-allow-headers",
+        HeaderValue::from_static(
+            "authorization, content-type, accept, mcp-protocol-version, mcp-session-id, last-event-id",
+        ),
+    );
+    headers.insert(
+        "access-control-allow-methods",
+        HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
+    );
+    headers.insert(
+        "access-control-expose-headers",
+        HeaderValue::from_static("www-authenticate, mcp-session-id"),
+    );
+    response
+}
+
 async fn route(relay: &Relay, mut request: Request<Incoming>) -> Response<Body> {
     let path = request.uri().path().to_string();
+    if request.method() == Method::OPTIONS {
+        let mut response = Response::new(Full::new(Bytes::new()).boxed());
+        *response.status_mut() = StatusCode::NO_CONTENT;
+        return response;
+    }
+    if path == "/mcp" {
+        return match auth_routes::bearer_capability(relay, request.headers()) {
+            Ok(capability) => {
+                request.extensions_mut().insert(capability);
+                relay.mcp.handle(request).await
+            }
+            Err(token_given) => auth_routes::unauthorized(request.headers(), token_given),
+        };
+    }
     if let Some(encoded) = path.strip_prefix(MCP_PREFIX) {
         // An unverifiable capability gets the same empty 404 as any
         // unknown path: the relay names nothing to a stranger.
@@ -146,6 +196,19 @@ async fn route(relay: &Relay, mut request: Request<Incoming>) -> Response<Body> 
     }
     match (request.method().clone(), path.as_str()) {
         (Method::GET, "/healthz") => respond(StatusCode::OK, serde_json::json!({"ok": true})),
+        (
+            Method::GET,
+            "/.well-known/oauth-protected-resource" | "/.well-known/oauth-protected-resource/mcp",
+        ) => auth_routes::protected_resource(request.headers()),
+        (
+            Method::GET,
+            "/.well-known/oauth-authorization-server" | "/.well-known/openid-configuration",
+        ) => auth_routes::authorization_server(request.headers()),
+        (Method::POST, "/oauth/register") => auth_routes::register(relay, request).await,
+        (Method::GET | Method::POST, "/oauth/authorize") => {
+            auth_routes::authorize(relay, request).await
+        }
+        (Method::POST, "/oauth/token") => auth_routes::token(relay, request).await,
         (Method::GET, "/v1/inbox") => device(relay, request, inbox).await,
         (Method::POST, "/v1/results") => device(relay, request, results).await,
         _ => not_found(),
