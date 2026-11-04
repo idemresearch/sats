@@ -58,7 +58,7 @@ fn check(mcp: &mut McpHttp, id: u64, request_id: &str) -> serde_json::Value {
     )
 }
 
-/// Link the device and issue a relayed grant; returns the agent's URL.
+/// Link the device and issue a relayed grant; returns the connection code.
 fn relayed_grant(dir: &TempDir, relay: &str, agent: &str) -> String {
     let linked = sats_json(dir, &["--json", "relay", "link", relay]);
     assert_eq!(linked["url"], relay);
@@ -68,9 +68,64 @@ fn relayed_grant(dir: &TempDir, relay: &str, agent: &str) -> String {
             "--json", "agent", "grant", agent, "--max-tx", "10000", "--relay",
         ],
     );
-    let url = grant["relay_url"].as_str().unwrap().to_string();
-    assert!(url.starts_with(&format!("{relay}/mcp/")), "{url}");
-    url
+    assert_eq!(grant["relay_mcp_url"], format!("{relay}/mcp"));
+    let code = grant["relay_code"].as_str().unwrap().to_string();
+    // A bare code, never a URL: it is pasted on the sign-in page only.
+    assert!(!code.contains('/') && !code.contains("http"), "{code}");
+    code
+}
+
+/// Sign in as an OAuth client would, pasting `code`; returns an access token.
+fn sign_in(relay: &str, code: &str) -> String {
+    let redirect = "https://chatgpt.com/connector_platform_oauth_redirect";
+    let registered: serde_json::Value = minreq::post(format!("{relay}/oauth/register"))
+        .with_json(&serde_json::json!({"redirect_uris": [redirect]}))
+        .unwrap()
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let client_id = registered["client_id"].as_str().unwrap();
+    let verifier = "a-pkce-verifier-that-is-long-enough-to-satisfy-rfc-7636";
+    let challenge = sats_relay::oauth::pkce_challenge(verifier);
+    let (status, head, _) = raw(
+        relay,
+        "POST",
+        "/oauth/authorize",
+        "application/x-www-form-urlencoded",
+        &form(&[
+            ("response_type", "code"),
+            ("client_id", client_id),
+            ("redirect_uri", redirect),
+            ("code_challenge", &challenge),
+            ("code_challenge_method", "S256"),
+            ("code", code),
+        ]),
+    );
+    assert_eq!(status, 302, "{head}");
+    let auth_code = location_param(&head, "code").unwrap();
+    let (status, _, body) = raw(
+        relay,
+        "POST",
+        "/oauth/token",
+        "application/x-www-form-urlencoded",
+        &form(&[
+            ("grant_type", "authorization_code"),
+            ("code", &auth_code),
+            ("redirect_uri", redirect),
+            ("client_id", client_id),
+            ("code_verifier", verifier),
+        ]),
+    );
+    assert_eq!(status, 200, "{body}");
+    let tokens: serde_json::Value = serde_json::from_str(&body).unwrap();
+    tokens["access_token"].as_str().unwrap().to_string()
+}
+
+/// An MCP session on the relay, signed in with `code`.
+fn connect_agent(relay: &str, code: &str) -> McpHttp {
+    let token = sign_in(relay, code);
+    McpHttp::connect_as(&format!("{relay}/mcp"), "sats-relay", Some(&token))
 }
 
 #[test]
@@ -79,9 +134,9 @@ fn a_wrap_filed_through_the_relay_is_decided_and_approved_on_the_device() {
     let relay = start_relay(&relay_data);
     let dir = TempDir::new().unwrap();
     wrap_ready_wallet(&dir);
-    let url = relayed_grant(&dir, &relay, "chatgpt");
+    let code = relayed_grant(&dir, &relay, "chatgpt");
 
-    let mut agent = McpHttp::connect(&url, "sats-relay");
+    let mut agent = connect_agent(&relay, &code);
     let names = agent.tool_names(2);
     for expected in [
         "request_send",
@@ -143,7 +198,7 @@ fn a_wrap_filed_through_the_relay_is_decided_and_approved_on_the_device() {
 
     // The relay's store holds no token and no plaintext filing.
     let db = std::fs::read(relay_data.path().join("relay.db")).unwrap();
-    let grant_token = url.rsplit('/').next().unwrap();
+    let grant_token = code.as_str();
     for secret in [grant_token.as_bytes(), b"wrap-1".as_slice()] {
         assert!(
             !db.windows(secret.len()).any(|w| w == secret),
@@ -158,8 +213,8 @@ fn the_device_grant_decides_denials_and_revocation() {
     let relay = start_relay(&relay_data);
     let dir = TempDir::new().unwrap();
     wrap_ready_wallet(&dir);
-    let url = relayed_grant(&dir, &relay, "chatgpt");
-    let mut agent = McpHttp::connect(&url, "sats-relay");
+    let code = relayed_grant(&dir, &relay, "chatgpt");
+    let mut agent = connect_agent(&relay, &code);
 
     // A dismissal reaches the agent at once too.
     let declined = id_of(&wrap(&mut agent, 6, 1_000, "small"));
@@ -192,27 +247,61 @@ fn the_device_grant_decides_denials_and_revocation() {
 }
 
 #[test]
-fn the_relay_routes_only_device_signed_capabilities() {
+fn the_relay_admits_only_signed_in_agents_and_device_signed_codes() {
     let relay_data = TempDir::new().unwrap();
     let relay = start_relay(&relay_data);
     let dir = TempDir::new().unwrap();
     wrap_ready_wallet(&dir);
-    let url = relayed_grant(&dir, &relay, "chatgpt");
-    let agent = McpHttp::connect(&url, "sats-relay");
+    let code = relayed_grant(&dir, &relay, "chatgpt");
     let init = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
         "protocolVersion": common::http::PROTOCOL, "capabilities": {},
-        "clientInfo": {"name": "stranger", "version": "0"}}});
-    // A flipped character in the signed capability: an empty 404.
-    let mut tampered = url.clone();
+        "clientInfo": {"name": "stranger", "version": "0"}}})
+    .to_string();
+    // The code is never a credential in a URL: those paths don't exist.
+    for path in [
+        format!("/mcp/{code}"),
+        "/mcp/".to_string(),
+        "/mcp/x.y".to_string(),
+    ] {
+        let (status, _, _) = raw(&relay, "POST", &path, "application/json", &init);
+        assert_eq!(status, 404, "{path}");
+    }
+    // Without a token, /mcp points at OAuth.
+    assert_eq!(
+        raw(&relay, "POST", "/mcp", "application/json", &init).0,
+        401
+    );
+    // A flipped character in the signed code: the sign-in page refuses it.
+    let mut tampered = code.clone();
     let last = tampered.pop().unwrap();
     tampered.push(if last == 'A' { 'B' } else { 'A' });
-    for bad in [
-        tampered,
-        format!("{relay}/mcp/"),
-        format!("{relay}/mcp/x.y"),
-    ] {
-        assert_eq!(agent.post_to(&bad, &init).status_code, 404, "{bad}");
-    }
+    let redirect = "https://chatgpt.com/connector_platform_oauth_redirect";
+    let registered: serde_json::Value = minreq::post(format!("{relay}/oauth/register"))
+        .with_json(&serde_json::json!({"redirect_uris": [redirect]}))
+        .unwrap()
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let challenge = sats_relay::oauth::pkce_challenge(
+        "a-pkce-verifier-that-is-long-enough-to-satisfy-rfc-7636",
+    );
+    let (status, _, page) = raw(
+        &relay,
+        "POST",
+        "/oauth/authorize",
+        "application/x-www-form-urlencoded",
+        &form(&[
+            ("response_type", "code"),
+            ("client_id", registered["client_id"].as_str().unwrap()),
+            ("redirect_uri", redirect),
+            ("code_challenge", &challenge),
+            ("code_challenge_method", "S256"),
+            ("code", &tampered),
+        ]),
+    );
+    assert_eq!(status, 400);
+    assert!(page.contains("valid connection code"));
     // Device endpoints refuse unsigned calls.
     let unsigned = minreq::get(format!("{relay}/v1/inbox")).send().unwrap();
     assert_eq!(unsigned.status_code, 401);
@@ -240,15 +329,25 @@ fn a_relayed_grant_needs_a_linked_relay_reached_over_https() {
 
 /// Send one raw HTTP/1.1 request with a chosen Host header, as a proxy in
 /// front of the relay would; returns the status line.
-fn raw_status(relay: &str, method: &str, path: &str, host: &str, body: &str) -> String {
+fn raw_status(
+    relay: &str,
+    method: &str,
+    path: &str,
+    host: &str,
+    bearer: Option<&str>,
+    body: &str,
+) -> String {
     use std::io::{Read, Write};
     let addr = relay.trim_start_matches("http://");
     let mut stream = std::net::TcpStream::connect(addr).unwrap();
     write!(
         stream,
         "{method} {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\n\
-         Accept: application/json, text/event-stream\r\nContent-Length: {}\r\n\
+         Accept: application/json, text/event-stream\r\n{}Content-Length: {}\r\n\
          Connection: close\r\n\r\n{body}",
+        bearer
+            .map(|token| format!("Authorization: Bearer {token}\r\n"))
+            .unwrap_or_default(),
         body.len()
     )
     .unwrap();
@@ -263,17 +362,18 @@ fn the_relay_serves_whatever_host_a_proxy_forwards() {
     let relay = start_relay(&relay_data);
     let dir = TempDir::new().unwrap();
     wrap_ready_wallet(&dir);
-    let url = relayed_grant(&dir, &relay, "chatgpt");
-    let path = &url[relay.len()..];
+    let code = relayed_grant(&dir, &relay, "chatgpt");
+    let token = sign_in(&relay, &code);
     let host = "sats-relay.up.example.app";
-    assert!(raw_status(&relay, "GET", "/healthz", host, "").contains(" 200 "));
+    assert!(raw_status(&relay, "GET", "/healthz", host, None, "").contains(" 200 "));
     let init = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
         "protocolVersion": common::http::PROTOCOL, "capabilities": {},
         "clientInfo": {"name": "proxied", "version": "0"}}})
     .to_string();
-    assert!(raw_status(&relay, "POST", path, host, &init).contains(" 200 "));
+    assert!(raw_status(&relay, "POST", "/mcp", host, Some(&token), &init).contains(" 200 "));
     // Authentication, not the host, is what guards each route.
-    assert!(raw_status(&relay, "GET", "/v1/inbox", host, "").contains(" 401 "));
+    assert!(raw_status(&relay, "POST", "/mcp", host, None, &init).contains(" 401 "));
+    assert!(raw_status(&relay, "GET", "/v1/inbox", host, None, "").contains(" 401 "));
 }
 
 /// One raw HTTP/1.1 exchange, so redirects are seen rather than followed.
@@ -338,7 +438,7 @@ fn an_agent_signs_in_with_oauth_and_files_with_a_bearer_token() {
             "--json", "agent", "grant", "chatgpt", "--max-tx", "10000", "--relay",
         ],
     );
-    let code_text = grant["relay_url"].as_str().unwrap().to_string();
+    let code_text = grant["relay_code"].as_str().unwrap().to_string();
     assert_eq!(grant["relay_mcp_url"], format!("{relay}/mcp"));
 
     // 1. An unauthenticated call points at the metadata.
@@ -537,7 +637,7 @@ fn an_agent_signs_in_with_oauth_and_files_with_a_bearer_token() {
 
     // At rest, the relay holds no token, code, capability, or grant token.
     let db = std::fs::read(relay_data.path().join("relay.db")).unwrap();
-    let capability = code_text.rsplit('/').next().unwrap().to_string();
+    let capability = code_text.clone();
     for secret in [&access, &refresh, &capability] {
         assert!(
             !db.windows(secret.len()).any(|w| w == secret.as_bytes()),

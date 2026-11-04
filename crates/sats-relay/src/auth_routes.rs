@@ -286,21 +286,16 @@ fn consent_page(
              printed on your device.</p>{error}\
              <form method=post action=/oauth/authorize>{hidden}\
              <textarea name=code required autocomplete=off autocapitalize=off spellcheck=false \
-             placeholder=\"https://…/mcp/…\"></textarea>\
+             placeholder=\"connection code\"></textarea>\
              <button type=submit>Connect</button></form>",
             app = oauth::html_escape(app),
         ),
     )
 }
 
-/// The capability inside whatever the human pasted: the bare code or the
-/// whole relay URL.
+/// The code the human pasted, without surrounding whitespace or quotes.
 fn pasted_capability(pasted: &str) -> &str {
-    let trimmed = pasted.trim().trim_matches(['"', '\'', '<', '>']);
-    trimmed
-        .rsplit_once("/mcp/")
-        .map_or(trimmed, |(_, code)| code)
-        .trim()
+    pasted.trim().trim_matches(['"', '\'', '<', '>']).trim()
 }
 
 pub async fn authorize(relay: &Relay, request: Request<Incoming>) -> Response<Body> {
@@ -343,7 +338,7 @@ pub async fn authorize(relay: &Relay, request: Request<Incoming>) -> Response<Bo
                 consent_page(
                     &form,
                     &params,
-                    Some("That isn't a valid connection code. Paste the whole line sats printed."),
+                    Some("That isn't a valid connection code. Paste the code sats printed, whole."),
                 ),
             );
         }
@@ -516,7 +511,7 @@ pub fn unauthorized(headers: &HeaderMap, token_given: bool) -> Response<Body> {
         } else {
             "unauthorized"
         },
-        "sign in to this relay with OAuth, or use a /mcp/<code> URL",
+        "sign in to this relay with OAuth",
     );
     if let Ok(value) = HeaderValue::from_str(&challenge) {
         response
@@ -595,12 +590,9 @@ mod tests {
     }
 
     #[test]
-    fn a_pasted_code_may_be_the_whole_url() {
-        assert_eq!(
-            pasted_capability("  https://r.example/mcp/abc.def \n"),
-            "abc.def"
-        );
+    fn a_pasted_code_is_trimmed_of_whitespace_and_quotes() {
+        assert_eq!(pasted_capability("  abc.def \n"), "abc.def");
         assert_eq!(pasted_capability("abc.def"), "abc.def");
-        assert_eq!(pasted_capability("\"https://r/mcp/x.y\""), "x.y");
+        assert_eq!(pasted_capability("\"x.y\""), "x.y");
     }
 }

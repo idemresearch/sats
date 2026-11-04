@@ -10,8 +10,9 @@
 //!
 //! Routes:
 //! - `/mcp`: MCP Streamable HTTP for an agent signed in with OAuth
-//!   ([`oauth`]): `Authorization: Bearer <access token>`.
-//! - `/mcp/<capability>`: the same, for clients without OAuth.
+//!   ([`oauth`]): `Authorization: Bearer <access token>`. The connection
+//!   code (the device-signed capability) is only ever pasted on the
+//!   sign-in page, never carried in a URL.
 //! - `/.well-known/oauth-protected-resource`,
 //!   `/.well-known/oauth-authorization-server`, `/oauth/register`,
 //!   `/oauth/authorize`, `/oauth/token`: the OAuth flow.
@@ -42,13 +43,11 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use sats_core::relay::{self, Capability};
+use sats_core::relay;
 use serde::Deserialize;
 
 use crate::mailbox::Mailbox;
 
-/// The agent endpoint's prefix; the capability is the segment after it.
-const MCP_PREFIX: &str = "/mcp/";
 /// The largest device request body accepted.
 const MAX_DEVICE_BODY: usize = 1 << 20;
 
@@ -184,15 +183,6 @@ async fn route(relay: &Relay, mut request: Request<Incoming>) -> Response<Body> 
             }
             Err(token_given) => auth_routes::unauthorized(request.headers(), token_given),
         };
-    }
-    if let Some(encoded) = path.strip_prefix(MCP_PREFIX) {
-        // An unverifiable capability gets the same empty 404 as any
-        // unknown path: the relay names nothing to a stranger.
-        let Ok(capability) = Capability::decode(encoded) else {
-            return not_found();
-        };
-        request.extensions_mut().insert(capability);
-        return relay.mcp.handle(request).await;
     }
     match (request.method().clone(), path.as_str()) {
         (Method::GET, "/healthz") => respond(StatusCode::OK, serde_json::json!({"ok": true})),

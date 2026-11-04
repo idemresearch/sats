@@ -312,13 +312,13 @@ device that holds the wallet. It's an intermediary, never an authority:
   the seed. It names the device's mailbox and signs its calls.
 - **The capability is the agent's credential.** The device signs the agent
   name, grant id, network (test networks only), expiry, and the grant's
-  token (BIP-340 Schnorr over a tagged hash). The URL carries the result.
-  The relay verifies the signature to route, so it keeps no table of
-  pairings, and an unverifiable capability gets an empty 404. The URL is as
-  sensitive as the token.
-- **OAuth swaps the capability for tokens.** An agent signing in with OAuth
-  pastes the capability once on the relay's sign-in page, so its MCP URL
-  carries no secret.
+  token (BIP-340 Schnorr over a tagged hash). The result is the connection
+  code, as sensitive as the token. It never appears in a URL: the human
+  pastes it once on the relay's sign-in page. The relay verifies the
+  signature to route, so it keeps no table of pairings, and refuses an
+  unverifiable code.
+- **OAuth swaps the capability for tokens.** OAuth is the only way an agent
+  reaches the relay's tools, and its MCP URL carries no secret.
   - Clients register dynamically and must use PKCE (`S256`).
   - A code is single-use and lives five minutes.
   - Access tokens last an hour, and refresh tokens rotate on every use.

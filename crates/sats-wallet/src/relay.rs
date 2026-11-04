@@ -134,9 +134,10 @@ impl RelayLink {
         format!("{}/mcp", self.url)
     }
 
-    /// The MCP URL an agent uses to file under `grant` through the relay.
-    /// It carries the grant's token: treat it like the token.
-    pub fn agent_url(&self, grant: &Grant, token: &str) -> Result<Zeroizing<String>> {
+    /// The connection code for `grant`: the device-signed capability an
+    /// agent's human pastes on the relay's OAuth sign-in page. It carries
+    /// the grant's token, so it is shown once and never put in a URL.
+    pub fn connection_code(&self, grant: &Grant, token: &str) -> Result<Zeroizing<String>> {
         let capability = Capability {
             v: CAPABILITY_VERSION,
             network: grant.network.clone(),
@@ -146,11 +147,7 @@ impl RelayLink {
             token: token.to_string(),
             expires_at: grant.expires_at,
         };
-        Ok(Zeroizing::new(format!(
-            "{}/mcp/{}",
-            self.url,
-            capability.encode(&self.key)?
-        )))
+        Ok(Zeroizing::new(capability.encode(&self.key)?))
     }
 
     fn call(&self, method: &str, path: &str, body: &[u8]) -> Result<serde_json::Value> {
