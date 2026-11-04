@@ -62,15 +62,38 @@ sats relay sync --watch
   key is used only to talk to the relay, never to sign transactions. It's
   stored per wallet and network in `relay.json`, with owner-only permissions.
   Linking again keeps the key; `--new-key` replaces it, which retires every
-  agent URL minted with the old one.
-- `agent grant --relay` creates an ordinary grant and prints the agent's MCP
-  URL, `https://relay.example.com/mcp/<capability>`. Add it to your agent as
-  a remote MCP server with no authentication. With `--json` the URL is
-  `relay_url`.
+  connection code minted with the old one.
+- `agent grant --relay` creates an ordinary grant and prints two things:
+  the relay's MCP URL, `https://relay.example.com/mcp`, and a connection
+  code. The code is the agent's credential at the relay (it names the grant
+  but doesn't contain its token), and sats shows it only once.
+  It is never part of a URL: you paste it on the relay's sign-in page.
+  With `--json` they are `relay_mcp_url` and `relay_code`.
 - `relay sync` fetches what agents filed and decides each filing here. It
   then posts each request's state back so the agent can observe it.
   `--watch` repeats every `--every` seconds (default 10). Approve as usual
   with `sats agent approve`.
+
+### Sign in with OAuth
+
+Add `https://relay.example.com/mcp` to your agent as a remote MCP server
+that signs in with OAuth (in ChatGPT, a custom MCP server with OAuth). The
+agent registers itself with the relay and opens a sign-in page. Paste the
+connection code there. That paste is your consent. The page names the app asking, from its redirect address.
+
+- The agent gets an access token (one hour) and a refresh token (replaced
+  on every use). Neither outlives the grant's expiry.
+- Each token stands for the connection code you pasted: every call checks
+  its signature and expiry again, and your device still decides every
+  filing against its grant.
+- To cut an agent off, revoke or re-issue the grant on your device as
+  usual. Its filings are refused at your next sync, and its tokens stop
+  working when the grant expires.
+- The relay supports dynamic client registration and PKCE (`S256`) for
+  public clients. Redirect addresses must be HTTPS, or HTTP to loopback.
+
+OAuth is the only way in. An agent that can't sign in with OAuth can't use
+the relay; run `sats agent serve` next to the wallet for it instead.
 
 ## What the agent can do
 
@@ -91,7 +114,7 @@ on a local server ([MCP](mcp.md)), with these differences:
 - **Idempotency holds across the relay.** The relay derives the same
   request id as your device, so a retried key returns the same request. A
   reused key with a different request gets `idempotency_key_conflict`.
-- **`get_grant` shows only what the URL carries:** agent, network, and
+- **`get_grant` shows only what the connection code carries:** agent, network, and
   expiry, with `relayed: true`. Your device holds the amount cap,
   allowlist, and mode, and enforces them.
 - **Wallet reads aren't relayed.** `get_balance`, `get_receive_address`, and
@@ -103,9 +126,22 @@ on a local server ([MCP](mcp.md)), with these differences:
 ## Revocation and expiry
 
 `sats agent revoke` takes effect at your device's next sync. Filings under
-the old grant are refused there and the agent observes `no_grant`. The URL
-stops working at the relay once its expiry passes. Re-issue the grant to
-rotate the URL.
+the old grant are refused there and the agent observes `no_grant`. The
+agent's tokens stop working at the relay once the grant's expiry passes.
+Re-issue the grant to get a new connection code.
+
+## What the relay keeps
+
+| Data | At rest |
+|---|---|
+| OAuth tokens and codes | A one-way id, plus the connection code sealed under a key derived from the token |
+| Filings | Sealed to your device's key; an operation digest for idempotency |
+| Results | Sealed for the agent's connection; the bare status in the clear |
+| Registered clients | Client id and redirect addresses |
+
+Its database alone yields no grant token, connection code, OAuth token,
+amount, recipient, or txid. While it runs, the relay reads each filing as
+it arrives and each result as it serves it: it is the agent's MCP server.
 
 ## Security
 

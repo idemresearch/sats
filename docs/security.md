@@ -310,29 +310,52 @@ device that holds the wallet. It's an intermediary, never an authority:
 - **The device's relay key is separate from the wallet.** It's a secp256k1
   key, generated at `sats relay link`, that never derives from or unlocks
   the seed. It names the device's mailbox and signs its calls.
-- **The capability is the agent's credential.** The device signs the agent
-  name, grant id, network (test networks only), expiry, and the grant's
-  token (BIP-340 Schnorr over a tagged hash). The URL carries the result.
-  The relay verifies the signature to route, so it keeps no table of
-  pairings, and an unverifiable capability gets an empty 404. The URL is as
-  sensitive as the token.
+- **The capability is the agent's credential at the relay.** The device
+  signs the agent name, grant id, network (test networks only), and expiry
+  (BIP-340 Schnorr over a tagged hash). The result is the connection code.
+  It carries no grant token, so nothing the relay ever sees can be used
+  with a local `sats agent serve`. It never appears in a URL: the human
+  pastes it once on the relay's sign-in page. The relay verifies the
+  signature to route, so it keeps no table of pairings, and refuses an
+  unverifiable code.
+- **OAuth swaps the capability for tokens.** OAuth is the only way an agent
+  reaches the relay's tools, and its MCP URL carries no secret.
+  - Clients register dynamically and must use PKCE (`S256`).
+  - A code is single-use and lives five minutes.
+  - Access tokens last an hour, and refresh tokens rotate on every use.
+    Neither outlives the capability.
+  - The relay stores each token's record sealed under a key derived from the
+    token itself (ChaCha20-Poly1305), filed under a second derivation, so
+    its database holds neither tokens nor capabilities.
+  - The sign-in page refuses to be framed, and it shows a form only for a
+    registered client and redirect address.
 - **Filings are sealed to the device.** Ephemeral ECDH to the device's key,
   then ChaCha20-Poly1305 with the mailbox and request id as associated data.
-  The relay's store holds ciphertext, an operation digest for idempotency,
-  and the views the device posted.
+  Each filing carries the connection code the agent used. The relay's
+  store holds the ciphertext and an operation digest for idempotency.
+- **Results are sealed for the agent's connection.** The device seals
+  each view it posts under a key derived from the grant's network, device,
+  agent, and grant id (ChaCha20-Poly1305, bound to the request id). The
+  relay decrypts a view only while serving a call whose connection code
+  names that grant. It stores the ciphertext and the bare status, which it
+  needs to clear finished filings.
 - **Device calls are signed.** Each sync call carries a signature over the
   method, path, time, and body, accepted within 5 minutes of the relay's
   clock. Results carry a strictly increasing revision, so a replayed result
   can't roll an observation back.
-- **The device decides everything.** A relayed filing runs through
-  `request::create` like a local one: the token is checked against the
-  grant on file, the ladder runs, and you approve with the same review and
-  password. The device checks that the filing's request id matches the id
-  derived from its grant, agent, and key, and it validates every field the
-  relay supplies.
+- **The device decides everything.** It accepts a filing only under a
+  live connection code it signed itself, for its own network, and takes the
+  agent and grant from that code, not from the relay. The filing then runs
+  through `request::create` like a local one, authenticated by that grant
+  instance: a revoked or re-issued grant refuses it. The ladder runs, and
+  you approve with the same review and password. The device also checks
+  that the request id matches the id derived from the grant, agent, and
+  key, and validates every field the relay supplies. Only the relay sync
+  in `sats-wallet` can present a grant-instance credential; local MCP
+  servers present the token.
 
-A compromised relay sees the agent URLs, so it can file anything the
-grant allows, exactly like a stolen token. It can also drop, delay, or
+A compromised relay sees connection codes as agents use them, so it can
+file anything the grant allows, as a stolen token could. It can also drop, delay, or
 replay filings, and show the agent stale or false results. It can't sign,
 approve, widen a grant, or read your wallet.
 
@@ -425,6 +448,7 @@ to the recipient.
 | Lied-about amount or fee | Recomputed from the PSBT against the wallet's descriptors | An understated input yields an unrelayable transaction |
 | Inflated fee estimate | The real fee is in every approval review | Approving a high fee without reading it |
 | Compromised MCP process | Holds a token, never a key; forged approvals need the password | Same as a stolen token |
+| Stolen relay OAuth token | Bound to one capability; access tokens expire in an hour, refresh tokens rotate | Same as a stolen token until it expires or the grant is revoked |
 | Compromised relay | Keyless; the device re-checks every filing against its own grant; you approve on the device | Same as a stolen token, plus dropped, delayed, or falsified observations |
 | Stolen device relay key | Opens only relay traffic for that device; never the seed | Can read queued filings and post false results until you run `sats relay link <URL> --new-key` |
 | Debugger on an approving process | Key material lives only for one approval | Seed recoverable in that window where ptrace is allowed |

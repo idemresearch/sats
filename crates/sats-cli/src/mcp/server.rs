@@ -904,7 +904,7 @@ impl SatsMcp {
                 network,
                 &CreateParams {
                     agent: &agent,
-                    token: &token,
+                    credential: request::Credential::Token(&token),
                     idempotency_key: &params.idempotency_key,
                     address: &params.address,
                     amount_sat: params.amount_sat,
@@ -953,7 +953,7 @@ impl SatsMcp {
                 network,
                 &request::CreateAlkanesSendParams {
                     agent: &agent,
-                    token: &token,
+                    credential: request::Credential::Token(&token),
                     idempotency_key: &params.idempotency_key,
                     id: &params.id,
                     amount: &params.amount,
@@ -1002,7 +1002,7 @@ impl SatsMcp {
                 network,
                 &request::CreateWrapParams {
                     agent: &agent,
-                    token: &token,
+                    credential: request::Credential::Token(&token),
                     idempotency_key: &params.idempotency_key,
                     amount_sat: params.amount_sat,
                 },
@@ -1072,6 +1072,7 @@ pub fn relay_view(
             request_id,
             code,
             message,
+            ..
         } => {
             let mut view = RequestView::error(code, message.clone());
             view.request_id = Some(request_id.clone());

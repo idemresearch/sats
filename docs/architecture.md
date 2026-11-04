@@ -74,7 +74,7 @@ config and data directories and never looks up a home directory.
 | `alkanes` | Contract views and the human-authorized stage/review/commit workflow |
 | `request` | Request create, dismiss, reconcile, and the executor (`stage`, `commit`) |
 | `spend` | The shared tail: sign, persist, then broadcast; rebroadcast a saved transaction |
-| `relay` | The device's side of a relay: link, mint agent URLs, sync filings through `request` |
+| `relay` | The device's side of a relay: link, mint connection codes, sync filings through `request` |
 
 ### `sats-cli`
 
@@ -134,7 +134,8 @@ No protocol grant fields or agent-facing execution primitive are added.
 ### `sats-relay`
 
 The keyless relay between sats agent and sats human ([Relay](relay.md)): MCP
-Streamable HTTP for agents at `/mcp/<capability>`, a signed device API
+Streamable HTTP for agents at `/mcp` (OAuth sign-in only), an OAuth
+authorization server whose consent is the pasted capability, a signed device API
 (`/v1/inbox`, `/v1/results`), and a SQLite mailbox of sealed filings and
 posted results. It depends on `sats-core` only. It doesn't link
 `sats-wallet`, so it has no wallet, provider, or signer code.

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::config::network_name;
-use crate::request::{self, CreateError, CreateParams, CreateWrapParams};
+use crate::request::{self, CreateError, CreateParams, CreateWrapParams, Credential, RelayGrant};
 use crate::store::{Store, now_checked, write_atomic};
 
 const TIMEOUT_SECS: u64 = 30;
@@ -129,23 +129,25 @@ impl RelayLink {
         self.key.public_hex()
     }
 
-    /// The MCP URL an agent uses to file under `grant` through the relay.
-    /// It carries the grant's token: treat it like the token.
-    pub fn agent_url(&self, grant: &Grant, token: &str) -> Result<Zeroizing<String>> {
+    /// The relay's MCP endpoint for agents that sign in with OAuth.
+    pub fn mcp_url(&self) -> String {
+        format!("{}/mcp", self.url)
+    }
+
+    /// The connection code for `grant`: the device-signed capability an
+    /// agent's human pastes on the relay's OAuth sign-in page. It carries
+    /// no grant token, but it names the grant instance and is the agent's
+    /// credential at the relay: shown once, never put in a URL.
+    pub fn connection_code(&self, grant: &Grant) -> Result<Zeroizing<String>> {
         let capability = Capability {
             v: CAPABILITY_VERSION,
             network: grant.network.clone(),
             human: self.human(),
             agent: grant.agent.clone(),
             grant_id: grant.grant_id.clone(),
-            token: token.to_string(),
             expires_at: grant.expires_at,
         };
-        Ok(Zeroizing::new(format!(
-            "{}/mcp/{}",
-            self.url,
-            capability.encode(&self.key)?
-        )))
+        Ok(Zeroizing::new(capability.encode(&self.key)?))
     }
 
     fn call(&self, method: &str, path: &str, body: &[u8]) -> Result<serde_json::Value> {
@@ -183,12 +185,23 @@ pub enum Outcome {
     /// A request exists on this device under that id.
     Record { agent: String, request_id: String },
     /// The device refused the filing outright (a typed operational code,
-    /// fx `unauthorized` for a stale token). Final for this filing.
+    /// fx `no_grant` after a revoke). Final for this filing. `grant` names
+    /// the agent and grant instance when the filing's connection code was
+    /// this device's own; only then can the view be sealed for the agent.
     Refused {
         request_id: String,
         code: String,
         message: String,
+        grant: Option<(String, String)>,
     },
+}
+
+impl Outcome {
+    fn request_id(&self) -> &str {
+        match self {
+            Outcome::Record { request_id, .. } | Outcome::Refused { request_id, .. } => request_id,
+        }
+    }
 }
 
 /// One sync's results.
@@ -234,10 +247,11 @@ fn decide(
     resolve_services: &dyn Fn() -> Result<crate::provider::Services>,
     report: &mut SyncReport,
 ) -> Option<Outcome> {
-    let refuse = |code: &str, message: &str| Outcome::Refused {
+    let refuse = |code: &str, message: &str, grant: Option<(String, String)>| Outcome::Refused {
         request_id: item.request_id.clone(),
         code: code.into(),
         message: message.into(),
+        grant,
     };
     let filing = STANDARD
         .decode(&item.sealed)
@@ -255,26 +269,56 @@ fn decide(
         return Some(refuse(
             "unreadable_filing",
             "the device could not open this request",
+            None,
         ));
     };
+    // The relay is untrusted: accept only a live connection code this
+    // device signed itself, and take the agent and grant from it.
+    let now = match now_checked() {
+        Ok(now) => now,
+        Err(error) => {
+            report
+                .deferred
+                .push((item.request_id.clone(), format!("{error:#}")));
+            return None;
+        }
+    };
+    let capability = match Capability::verify_own(&filing.capability, &link.key, now) {
+        Ok(capability) if capability.network == network_name(network) => capability,
+        _ => {
+            return Some(refuse(
+                "unknown_connection",
+                "the request came through a connection code this device didn't issue, or one \
+                 that has expired",
+                None,
+            ));
+        }
+    };
+    let grant = Some((capability.agent.clone(), capability.grant_id.clone()));
     if filing.v != FILING_VERSION
         || filing.request_id != item.request_id
-        || keyed_request_id(&filing.grant_id, &filing.agent, &filing.idempotency_key)
-            != filing.request_id
+        || keyed_request_id(
+            &capability.grant_id,
+            &capability.agent,
+            &filing.idempotency_key,
+        ) != filing.request_id
     {
         return Some(refuse(
             "malformed_filing",
             "the relayed request is inconsistent",
+            grant,
         ));
     }
+    let agent = capability.agent.clone();
     let net_name = network_name(network);
-    if let Ok(Some(_)) = store.load_agent_request(net_name, &filing.agent, &filing.request_id) {
+    if let Ok(Some(_)) = store.load_agent_request(net_name, &agent, &filing.request_id) {
         report.refreshed.push(filing.request_id.clone());
         return Some(Outcome::Record {
-            agent: filing.agent,
+            agent,
             request_id: filing.request_id,
         });
     }
+    let credential = Credential::RelayGrant(RelayGrant::verified(&capability.grant_id));
     let created = match &filing.operation {
         RelayedOperation::Send {
             address,
@@ -283,8 +327,8 @@ fn decide(
             store,
             network,
             &CreateParams {
-                agent: &filing.agent,
-                token: &filing.token,
+                agent: &agent,
+                credential,
                 idempotency_key: &filing.idempotency_key,
                 address,
                 amount_sat: *amount_sat,
@@ -294,8 +338,8 @@ fn decide(
             store,
             network,
             &CreateWrapParams {
-                agent: &filing.agent,
-                token: &filing.token,
+                agent: &agent,
+                credential,
                 idempotency_key: &filing.idempotency_key,
                 amount_sat: *amount_sat,
             },
@@ -306,7 +350,7 @@ fn decide(
         Ok(record) if record.id == filing.request_id => {
             report.created.push(record.id.clone());
             Some(Outcome::Record {
-                agent: filing.agent,
+                agent,
                 request_id: record.id,
             })
         }
@@ -315,19 +359,51 @@ fn decide(
         Ok(_) => Some(refuse(
             "grant_mismatch",
             "the request names a different grant",
+            grant,
         )),
         Err(error) if transient(&error) => {
             report
                 .deferred
-                .push((filing.request_id, error.message(&filing.agent)));
+                .push((filing.request_id, error.message(&agent)));
             None
         }
-        Err(error) => Some(Outcome::Refused {
-            request_id: filing.request_id,
-            code: error.code().into(),
-            message: error.message(&filing.agent),
-        }),
+        Err(error) => Some(refuse(error.code(), &error.message(&agent), grant)),
     }
+}
+
+/// One posted result: the view sealed under its grant's result key, so
+/// the relay reads it only while serving that grant's connection. The
+/// status stays readable: the relay uses it to clear finished filings.
+fn result_entry(
+    store: &Store,
+    network: Network,
+    link: &RelayLink,
+    outcome: &Outcome,
+    render: &dyn Fn(&Outcome) -> serde_json::Value,
+) -> Result<serde_json::Value> {
+    let view = render(outcome);
+    let status = view["status"].as_str().unwrap_or("error").to_string();
+    let net_name = network_name(network);
+    let grant = match outcome {
+        Outcome::Record { agent, request_id } => store
+            .load_agent_request(net_name, agent, request_id)?
+            .map(|record| (agent.clone(), record.grant_id)),
+        Outcome::Refused { grant, .. } => grant.clone(),
+    };
+    let sealed = match grant {
+        Some((agent, grant_id)) => {
+            let key = relay::result_key(net_name, &link.human(), &agent, &grant_id);
+            let bytes = serde_json::to_vec(&view)?;
+            Some(STANDARD.encode(relay::seal_result(&key, outcome.request_id(), &bytes)?))
+        }
+        None => None,
+    };
+    Ok(serde_json::json!({
+        "request_id": outcome.request_id(),
+        "revision": revision(),
+        "status": status,
+        "sealed": sealed,
+    }))
 }
 
 /// Fetch this device's mailbox, decide each filing here, and post the
@@ -355,11 +431,7 @@ pub fn sync(
         {
             report.refused.push((request_id.clone(), code.clone()));
         }
-        results.push(serde_json::json!({
-            "request_id": item.request_id,
-            "revision": revision(),
-            "view": render(&outcome),
-        }));
+        results.push(result_entry(store, network, link, &outcome, render)?);
     }
     if !results.is_empty() {
         let body = serde_json::to_vec(&serde_json::json!({"results": results}))?;
@@ -377,6 +449,8 @@ pub fn sync(
 /// so posting a local-only request is harmless. Returns how many the
 /// relay accepted.
 pub fn post_outcomes(
+    store: &Store,
+    network: Network,
     link: &RelayLink,
     outcomes: &[Outcome],
     render: &dyn Fn(&Outcome) -> serde_json::Value,
@@ -384,21 +458,10 @@ pub fn post_outcomes(
     if outcomes.is_empty() {
         return Ok(0);
     }
-    let results: Vec<_> = outcomes
+    let results = outcomes
         .iter()
-        .map(|outcome| {
-            let request_id = match outcome {
-                Outcome::Record { request_id, .. } | Outcome::Refused { request_id, .. } => {
-                    request_id
-                }
-            };
-            serde_json::json!({
-                "request_id": request_id,
-                "revision": revision(),
-                "view": render(outcome),
-            })
-        })
-        .collect();
+        .map(|outcome| result_entry(store, network, link, outcome, render))
+        .collect::<Result<Vec<_>>>()?;
     let body = serde_json::to_vec(&serde_json::json!({"results": results}))?;
     let answer = link.call("POST", "/v1/results", &body)?;
     Ok(answer["accepted"].as_array().map_or(0, Vec::len))

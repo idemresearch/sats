@@ -9,11 +9,15 @@
 //! - **Human key.** A secp256k1 key the human's device generates for relay
 //!   communication only. It is never derived from, and never unlocks, the
 //!   wallet seed. Its public key names the device's mailbox.
-//! - **Capability.** What the agent's MCP URL carries: the human-signed
-//!   statement "agent A may file under grant G to mailbox H until T", plus
-//!   the grant's bearer token. The relay verifies the signature and routes,
-//!   so it needs no table of pairings. The device re-checks the token and
-//!   the grant on every filing; the capability authorizes nothing there.
+//! - **Capability.** The connection code the human pastes on the relay's
+//!   sign-in page: the device-signed statement "agent A may file under
+//!   grant G to mailbox H until T". It carries no grant token. The relay
+//!   verifies the signature and routes, so it needs no table of pairings.
+//!   The device verifies its own signature again on every filing and checks
+//!   that grant G is still the agent's grant.
+//! - **Results.** What the device posts back is sealed under a key derived
+//!   from the capability's grant, so the relay can read a result only while
+//!   serving a connection that holds that capability.
 //! - **Envelope.** A filing sealed to the human key (ephemeral ECDH,
 //!   ChaCha20-Poly1305), bound to its request id and mailbox, so a relay's
 //!   storage holds ciphertext only.
@@ -33,9 +37,9 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 /// The capability format this build writes and accepts.
-pub const CAPABILITY_VERSION: u8 = 1;
+pub const CAPABILITY_VERSION: u8 = 2;
 /// The relayed-filing format this build writes and accepts.
-pub const FILING_VERSION: u8 = 1;
+pub const FILING_VERSION: u8 = 2;
 /// The longest capability string accepted, bounding work on untrusted input.
 pub const MAX_CAPABILITY_LEN: usize = 2048;
 /// How far a device call's timestamp may be from the relay's clock.
@@ -148,12 +152,10 @@ pub struct Capability {
     pub agent: String,
     /// The grant instance filings bind to.
     pub grant_id: String,
-    /// The grant's bearer token. The device checks it against its grant.
-    pub token: String,
     pub expires_at: u64,
 }
 
-const CAPABILITY_TAG: &str = "sats-relay/capability/v1";
+const CAPABILITY_TAG: &str = "sats-relay/capability/v2";
 
 impl Capability {
     /// `<base64url payload>.<base64url signature>`, URL-path safe.
@@ -223,11 +225,90 @@ impl RelayedOperation {
 pub struct RelayedFiling {
     pub v: u8,
     pub request_id: String,
-    pub agent: String,
-    pub grant_id: String,
-    pub token: String,
+    /// The encoded capability the agent connected with. The device verifies
+    /// its own signature on it before filing anything.
+    pub capability: String,
     pub idempotency_key: String,
     pub operation: RelayedOperation,
+}
+
+impl Capability {
+    /// Verify that `encoded` is a live capability signed by `key` itself:
+    /// the device accepts filings only under connection codes it minted.
+    pub fn verify_own(
+        encoded: &str,
+        key: &HumanKey,
+        now_unix: u64,
+    ) -> Result<Capability, RelayError> {
+        let capability = Capability::decode(encoded)?;
+        if capability.human != key.public_hex() {
+            return Err(RelayError::BadSignature);
+        }
+        if now_unix >= capability.expires_at {
+            return Err(RelayError::Stale);
+        }
+        Ok(capability)
+    }
+}
+
+const RESULT_TAG: &str = "sats-relay/result/v1";
+
+/// The key a device's results for one grant are sealed under. Both sides
+/// derive it from facts in the capability; the relay's store holds none
+/// of them in the clear.
+pub fn result_key(network: &str, human: &str, agent: &str, grant_id: &str) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(tagged(
+        RESULT_TAG,
+        &[
+            network.as_bytes(),
+            human.as_bytes(),
+            agent.as_bytes(),
+            grant_id.as_bytes(),
+        ],
+    ))
+}
+
+impl Capability {
+    pub fn result_key(&self) -> Zeroizing<[u8; 32]> {
+        result_key(&self.network, &self.human, &self.agent, &self.grant_id)
+    }
+}
+
+fn result_aad(request_id: &str) -> Vec<u8> {
+    format!("{RESULT_TAG}\0{request_id}").into_bytes()
+}
+
+/// Seal a result view: `nonce (12) || ciphertext`, bound to its request id.
+pub fn seal_result(key: &[u8; 32], request_id: &str, view: &[u8]) -> Result<Vec<u8>, RelayError> {
+    let mut nonce = [0u8; 12];
+    getrandom::fill(&mut nonce).map_err(|_| RelayError::Rng)?;
+    let ciphertext = ChaCha20Poly1305::new(key.into())
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: view,
+                aad: &result_aad(request_id),
+            },
+        )
+        .map_err(|_| RelayError::Open)?;
+    let mut sealed = nonce.to_vec();
+    sealed.extend_from_slice(&ciphertext);
+    Ok(sealed)
+}
+
+pub fn open_result(key: &[u8; 32], request_id: &str, sealed: &[u8]) -> Result<Vec<u8>, RelayError> {
+    if sealed.len() < 12 + 16 {
+        return Err(RelayError::Open);
+    }
+    ChaCha20Poly1305::new(key.into())
+        .decrypt(
+            Nonce::from_slice(&sealed[..12]),
+            Payload {
+                msg: &sealed[12..],
+                aad: &result_aad(request_id),
+            },
+        )
+        .map_err(|_| RelayError::Open)
 }
 
 const SEAL_TAG: &str = "sats-relay/seal/v1";
@@ -363,7 +444,6 @@ mod tests {
             human: key.public_hex(),
             agent: "chatgpt".into(),
             grant_id: "g".repeat(32),
-            token: "t".repeat(64),
             expires_at: 1_900_000_000,
         }
     }
@@ -412,9 +492,14 @@ mod tests {
             Err(RelayError::Network(_))
         ));
         let mut cap = capability(&key);
-        cap.v = 2;
-        let encoded = cap.encode(&key).unwrap();
-        assert_eq!(Capability::decode(&encoded), Err(RelayError::Version(2)));
+        for version in [1, 3] {
+            cap.v = version;
+            let encoded = cap.encode(&key).unwrap();
+            assert_eq!(
+                Capability::decode(&encoded),
+                Err(RelayError::Version(version))
+            );
+        }
         for junk in ["", ".", "abc", "a.b.c", &"a".repeat(MAX_CAPABILITY_LEN + 1)] {
             assert!(Capability::decode(junk).is_err(), "{junk}");
         }
@@ -502,5 +587,43 @@ mod tests {
             wrap.digest(),
             RelayedOperation::FrbtcWrap { amount_sat: 1 }.digest()
         );
+    }
+
+    #[test]
+    fn a_device_accepts_only_its_own_live_capabilities() {
+        let key = HumanKey::generate().unwrap();
+        let encoded = capability(&key).encode(&key).unwrap();
+        assert!(Capability::verify_own(&encoded, &key, 1_000).is_ok());
+        assert_eq!(
+            Capability::verify_own(&encoded, &key, 1_900_000_000),
+            Err(RelayError::Stale)
+        );
+        let other = HumanKey::generate().unwrap();
+        let foreign = capability(&other).encode(&other).unwrap();
+        assert_eq!(
+            Capability::verify_own(&foreign, &key, 1_000),
+            Err(RelayError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn results_open_only_with_their_grant_key_and_request_id() {
+        let key = HumanKey::generate().unwrap();
+        let cap = capability(&key);
+        let k = cap.result_key();
+        assert_eq!(
+            *k,
+            *result_key(&cap.network, &cap.human, &cap.agent, &cap.grant_id)
+        );
+        let sealed = seal_result(&k, "r-1", b"{\"status\":\"sent\"}").unwrap();
+        assert_eq!(
+            open_result(&k, "r-1", &sealed).unwrap(),
+            b"{\"status\":\"sent\"}"
+        );
+        assert!(open_result(&k, "r-2", &sealed).is_err());
+        let mut other = cap.clone();
+        other.grant_id = "h".repeat(32);
+        assert!(open_result(&other.result_key(), "r-1", &sealed).is_err());
+        assert!(open_result(&k, "r-1", &sealed[..20]).is_err());
     }
 }

@@ -38,7 +38,7 @@ pub fn after_decision(
         .map(|(request_id, agent, _)| relay::Outcome::Record { agent, request_id })
         .collect();
     let render = |outcome: &relay::Outcome| mcp::relay_view(store, network, outcome);
-    if let Err(error) = relay::post_outcomes(&link, &changed, &render) {
+    if let Err(error) = relay::post_outcomes(store, network, &link, &changed, &render) {
         ui::warn(&format!(
             "could not update the relay ({error:#}) — sats relay sync will post it"
         ));

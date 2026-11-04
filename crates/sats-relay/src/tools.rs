@@ -21,6 +21,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::Connected;
 use crate::mailbox::{Filed, Known, Mailbox, NewFiling};
 
 #[derive(Deserialize, JsonSchema)]
@@ -86,12 +87,13 @@ fn network_of(capability: &Capability) -> Option<Network> {
     }
 }
 
-/// The verified capability the HTTP layer attached, if it is live.
-fn live(parts: &Parts) -> Result<&Capability, Value> {
-    let capability = parts
+/// The verified connection the HTTP layer attached, if it is live.
+fn live(parts: &Parts) -> Result<&Connected, Value> {
+    let connected = parts
         .extensions
-        .get::<Capability>()
-        .ok_or_else(|| error("unauthorized", "no capability on this connection"))?;
+        .get::<Connected>()
+        .ok_or_else(|| error("unauthorized", "no connection on this request"))?;
+    let capability = &connected.capability;
     if crate::now() >= capability.expires_at {
         return Err(error(
             "no_grant",
@@ -101,7 +103,33 @@ fn live(parts: &Parts) -> Result<&Capability, Value> {
             ),
         ));
     }
-    Ok(capability)
+    Ok(connected)
+}
+
+/// What the device posted for a request, opened with this connection's
+/// result key. The relay reads it only here, while serving the agent.
+fn result_view(
+    capability: &Capability,
+    request_id: &str,
+    status: &str,
+    sealed: Option<Vec<u8>>,
+) -> Value {
+    let Some(sealed) = sealed else {
+        return json!({
+            "status": status,
+            "request_id": request_id,
+            "message": "the human's device refused this request; do not file it again",
+        });
+    };
+    relay::open_result(&capability.result_key(), request_id, &sealed)
+        .ok()
+        .and_then(|plain| serde_json::from_slice(&plain).ok())
+        .unwrap_or_else(|| {
+            error(
+                "relay_error",
+                "the device's answer can't be read with this connection",
+            )
+        })
 }
 
 impl RelayMcp {
@@ -113,7 +141,8 @@ impl RelayMcp {
     }
 
     /// File, or return what an earlier filing with this key became.
-    fn file(&self, capability: &Capability, key: &str, operation: RelayedOperation) -> Value {
+    fn file(&self, connected: &Connected, key: &str, operation: RelayedOperation) -> Value {
+        let capability = &connected.capability;
         if !valid_request_key(key) {
             return error("invalid_idempotency_key", REQUEST_KEY_RULE);
         }
@@ -130,9 +159,16 @@ impl RelayMcp {
         };
         match self.mailbox.lookup(&request_id) {
             Ok(Some(Known::Result {
-                digest: d, view, ..
+                digest: d,
+                status,
+                sealed,
+                ..
             })) => {
-                return if d == digest { view } else { conflict() };
+                return if d == digest {
+                    result_view(capability, &request_id, &status, sealed)
+                } else {
+                    conflict()
+                };
             }
             Ok(Some(Known::Pending { digest: d, .. })) => {
                 return if d == digest {
@@ -147,9 +183,7 @@ impl RelayMcp {
         let filing = RelayedFiling {
             v: FILING_VERSION,
             request_id: request_id.clone(),
-            agent: capability.agent.clone(),
-            grant_id: capability.grant_id.clone(),
-            token: capability.token.clone(),
+            capability: connected.encoded.clone(),
             idempotency_key: key.to_string(),
             operation,
         };
@@ -200,8 +234,8 @@ impl RelayMcp {
         &self,
         Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, ErrorData> {
-        let Some(capability) = parts.extensions.get::<Capability>() else {
-            return view(error("unauthorized", "no capability on this connection"));
+        let Some(Connected { capability, .. }) = parts.extensions.get::<Connected>() else {
+            return view(error("unauthorized", "no connection on this request"));
         };
         view(json!({
             "active": crate::now() < capability.expires_at,
@@ -229,10 +263,11 @@ impl RelayMcp {
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<RequestSendParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let capability = match live(&parts) {
-            Ok(capability) => capability,
+        let connected = match live(&parts) {
+            Ok(connected) => connected,
             Err(refusal) => return view(refusal),
         };
+        let capability = &connected.capability;
         let network = network_of(capability).expect("decode admits test networks only");
         let address = match Address::from_str(&params.address)
             .ok()
@@ -250,7 +285,7 @@ impl RelayMcp {
             }
         };
         view(self.file(
-            capability,
+            connected,
             &params.idempotency_key,
             RelayedOperation::Send {
                 address,
@@ -277,8 +312,8 @@ impl RelayMcp {
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<RequestWrapParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let capability = match live(&parts) {
-            Ok(capability) => capability,
+        let connected = match live(&parts) {
+            Ok(connected) => connected,
             Err(refusal) => return view(refusal),
         };
         if params.amount_sat < 546 {
@@ -288,7 +323,7 @@ impl RelayMcp {
             ));
         }
         view(self.file(
-            capability,
+            connected,
             &params.idempotency_key,
             RelayedOperation::FrbtcWrap {
                 amount_sat: params.amount_sat,
@@ -308,10 +343,11 @@ impl RelayMcp {
         Extension(parts): Extension<Parts>,
         Parameters(params): Parameters<CheckRequestParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        let capability = match live(&parts) {
-            Ok(capability) => capability,
+        let connected = match live(&parts) {
+            Ok(connected) => connected,
             Err(refusal) => return view(refusal),
         };
+        let capability = &connected.capability;
         let not_found = || {
             json!({
                 "status": "not_found",
@@ -331,8 +367,14 @@ impl RelayMcp {
             |human: &str, agent: &str| human == capability.human && agent == capability.agent;
         view(match self.mailbox.lookup(&params.request_id) {
             Ok(Some(Known::Result {
-                human, agent, view, ..
-            })) if mine(&human, &agent) => view,
+                human,
+                agent,
+                status,
+                sealed,
+                ..
+            })) if mine(&human, &agent) => {
+                result_view(capability, &params.request_id, &status, sealed)
+            }
             Ok(Some(Known::Pending { human, agent, .. })) if mine(&human, &agent) => {
                 pending(&params.request_id)
             }

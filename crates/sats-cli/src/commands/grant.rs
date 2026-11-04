@@ -120,9 +120,9 @@ pub fn run(
         store.save_grant(net_name, &grant)?;
     }
 
-    let relay_url = relay
+    let relay_code = relay
         .as_ref()
-        .map(|link| link.agent_url(&grant, &issued.secret))
+        .map(|link| link.connection_code(&grant))
         .transpose()?;
 
     if json {
@@ -139,8 +139,9 @@ pub fn run(
             "token_id": grant.token_id,
             "token": &*issued.secret,
         });
-        if let Some(url) = &relay_url {
-            out["relay_url"] = serde_json::Value::String(url.to_string());
+        if let (Some(code), Some(link)) = (&relay_code, &relay) {
+            out["relay_mcp_url"] = serde_json::Value::String(link.mcp_url());
+            out["relay_code"] = serde_json::Value::String(code.to_string());
         }
         println!("{out}");
     } else {
@@ -153,11 +154,15 @@ pub fn run(
             ui::ok(&format!("granted  {agent}"));
         }
         println!();
-        if let Some(url) = &relay_url {
-            println!("Add this URL to your agent as a remote MCP server (no authentication).");
-            println!("It carries the token: copy it now, sats cannot show it again.");
+        if let (Some(code), Some(link)) = (&relay_code, &relay) {
+            println!("Add this MCP server to your agent (sign in with OAuth):");
             println!();
-            println!("{}", url.as_str());
+            println!("  {}", link.mcp_url());
+            println!();
+            println!("When it asks you to sign in, paste this connection code. It is the agent's");
+            println!("credential at the relay: copy it now, sats cannot show it again.");
+            println!();
+            println!("{}", code.as_str());
             println!();
             println!("Bring requests here: sats relay sync --watch");
             if grant.mode == sats_core::authz::GrantMode::Ask {

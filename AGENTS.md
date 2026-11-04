@@ -101,8 +101,8 @@ advice for exactly that file.
 | `crates/sats-wallet/src/alkanes/` | Views and human-authorized staging, review, signing, persistence, and broadcast workflows |
 | `crates/sats-wallet/src/request/` | The native request workflow: create, dismiss, reconcile, and the human-authorized executor |
 | `crates/sats-wallet/src/spend.rs` | The shared signing and broadcast tail: persist before broadcast, rebroadcast |
-| `crates/sats-wallet/src/relay.rs` | The device's side of a relay: link, mint agent URLs, sync filings through `request` |
-| `crates/sats-relay/` | The keyless relay binary: MCP for agents, the signed device API, the sealed mailbox |
+| `crates/sats-wallet/src/relay.rs` | The device's side of a relay: link, mint connection codes, sync filings through `request` |
+| `crates/sats-relay/` | The keyless relay binary: MCP for agents (OAuth sign-in), the signed device API, the sealed mailbox |
 | `crates/sats-cli/src/main.rs` | Composition and command dispatch only |
 | `crates/sats-cli/src/cli.rs` | Clap command and flag definitions |
 | `crates/sats-cli/src/commands/` | Human CLI workflows and rendering |
@@ -258,9 +258,14 @@ A workflow two surfaces could need belongs here, not in a command.
   seed, signer, or grant policy, and `sats-relay` must never depend on
   `sats-wallet`. It serves no tool that approves, signs, or broadcasts.
 - The device decides every relayed filing through `request::create` (or
-  `create_wrap`) with the agent's token, exactly as a local filing.
+  `create_wrap`), exactly as a local filing, authenticated by the grant
+  instance named in a connection code the device verified it signed
+  (`Credential::RelayGrant`, constructible only inside `sats-wallet`).
   Never trust a relay-supplied field without the same checks; treat
   every filing as a proposal from an untrusted transport.
+- Connection codes never carry a grant token, and never appear in a URL.
+- Results the device posts are sealed under the grant's result key; the
+  relay stores ciphertext and the bare status only.
 - The device relay key is a communication credential only. Never derive
   it from the seed or let it unlock anything.
 - What the device posts is the local `check_request` view; keep relay and

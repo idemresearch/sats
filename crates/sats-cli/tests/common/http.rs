@@ -13,14 +13,22 @@ pub struct McpHttp {
     /// The full endpoint URL, credential included.
     pub url: String,
     session_id: Option<String>,
+    /// An OAuth access token, sent as `Authorization: Bearer`.
+    bearer: Option<String>,
 }
 
 impl McpHttp {
     /// Initialize a session; `server` is the name the server must report.
     pub fn connect(url: &str, server: &str) -> McpHttp {
+        McpHttp::connect_as(url, server, None)
+    }
+
+    /// [`McpHttp::connect`] with an OAuth access token.
+    pub fn connect_as(url: &str, server: &str, bearer: Option<&str>) -> McpHttp {
         let mut session = McpHttp {
             url: url.to_string(),
             session_id: None,
+            bearer: bearer.map(str::to_string),
         };
         let init = session.rpc(
             1,
@@ -46,6 +54,9 @@ impl McpHttp {
             .with_timeout(30);
         if let Some(id) = &self.session_id {
             request = request.with_header("Mcp-Session-Id", id);
+        }
+        if let Some(token) = &self.bearer {
+            request = request.with_header("Authorization", format!("Bearer {token}"));
         }
         request.send().unwrap()
     }

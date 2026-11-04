@@ -21,6 +21,7 @@ thiserror = { workspace = true }
 log = { workspace = true }
 minreq = { workspace = true }
 hex = { workspace = true }
+subtle = { workspace = true }
 base64 = { workspace = true }
 zeroize = { workspace = true }
 

@@ -9,12 +9,20 @@
 //! its own grant and the human approves there.
 //!
 //! Routes:
-//! - `/mcp/<capability>`: MCP Streamable HTTP for the agent.
+//! - `/mcp`: MCP Streamable HTTP for an agent signed in with OAuth
+//!   ([`oauth`]): `Authorization: Bearer <access token>`. The connection
+//!   code (the device-signed capability) is only ever pasted on the
+//!   sign-in page, never carried in a URL.
+//! - `/.well-known/oauth-protected-resource`,
+//!   `/.well-known/oauth-authorization-server`, `/oauth/register`,
+//!   `/oauth/authorize`, `/oauth/token`: the OAuth flow.
 //! - `GET /v1/inbox`, `POST /v1/results`: the device, each call signed
 //!   with its relay key ([`sats_core::relay::AUTH_HEADER`]).
 //! - `GET /healthz`: liveness.
 
+mod auth_routes;
 pub mod mailbox;
+pub mod oauth;
 mod tools;
 
 use std::convert::Infallible;
@@ -35,13 +43,11 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
-use sats_core::relay::{self, Capability};
+use sats_core::relay;
 use serde::Deserialize;
 
 use crate::mailbox::Mailbox;
 
-/// The agent endpoint's prefix; the capability is the segment after it.
-const MCP_PREFIX: &str = "/mcp/";
 /// The largest device request body accepted.
 const MAX_DEVICE_BODY: usize = 1 << 20;
 
@@ -61,9 +67,9 @@ pub fn now() -> u64 {
         .unwrap_or(0)
 }
 
-type Body = BoxBody<Bytes, Infallible>;
+pub(crate) type Body = BoxBody<Bytes, Infallible>;
 
-fn respond(status: StatusCode, body: serde_json::Value) -> Response<Body> {
+pub(crate) fn respond(status: StatusCode, body: serde_json::Value) -> Response<Body> {
     let mut response = Response::new(Full::new(Bytes::from(body.to_string())).boxed());
     *response.status_mut() = status;
     response.headers_mut().insert(
@@ -86,8 +92,17 @@ fn refused(status: StatusCode, code: &str, message: &str) -> Response<Body> {
     )
 }
 
-struct Relay {
+/// The connection a signed-in agent's call carries: its verified
+/// capability and the exact code, which filings forward to the device.
+#[derive(Clone)]
+pub(crate) struct Connected {
+    pub(crate) capability: sats_core::relay::Capability,
+    pub(crate) encoded: String,
+}
+
+pub(crate) struct Relay {
     mailbox: Arc<Mailbox>,
+    pub(crate) oauth: oauth::OAuth,
     mcp: StreamableHttpService<tools::RelayMcp, LocalSessionManager>,
 }
 
@@ -110,7 +125,12 @@ pub async fn serve(listener: tokio::net::TcpListener, config: Config) -> Result<
         // proxies in front of a relay forward hosts it can't predict.
         StreamableHttpServerConfig::default().with_allowed_hosts(Vec::<String>::new()),
     );
-    let relay = Arc::new(Relay { mailbox, mcp });
+    let oauth = oauth::OAuth::open(&config.data_dir.join("relay.db"))?;
+    let relay = Arc::new(Relay {
+        mailbox,
+        oauth,
+        mcp,
+    });
 
     loop {
         let (stream, _) = match listener.accept().await {
@@ -124,7 +144,7 @@ pub async fn serve(listener: tokio::net::TcpListener, config: Config) -> Result<
         tokio::spawn(async move {
             let handler = service_fn(move |request: Request<Incoming>| {
                 let relay = relay.clone();
-                async move { Ok::<_, Infallible>(route(&relay, request).await) }
+                async move { Ok::<_, Infallible>(with_cors(route(&relay, request).await)) }
             });
             let _ = http1::Builder::new()
                 .serve_connection(TokioIo::new(stream), handler)
@@ -133,19 +153,60 @@ pub async fn serve(listener: tokio::net::TcpListener, config: Config) -> Result<
     }
 }
 
+/// Let browser-based MCP clients call the relay. Every route is
+/// authenticated by a token or signature, never by cookies.
+fn with_cors(mut response: Response<Body>) -> Response<Body> {
+    use hyper::header::HeaderValue;
+    let headers = response.headers_mut();
+    headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    headers.insert(
+        "access-control-allow-headers",
+        HeaderValue::from_static(
+            "authorization, content-type, accept, mcp-protocol-version, mcp-session-id, last-event-id",
+        ),
+    );
+    headers.insert(
+        "access-control-allow-methods",
+        HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
+    );
+    headers.insert(
+        "access-control-expose-headers",
+        HeaderValue::from_static("www-authenticate, mcp-session-id"),
+    );
+    response
+}
+
 async fn route(relay: &Relay, mut request: Request<Incoming>) -> Response<Body> {
     let path = request.uri().path().to_string();
-    if let Some(encoded) = path.strip_prefix(MCP_PREFIX) {
-        // An unverifiable capability gets the same empty 404 as any
-        // unknown path: the relay names nothing to a stranger.
-        let Ok(capability) = Capability::decode(encoded) else {
-            return not_found();
+    if request.method() == Method::OPTIONS {
+        let mut response = Response::new(Full::new(Bytes::new()).boxed());
+        *response.status_mut() = StatusCode::NO_CONTENT;
+        return response;
+    }
+    if path == "/mcp" {
+        return match auth_routes::bearer_capability(relay, request.headers()) {
+            Ok(connected) => {
+                request.extensions_mut().insert(connected);
+                relay.mcp.handle(request).await
+            }
+            Err(token_given) => auth_routes::unauthorized(request.headers(), token_given),
         };
-        request.extensions_mut().insert(capability);
-        return relay.mcp.handle(request).await;
     }
     match (request.method().clone(), path.as_str()) {
         (Method::GET, "/healthz") => respond(StatusCode::OK, serde_json::json!({"ok": true})),
+        (
+            Method::GET,
+            "/.well-known/oauth-protected-resource" | "/.well-known/oauth-protected-resource/mcp",
+        ) => auth_routes::protected_resource(request.headers()),
+        (
+            Method::GET,
+            "/.well-known/oauth-authorization-server" | "/.well-known/openid-configuration",
+        ) => auth_routes::authorization_server(request.headers()),
+        (Method::POST, "/oauth/register") => auth_routes::register(relay, request).await,
+        (Method::GET | Method::POST, "/oauth/authorize") => {
+            auth_routes::authorize(relay, request).await
+        }
+        (Method::POST, "/oauth/token") => auth_routes::token(relay, request).await,
         (Method::GET, "/v1/inbox") => device(relay, request, inbox).await,
         (Method::POST, "/v1/results") => device(relay, request, results).await,
         _ => not_found(),
@@ -228,8 +289,14 @@ struct PostedResults {
 struct PostedResult {
     request_id: String,
     revision: u64,
-    view: serde_json::Value,
+    /// The request's state, readable so finished filings can be cleared.
+    status: String,
+    /// The view, sealed under the grant's result key (base64).
+    sealed: Option<String>,
 }
+
+/// The largest sealed view accepted.
+const MAX_SEALED_VIEW: usize = 64 * 1024;
 
 fn results(mailbox: &Mailbox, human: &str, body: &[u8]) -> Response<Body> {
     let Ok(posted) = serde_json::from_slice::<PostedResults>(body) else {
@@ -242,24 +309,28 @@ fn results(mailbox: &Mailbox, human: &str, body: &[u8]) -> Response<Body> {
     let mut accepted = Vec::new();
     let mut rejected = Vec::new();
     for result in posted.results {
-        // The view is what check_request will return: it must at least
-        // be an object naming this request and a status.
-        let well_formed = result.view.is_object()
-            && result.view.get("status").is_some_and(|s| s.is_string())
+        // The relay can't read the view; it checks only the shape it can.
+        let sealed = match result.sealed.as_deref().map(|s| STANDARD.decode(s)) {
+            None => Some(None),
+            Some(Ok(bytes)) if bytes.len() <= MAX_SEALED_VIEW => Some(Some(bytes)),
+            Some(_) => None,
+        };
+        let status_ok = (1..=32).contains(&result.status.len())
             && result
-                .view
-                .get("request_id")
-                .is_none_or(|id| id.as_str() == Some(&result.request_id));
-        if !well_formed {
+                .status
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'_');
+        let (Some(sealed), true) = (sealed, status_ok) else {
             rejected
                 .push(serde_json::json!({"request_id": result.request_id, "reason": "malformed"}));
             continue;
-        }
+        };
         match mailbox.post_result(
             human,
             &result.request_id,
             result.revision,
-            &result.view,
+            &result.status,
+            sealed.as_deref(),
             now(),
         ) {
             Ok(Ok(())) => accepted.push(result.request_id),
