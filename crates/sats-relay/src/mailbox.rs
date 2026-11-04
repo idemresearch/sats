@@ -84,9 +84,6 @@ impl Mailbox {
                  filed_at INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS filings_by_human ON filings (human, filed_at);
-             -- Results in readable form, from before sealing: dropped. They
-             -- are observations only, and devices re-post on the next sync.
-             DROP TABLE IF EXISTS results;
              CREATE TABLE IF NOT EXISTS sealed_results (
                  request_id TEXT PRIMARY KEY,
                  human TEXT NOT NULL,
