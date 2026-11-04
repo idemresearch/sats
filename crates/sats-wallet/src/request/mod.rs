@@ -41,11 +41,47 @@ pub use sats_core::request::{
     REQUEST_KEY_RULE, is_request_id, keyed_request_id, valid_request_key,
 };
 
-/// What an agent asks for. The token authenticates the agent against
-/// its grant; nothing is written for a caller that cannot authenticate.
+/// How a filing proves it speaks for the agent's grant. Nothing is
+/// written for a caller that cannot authenticate.
+#[derive(Clone, Copy)]
+pub enum Credential<'a> {
+    /// The grant's bearer token, as a local MCP server presents it.
+    Token(&'a str),
+    /// A grant instance named in a relay connection code this device
+    /// signed. Only [`crate::relay`] can construct it, after verifying its
+    /// own signature on the code.
+    RelayGrant(RelayGrant<'a>),
+}
+
+/// A grant id taken from a connection code the device verified it signed.
+#[derive(Clone, Copy)]
+pub struct RelayGrant<'a>(&'a str);
+
+impl<'a> RelayGrant<'a> {
+    pub(crate) fn verified(grant_id: &'a str) -> Self {
+        RelayGrant(grant_id)
+    }
+}
+
+impl Credential<'_> {
+    fn authorizes(&self, grant: &Grant) -> bool {
+        match self {
+            Credential::Token(token) => grant.authorizes(token),
+            Credential::RelayGrant(RelayGrant(grant_id)) => {
+                !grant_id.is_empty()
+                    && bool::from(subtle::ConstantTimeEq::ct_eq(
+                        grant_id.as_bytes(),
+                        grant.grant_id.as_bytes(),
+                    ))
+            }
+        }
+    }
+}
+
+/// What an agent asks for.
 pub struct CreateParams<'a> {
     pub agent: &'a str,
-    pub token: &'a str,
+    pub credential: Credential<'a>,
     /// The agent's retry handle: required, so a lost response or a
     /// retried tool call can never file twice.
     pub idempotency_key: &'a str,
@@ -68,7 +104,7 @@ pub enum CreateError {
     /// No grant on file for this agent: nothing can be authenticated,
     /// so nothing is written.
     NoGrant,
-    /// The presented token does not match the grant on file.
+    /// The presented credential does not match the grant on file.
     Unauthorized,
     /// The key was already used for a different intent.
     Conflict {
@@ -147,7 +183,7 @@ impl From<anyhow::Error> for CreateError {
 /// same key with a different intent is a conflict.
 pub struct CreateWrapParams<'a> {
     pub agent: &'a str,
-    pub token: &'a str,
+    pub credential: Credential<'a>,
     pub idempotency_key: &'a str,
     pub amount_sat: u64,
 }
@@ -178,7 +214,7 @@ pub fn create_wrap(
         let grant = store
             .load_grant(net_name, params.agent)?
             .ok_or(CreateError::NoGrant)?;
-        if !grant.authorizes(params.token) {
+        if !params.credential.authorizes(&grant) {
             return Err(CreateError::Unauthorized);
         }
         let now = now_checked().map_err(|e| CreateError::ClockUnavailable(format!("{e:#}")))?;
@@ -215,7 +251,7 @@ pub fn create_wrap(
         network,
         &CreateParams {
             agent: params.agent,
-            token: params.token,
+            credential: params.credential,
             idempotency_key: params.idempotency_key,
             address: &address,
             amount_sat: params.amount_sat,
@@ -227,7 +263,7 @@ pub fn create_wrap(
 /// A local, keyless proposal to transfer an exact Alkanes quantity.
 pub struct CreateAlkanesSendParams<'a> {
     pub agent: &'a str,
-    pub token: &'a str,
+    pub credential: Credential<'a>,
     pub idempotency_key: &'a str,
     pub id: &'a str,
     pub amount: &'a str,
@@ -257,7 +293,7 @@ pub fn create_alkanes_send(
         network,
         &CreateParams {
             agent: params.agent,
-            token: params.token,
+            credential: params.credential,
             idempotency_key: params.idempotency_key,
             address: params.address,
             amount_sat: sats_alkanes::build::DEFAULT_POSTAGE_SAT,
@@ -315,7 +351,7 @@ fn create_inner(
     let grant = store
         .load_grant(net_name, params.agent)?
         .ok_or(CreateError::NoGrant)?;
-    if !grant.authorizes(params.token) {
+    if !params.credential.authorizes(&grant) {
         return Err(CreateError::Unauthorized);
     }
     let digest = SendIntent {

@@ -1511,6 +1511,7 @@ version = "0.0.4"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "base64 0.22.1",
  "bdk_wallet",
  "clap",
  "directories",
@@ -1608,6 +1609,7 @@ dependencies = [
  "sats-core",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "thiserror",
  "toml",

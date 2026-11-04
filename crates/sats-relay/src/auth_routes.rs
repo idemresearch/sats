@@ -521,8 +521,8 @@ pub fn unauthorized(headers: &HeaderMap, token_given: bool) -> Response<Body> {
     response
 }
 
-/// The capability behind an `Authorization: Bearer` access token.
-pub fn bearer_capability(relay: &Relay, headers: &HeaderMap) -> Result<Capability, bool> {
+/// The verified connection behind an `Authorization: Bearer` access token.
+pub fn bearer_capability(relay: &Relay, headers: &HeaderMap) -> Result<crate::Connected, bool> {
     let Some(value) = headers.get(header::AUTHORIZATION) else {
         return Err(false);
     };
@@ -542,7 +542,10 @@ pub fn bearer_capability(relay: &Relay, headers: &HeaderMap) -> Result<Capabilit
         .flatten()
         .ok_or(true)?;
     match Capability::decode(&record.capability) {
-        Ok(capability) if now() < capability.expires_at => Ok(capability),
+        Ok(capability) if now() < capability.expires_at => Ok(crate::Connected {
+            capability,
+            encoded: record.capability,
+        }),
         _ => Err(true),
     }
 }

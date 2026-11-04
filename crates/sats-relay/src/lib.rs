@@ -92,6 +92,14 @@ fn refused(status: StatusCode, code: &str, message: &str) -> Response<Body> {
     )
 }
 
+/// The connection a signed-in agent's call carries: its verified
+/// capability and the exact code, which filings forward to the device.
+#[derive(Clone)]
+pub(crate) struct Connected {
+    pub(crate) capability: sats_core::relay::Capability,
+    pub(crate) encoded: String,
+}
+
 pub(crate) struct Relay {
     mailbox: Arc<Mailbox>,
     pub(crate) oauth: oauth::OAuth,
@@ -177,8 +185,8 @@ async fn route(relay: &Relay, mut request: Request<Incoming>) -> Response<Body> 
     }
     if path == "/mcp" {
         return match auth_routes::bearer_capability(relay, request.headers()) {
-            Ok(capability) => {
-                request.extensions_mut().insert(capability);
+            Ok(connected) => {
+                request.extensions_mut().insert(connected);
                 relay.mcp.handle(request).await
             }
             Err(token_given) => auth_routes::unauthorized(request.headers(), token_given),
@@ -281,8 +289,14 @@ struct PostedResults {
 struct PostedResult {
     request_id: String,
     revision: u64,
-    view: serde_json::Value,
+    /// The request's state, readable so finished filings can be cleared.
+    status: String,
+    /// The view, sealed under the grant's result key (base64).
+    sealed: Option<String>,
 }
+
+/// The largest sealed view accepted.
+const MAX_SEALED_VIEW: usize = 64 * 1024;
 
 fn results(mailbox: &Mailbox, human: &str, body: &[u8]) -> Response<Body> {
     let Ok(posted) = serde_json::from_slice::<PostedResults>(body) else {
@@ -295,24 +309,28 @@ fn results(mailbox: &Mailbox, human: &str, body: &[u8]) -> Response<Body> {
     let mut accepted = Vec::new();
     let mut rejected = Vec::new();
     for result in posted.results {
-        // The view is what check_request will return: it must at least
-        // be an object naming this request and a status.
-        let well_formed = result.view.is_object()
-            && result.view.get("status").is_some_and(|s| s.is_string())
+        // The relay can't read the view; it checks only the shape it can.
+        let sealed = match result.sealed.as_deref().map(|s| STANDARD.decode(s)) {
+            None => Some(None),
+            Some(Ok(bytes)) if bytes.len() <= MAX_SEALED_VIEW => Some(Some(bytes)),
+            Some(_) => None,
+        };
+        let status_ok = (1..=32).contains(&result.status.len())
             && result
-                .view
-                .get("request_id")
-                .is_none_or(|id| id.as_str() == Some(&result.request_id));
-        if !well_formed {
+                .status
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'_');
+        let (Some(sealed), true) = (sealed, status_ok) else {
             rejected
                 .push(serde_json::json!({"request_id": result.request_id, "reason": "malformed"}));
             continue;
-        }
+        };
         match mailbox.post_result(
             human,
             &result.request_id,
             result.revision,
-            &result.view,
+            &result.status,
+            sealed.as_deref(),
             now(),
         ) {
             Ok(Ok(())) => accepted.push(result.request_id),

@@ -65,7 +65,8 @@ sats relay sync --watch
   connection code minted with the old one.
 - `agent grant --relay` creates an ordinary grant and prints two things:
   the relay's MCP URL, `https://relay.example.com/mcp`, and a connection
-  code. The code carries the grant's token, and sats shows it only once.
+  code. The code is the agent's credential at the relay (it names the grant
+  but doesn't contain its token), and sats shows it only once.
   It is never part of a URL: you paste it on the relay's sign-in page.
   With `--json` they are `relay_mcp_url` and `relay_code`.
 - `relay sync` fetches what agents filed and decides each filing here. It
@@ -128,6 +129,19 @@ on a local server ([MCP](mcp.md)), with these differences:
 the old grant are refused there and the agent observes `no_grant`. The
 agent's tokens stop working at the relay once the grant's expiry passes.
 Re-issue the grant to get a new connection code.
+
+## What the relay keeps
+
+| Data | At rest |
+|---|---|
+| OAuth tokens and codes | A one-way id, plus the connection code sealed under a key derived from the token |
+| Filings | Sealed to your device's key; an operation digest for idempotency |
+| Results | Sealed for the agent's connection; the bare status in the clear |
+| Registered clients | Client id and redirect addresses |
+
+Its database alone yields no grant token, connection code, OAuth token,
+amount, recipient, or txid. While it runs, the relay reads each filing as
+it arrives and each result as it serves it: it is the agent's MCP server.
 
 ## Security
 

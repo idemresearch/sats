@@ -122,7 +122,7 @@ pub fn run(
 
     let relay_code = relay
         .as_ref()
-        .map(|link| link.connection_code(&grant, &issued.secret))
+        .map(|link| link.connection_code(&grant))
         .transpose()?;
 
     if json {
@@ -159,8 +159,8 @@ pub fn run(
             println!();
             println!("  {}", link.mcp_url());
             println!();
-            println!("When it asks you to sign in, paste this connection code. It carries the");
-            println!("token: copy it now, sats cannot show it again.");
+            println!("When it asks you to sign in, paste this connection code. It is the agent's");
+            println!("credential at the relay: copy it now, sats cannot show it again.");
             println!();
             println!("{}", code.as_str());
             println!();

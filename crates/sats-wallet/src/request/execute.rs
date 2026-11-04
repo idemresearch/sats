@@ -903,7 +903,7 @@ mod tests {
                 Network::Signet,
                 &CreateParams {
                     agent,
-                    token,
+                    credential: crate::request::Credential::Token(token),
                     idempotency_key: key,
                     address: ADDRESS,
                     amount_sat,
@@ -1111,7 +1111,7 @@ mod tests {
             Network::Signet,
             &crate::request::CreateAlkanesSendParams {
                 agent: "claude",
-                token,
+                credential: crate::request::Credential::Token(token),
                 idempotency_key: key,
                 id,
                 amount,
@@ -1487,7 +1487,7 @@ mod tests {
             Network::Signet,
             &crate::request::CreateWrapParams {
                 agent: "claude",
-                token,
+                credential: crate::request::Credential::Token(token),
                 idempotency_key: "wrap-1",
                 amount_sat: 10_000,
             },
@@ -1534,7 +1534,7 @@ mod tests {
                 Network::Signet,
                 &crate::request::CreateWrapParams {
                     agent: "claude",
-                    token: &token,
+                    credential: crate::request::Credential::Token(&token),
                     idempotency_key: "race",
                     amount_sat: 10_000,
                 },
@@ -2012,7 +2012,7 @@ mod tests {
                 Network::Signet,
                 &CreateParams {
                     agent: "claude",
-                    token: &old_token,
+                    credential: crate::request::Credential::Token(&old_token),
                     idempotency_key: "racy",
                     address: ADDRESS,
                     amount_sat: 10_000,

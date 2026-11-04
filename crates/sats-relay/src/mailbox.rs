@@ -1,5 +1,5 @@
 //! The relay's only state: sealed filings waiting for a device, and the
-//! results devices posted back. Losing this file loses pending requests
+//! results devices posted back, sealed for the agent's connection. Losing this file loses pending requests
 //! and observations, never money or authority: no key, wallet, or grant
 //! policy lives here.
 
@@ -30,7 +30,11 @@ pub enum Known {
         human: String,
         agent: String,
         digest: String,
-        view: serde_json::Value,
+        /// Readable, so finished filings can be cleared.
+        status: String,
+        /// The view, sealed under the grant's result key; `None` when the
+        /// device refused a filing it couldn't attribute to a grant.
+        sealed: Option<Vec<u8>>,
     },
     /// Filed and waiting for the device.
     Pending {
@@ -80,13 +84,17 @@ impl Mailbox {
                  filed_at INTEGER NOT NULL
              );
              CREATE INDEX IF NOT EXISTS filings_by_human ON filings (human, filed_at);
-             CREATE TABLE IF NOT EXISTS results (
+             -- Results in readable form, from before sealing: dropped. They
+             -- are observations only, and devices re-post on the next sync.
+             DROP TABLE IF EXISTS results;
+             CREATE TABLE IF NOT EXISTS sealed_results (
                  request_id TEXT PRIMARY KEY,
                  human TEXT NOT NULL,
                  agent TEXT NOT NULL,
                  digest TEXT NOT NULL,
                  revision INTEGER NOT NULL,
-                 view TEXT NOT NULL,
+                 status TEXT NOT NULL,
+                 sealed BLOB,
                  updated_at INTEGER NOT NULL
              );",
         )
@@ -112,7 +120,7 @@ impl Mailbox {
             params![now.saturating_sub(self.filing_ttl) as i64],
         )?;
         conn.execute(
-            "DELETE FROM results WHERE updated_at < ?1",
+            "DELETE FROM sealed_results WHERE updated_at < ?1",
             params![now.saturating_sub(self.result_ttl) as i64],
         )?;
         Ok(())
@@ -122,25 +130,21 @@ impl Mailbox {
         let conn = self.conn();
         let result = conn
             .query_row(
-                "SELECT human, agent, digest, view FROM results WHERE request_id = ?1",
+                "SELECT human, agent, digest, status, sealed FROM sealed_results WHERE request_id = ?1",
                 params![request_id],
                 |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
+                    Ok(Known::Result {
+                        human: row.get(0)?,
+                        agent: row.get(1)?,
+                        digest: row.get(2)?,
+                        status: row.get(3)?,
+                        sealed: row.get(4)?,
+                    })
                 },
             )
             .optional()?;
-        if let Some((human, agent, digest, view)) = result {
-            return Ok(Some(Known::Result {
-                human,
-                agent,
-                digest,
-                view: serde_json::from_str(&view).context("stored result is not JSON")?,
-            }));
+        if result.is_some() {
+            return Ok(result);
         }
         Ok(conn
             .query_row(
@@ -206,7 +210,8 @@ impl Mailbox {
         human: &str,
         request_id: &str,
         revision: u64,
-        view: &serde_json::Value,
+        status: &str,
+        sealed: Option<&[u8]>,
         now: u64,
     ) -> Result<Result<(), Rejected>> {
         let mut conn = self.conn();
@@ -215,7 +220,7 @@ impl Mailbox {
             .query_row(
                 "SELECT agent, digest, NULL FROM filings WHERE request_id = ?1 AND human = ?2
                  UNION ALL
-                 SELECT agent, digest, revision FROM results WHERE request_id = ?1 AND human = ?2
+                 SELECT agent, digest, revision FROM sealed_results WHERE request_id = ?1 AND human = ?2
                  ORDER BY 3 DESC",
                 params![request_id, human],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -228,22 +233,23 @@ impl Mailbox {
             return Ok(Err(Rejected::Stale));
         }
         tx.execute(
-            "INSERT INTO results (request_id, human, agent, digest, revision, view, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO sealed_results
+                 (request_id, human, agent, digest, revision, status, sealed, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT (request_id) DO UPDATE SET
-                 revision = excluded.revision, view = excluded.view,
-                 updated_at = excluded.updated_at",
+                 revision = excluded.revision, status = excluded.status,
+                 sealed = excluded.sealed, updated_at = excluded.updated_at",
             params![
                 request_id,
                 human,
                 agent,
                 digest,
                 revision as i64,
-                view.to_string(),
+                status,
+                sealed,
                 now as i64
             ],
         )?;
-        let status = view.get("status").and_then(|s| s.as_str()).unwrap_or("");
         if TERMINAL.contains(&status) {
             tx.execute(
                 "DELETE FROM filings WHERE request_id = ?1",
@@ -282,35 +288,51 @@ mod tests {
     fn results_are_owned_monotonic_and_terminal_results_clear_the_filing() {
         let (_dir, mailbox) = mailbox();
         assert!(matches!(file(&mailbox, "r-1", "h1", 10), Filed::Stored));
-        let pending = serde_json::json!({"status": "pending_approval"});
+        let pending = ("pending_approval", Some(b"sealed-pending".as_slice()));
         // Another device can't answer for this filing.
         assert_eq!(
-            mailbox.post_result("h2", "r-1", 1, &pending, 10).unwrap(),
+            mailbox
+                .post_result("h2", "r-1", 1, pending.0, pending.1, 10)
+                .unwrap(),
             Err(Rejected::Unknown)
         );
         assert_eq!(
-            mailbox.post_result("h1", "r-1", 5, &pending, 10).unwrap(),
+            mailbox
+                .post_result("h1", "r-1", 5, pending.0, pending.1, 10)
+                .unwrap(),
             Ok(())
         );
         assert_eq!(mailbox.inbox("h1", 10).unwrap().len(), 1);
         // A replayed or older result can't roll the state back.
         assert_eq!(
-            mailbox.post_result("h1", "r-1", 5, &pending, 11).unwrap(),
+            mailbox
+                .post_result("h1", "r-1", 5, pending.0, pending.1, 11)
+                .unwrap(),
             Err(Rejected::Stale)
         );
-        let sent = serde_json::json!({"status": "sent", "txid": "ab"});
+        let sent = ("sent", Some(b"sealed-sent".as_slice()));
         assert_eq!(
-            mailbox.post_result("h1", "r-1", 6, &sent, 11).unwrap(),
+            mailbox
+                .post_result("h1", "r-1", 6, sent.0, sent.1, 11)
+                .unwrap(),
             Ok(())
         );
         assert!(mailbox.inbox("h1", 11).unwrap().is_empty());
         assert_eq!(
-            mailbox.post_result("h1", "r-1", 4, &pending, 12).unwrap(),
+            mailbox
+                .post_result("h1", "r-1", 4, pending.0, pending.1, 12)
+                .unwrap(),
             Err(Rejected::Stale)
         );
         match mailbox.lookup("r-1").unwrap() {
-            Some(Known::Result { view, digest, .. }) => {
-                assert_eq!(view["status"], "sent");
+            Some(Known::Result {
+                status,
+                sealed,
+                digest,
+                ..
+            }) => {
+                assert_eq!(status, "sent");
+                assert_eq!(sealed.as_deref(), Some(b"sealed-sent".as_slice()));
                 assert_eq!(digest, "d");
             }
             _ => panic!("expected a result"),

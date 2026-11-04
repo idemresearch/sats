@@ -58,8 +58,9 @@ fn check(mcp: &mut McpHttp, id: u64, request_id: &str) -> serde_json::Value {
     )
 }
 
-/// Link the device and issue a relayed grant; returns the connection code.
-fn relayed_grant(dir: &TempDir, relay: &str, agent: &str) -> String {
+/// Link the device and issue a relayed grant; returns the connection code
+/// and the grant's bearer token.
+fn relayed_grant(dir: &TempDir, relay: &str, agent: &str) -> (String, String) {
     let linked = sats_json(dir, &["--json", "relay", "link", relay]);
     assert_eq!(linked["url"], relay);
     let grant = sats_json(
@@ -72,7 +73,16 @@ fn relayed_grant(dir: &TempDir, relay: &str, agent: &str) -> String {
     let code = grant["relay_code"].as_str().unwrap().to_string();
     // A bare code, never a URL: it is pasted on the sign-in page only.
     assert!(!code.contains('/') && !code.contains("http"), "{code}");
-    code
+    // It names the grant but doesn't carry its token.
+    let token = grant["token"].as_str().unwrap().to_string();
+    use base64::Engine;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(code.split('.').next().unwrap())
+        .unwrap();
+    let payload = String::from_utf8(payload).unwrap();
+    assert!(!payload.contains(&token), "{payload}");
+    assert!(payload.contains(grant["grant_id"].as_str().unwrap()));
+    (code, token)
 }
 
 /// Sign in as an OAuth client would, pasting `code`; returns an access token.
@@ -134,7 +144,7 @@ fn a_wrap_filed_through_the_relay_is_decided_and_approved_on_the_device() {
     let relay = start_relay(&relay_data);
     let dir = TempDir::new().unwrap();
     wrap_ready_wallet(&dir);
-    let code = relayed_grant(&dir, &relay, "chatgpt");
+    let (code, grant_token) = relayed_grant(&dir, &relay, "chatgpt");
 
     let mut agent = connect_agent(&relay, &code);
     let names = agent.tool_names(2);
@@ -196,13 +206,26 @@ fn a_wrap_filed_through_the_relay_is_decided_and_approved_on_the_device() {
     assert!(sync(&dir)["refreshed"].as_array().unwrap().is_empty());
     assert_eq!(wrap(&mut agent, 10, 10_000, "wrap-1")["status"], "sent");
 
-    // The relay's store holds no token and no plaintext filing.
+    // At rest the relay holds no grant token, no connection code, no
+    // readable filing, and no readable result: not the txid, the recipient,
+    // or the operation.
     let db = std::fs::read(relay_data.path().join("relay.db")).unwrap();
-    let grant_token = code.as_str();
-    for secret in [grant_token.as_bytes(), b"wrap-1".as_slice()] {
+    let txid = sent["txid"].as_str().unwrap().to_string();
+    let recipient = sent["recipient"]
+        .as_str()
+        .unwrap_or("frbtc-signer")
+        .to_string();
+    for secret in [
+        grant_token.as_str(),
+        code.as_str(),
+        "wrap-1",
+        txid.as_str(),
+        recipient.as_str(),
+        "frbtc_wrap",
+    ] {
         assert!(
-            !db.windows(secret.len()).any(|w| w == secret),
-            "relay store leaked plaintext"
+            !db.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "relay store leaked {secret}"
         );
     }
 }
@@ -213,7 +236,7 @@ fn the_device_grant_decides_denials_and_revocation() {
     let relay = start_relay(&relay_data);
     let dir = TempDir::new().unwrap();
     wrap_ready_wallet(&dir);
-    let code = relayed_grant(&dir, &relay, "chatgpt");
+    let (code, _) = relayed_grant(&dir, &relay, "chatgpt");
     let mut agent = connect_agent(&relay, &code);
 
     // A dismissal reaches the agent at once too.
@@ -252,7 +275,7 @@ fn the_relay_admits_only_signed_in_agents_and_device_signed_codes() {
     let relay = start_relay(&relay_data);
     let dir = TempDir::new().unwrap();
     wrap_ready_wallet(&dir);
-    let code = relayed_grant(&dir, &relay, "chatgpt");
+    let (code, _) = relayed_grant(&dir, &relay, "chatgpt");
     let init = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
         "protocolVersion": common::http::PROTOCOL, "capabilities": {},
         "clientInfo": {"name": "stranger", "version": "0"}}})
@@ -362,7 +385,7 @@ fn the_relay_serves_whatever_host_a_proxy_forwards() {
     let relay = start_relay(&relay_data);
     let dir = TempDir::new().unwrap();
     wrap_ready_wallet(&dir);
-    let code = relayed_grant(&dir, &relay, "chatgpt");
+    let (code, _) = relayed_grant(&dir, &relay, "chatgpt");
     let token = sign_in(&relay, &code);
     let host = "sats-relay.up.example.app";
     assert!(raw_status(&relay, "GET", "/healthz", host, None, "").contains(" 200 "));
