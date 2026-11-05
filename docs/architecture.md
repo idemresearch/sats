@@ -22,7 +22,8 @@ flowchart TD
 A human send unseals the seed for one command. An agent never signs: the MCP
 server files a request, and `sats agent approve` executes it in the human's
 process, for exactly that request. Both paths share preparation, the dust
-exclusion, fee estimation, and the sign-then-persist-then-broadcast tail.
+and unconfirmed-payment exclusions, fee estimation, and the
+sign-then-persist-then-broadcast tail.
 
 `sats-core` owns deterministic wallet and authorization behavior.
 `sats-wallet` performs it against files, SQLite, and the network: storage,

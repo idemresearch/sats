@@ -4,8 +4,8 @@
 
 use std::collections::HashSet;
 
-use bdk_wallet::Wallet;
 use bdk_wallet::bitcoin::{Address, Amount, FeeRate, OutPoint};
+use bdk_wallet::{KeychainKind, Wallet};
 
 use crate::error::PlanError;
 use crate::plan::PreparedSpend;
@@ -24,6 +24,19 @@ pub fn dust_suspects(utxos: impl IntoIterator<Item = (OutPoint, Amount)>) -> Vec
         .into_iter()
         .filter(|(_, value)| POSTAGE_VALUES.contains(&value.to_sat()))
         .map(|(outpoint, _)| outpoint)
+        .collect()
+}
+
+/// Unconfirmed outputs paid to this wallet's receive addresses. Their sender
+/// can still replace them, which would invalidate any spend built on them,
+/// so they stay out of selection until a block confirms them. Unconfirmed
+/// change is the wallet's own and stays spendable: the same line
+/// `Wallet::balance` draws between untrusted and trusted pending.
+pub fn unconfirmed_received(wallet: &Wallet) -> Vec<OutPoint> {
+    wallet
+        .list_unspent()
+        .filter(|u| u.keychain == KeychainKind::External && !u.chain_position.is_confirmed())
+        .map(|u| u.outpoint)
         .collect()
 }
 
@@ -73,7 +86,9 @@ mod tests {
 
     use bdk_wallet::bitcoin::{BlockHash, Network, hashes::Hash};
     use bdk_wallet::chain::{BlockId, ConfirmationBlockTime};
-    use bdk_wallet::test_utils::{insert_checkpoint, receive_output};
+    use bdk_wallet::test_utils::{
+        ReceiveTo, insert_checkpoint, receive_output, receive_output_to_address,
+    };
     use bdk_wallet::{KeychainKind, Wallet};
 
     use super::*;
@@ -118,6 +133,59 @@ mod tests {
 
     fn recipient(wallet: &mut Wallet) -> Address {
         wallet.reveal_next_address(KeychainKind::External).address
+    }
+
+    fn receive_unconfirmed(wallet: &mut Wallet, keychain: KeychainKind, value: u64) -> OutPoint {
+        let address = wallet.next_unused_address(keychain).address;
+        receive_output_to_address(
+            wallet,
+            address,
+            Amount::from_sat(value),
+            ReceiveTo::Mempool(1),
+        )
+    }
+
+    #[test]
+    fn unconfirmed_received_names_pending_payments_but_not_change() {
+        let (mut wallet, confirmed) = funded_wallet(&[50_000]);
+        let payment = receive_unconfirmed(&mut wallet, KeychainKind::External, 40_000);
+        let change = receive_unconfirmed(&mut wallet, KeychainKind::Internal, 30_000);
+        let excluded = unconfirmed_received(&wallet);
+        assert_eq!(excluded, vec![payment]);
+        assert!(!excluded.contains(&confirmed[0]));
+        assert!(!excluded.contains(&change));
+    }
+
+    #[test]
+    fn unconfirmed_received_agrees_with_the_spendable_balance() {
+        let (mut wallet, _) = funded_wallet(&[50_000]);
+        receive_unconfirmed(&mut wallet, KeychainKind::External, 40_000);
+        receive_unconfirmed(&mut wallet, KeychainKind::Internal, 30_000);
+        let waiting: Amount = unconfirmed_received(&wallet)
+            .iter()
+            .map(|outpoint| wallet.get_utxo(*outpoint).unwrap().txout.value)
+            .sum();
+        assert_eq!(waiting, wallet.balance().untrusted_pending);
+    }
+
+    #[test]
+    fn unconfirmed_change_can_fund_the_next_spend() {
+        let (mut wallet, _) = funded_wallet(&[]);
+        let change = receive_unconfirmed(&mut wallet, KeychainKind::Internal, 30_000);
+        let addr = recipient(&mut wallet);
+        let unspendable = unconfirmed_received(&wallet);
+        let plan = build_plan(
+            &mut wallet,
+            &addr,
+            Amount::from_sat(10_000),
+            FeeRate::from_sat_per_vb_u32(2),
+            &unspendable,
+            "signet",
+            0,
+        )
+        .unwrap();
+        let tx = plan.psbt().unsigned_tx.clone();
+        assert!(tx.input.iter().any(|i| i.previous_output == change));
     }
 
     #[test]

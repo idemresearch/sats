@@ -138,7 +138,7 @@ mod tests {
     use crate::walletd;
     use anyhow::anyhow;
     use sats_core::bdk_wallet::chain::{BlockId, ConfirmationBlockTime};
-    use sats_core::bdk_wallet::test_utils::{insert_checkpoint, receive_output};
+    use sats_core::bdk_wallet::test_utils::{ReceiveTo, insert_checkpoint, receive_output};
     use sats_core::bitcoin::Amount;
     use sats_core::bitcoin::hashes::Hash;
     use sats_core::bitcoin::{BlockHash, Psbt};
@@ -257,6 +257,23 @@ mod tests {
             // Key holders must be gone before persistence and broadcasting.
             self.fixture.assert_no_spend();
         }
+    }
+
+    #[test]
+    fn transfer_funding_leaves_out_an_unconfirmed_payment_the_indexer_calls_clean() {
+        let fx = Fixture::new();
+        let mut ctx = walletd::open(&fx.store, Network::Signet).unwrap();
+        let pending = receive_output(
+            &mut ctx.wallet,
+            Amount::from_sat(50_000),
+            ReceiveTo::Mempool(1),
+        );
+        ctx.persist().unwrap();
+        drop(ctx);
+        let stage = fx.stage();
+        assert_eq!(stage.prepared.excluded_utxos, 1);
+        let tx = &stage.prepared.psbt().unsigned_tx;
+        assert!(tx.input.iter().all(|i| i.previous_output != pending));
     }
 
     #[test]

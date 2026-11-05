@@ -9,10 +9,13 @@ pub mod http;
 pub mod mcp;
 
 use assert_cmd::Command;
+use bdk_wallet::KeychainKind;
 use bdk_wallet::bitcoin::hashes::Hash;
 use bdk_wallet::bitcoin::{Amount, BlockHash, Network, OutPoint};
 use bdk_wallet::chain::{BlockId, ConfirmationBlockTime};
-use bdk_wallet::test_utils::{insert_checkpoint, receive_output};
+use bdk_wallet::test_utils::{
+    ReceiveTo, insert_checkpoint, receive_output, receive_output_to_address,
+};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -103,6 +106,37 @@ pub fn fund_wallet_db(db: &std::path::Path, values_sat: &[u64]) -> Vec<OutPoint>
                     block_id: block_900,
                     confirmation_time: 100,
                 },
+            )
+        })
+        .collect();
+    wallet.persist(&mut conn).unwrap();
+    outpoints
+}
+
+/// Seed the persisted signet wallet with outputs still in the mempool:
+/// `External` is a payment from someone else, `Internal` the wallet's own
+/// change.
+pub fn fund_wallet_unconfirmed(
+    dir: &TempDir,
+    keychain: KeychainKind,
+    values_sat: &[u64],
+) -> Vec<OutPoint> {
+    let db = dir.path().join("wallets/main/signet/wallet.sqlite");
+    let mut conn = rusqlite::Connection::open(db).unwrap();
+    let mut wallet = bdk_wallet::Wallet::load()
+        .check_network(Network::Signet)
+        .load_wallet(&mut conn)
+        .unwrap()
+        .expect("run init_wallet first");
+    let outpoints = values_sat
+        .iter()
+        .map(|value| {
+            let address = wallet.next_unused_address(keychain).address;
+            receive_output_to_address(
+                &mut wallet,
+                address,
+                Amount::from_sat(*value),
+                ReceiveTo::Mempool(1),
             )
         })
         .collect();

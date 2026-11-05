@@ -287,7 +287,8 @@ impl Sim {
         .to_string())
     }
 
-    /// Shared preparation path: parse, exclude dust suspects, plan.
+    /// Shared preparation path: parse, exclude dust suspects and unconfirmed
+    /// payments, plan.
     fn plan(
         &mut self,
         recipient: &str,
@@ -300,11 +301,12 @@ impl Sim {
         if fee_rate == 0 {
             return Err("fee rate must be at least 1 sat/vB".to_string());
         }
-        let unspendable = engine::dust_suspects(
+        let mut unspendable = engine::dust_suspects(
             self.wallet
                 .list_unspent()
                 .map(|u| (u.outpoint, u.txout.value)),
         );
+        unspendable.extend(engine::unconfirmed_received(&self.wallet));
         engine::build_plan(
             &mut self.wallet,
             &recipient,
