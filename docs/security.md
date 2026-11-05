@@ -372,6 +372,15 @@ exclusion described under [Alkanes](#alkanes). Only a human CLI invocation
 can bypass the local heuristic with `--allow-dust`, for that invocation;
 it never bypasses the Alkanes exclusion.
 
+Coin selection also excludes unconfirmed payments, on every spend path and
+with every provider. Until a block confirms one, its sender can replace it,
+and that would invalidate any spend built on it after the human had reviewed
+and approved. No flag lifts this. An unconfirmed output on the change
+keychain stays spendable, matching what `balance` counts as spendable.
+Approving a request that only unconfirmed coins could fund stops before
+signing and leaves it `failed`, so the human can approve it again once they
+confirm.
+
 Provider data is untrusted. A fee rate that is non-finite, negative, or above
 10,000 sat/vB is a typed error. Malformed checkpoint data fails the sync,
 not the process. Diagnostics show only a provider's origin, never user-info,

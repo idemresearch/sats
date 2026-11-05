@@ -118,9 +118,10 @@ for `alkanes_simulate`. Arbitrary Alkanes execution requests are unavailable. Tr
 { "balance_sat": 118500, "pending_sat": 0, "synced": true, "network": "signet" }
 ```
 
-`synced: false` means the chain was unreachable and the balance is cached. A
-provider choice the network can't serve returns an error, not a cached
-balance.
+`pending_sat` is not spendable yet: approval leaves unconfirmed payments out
+of a spend until a block confirms them. `synced: false` means the chain was
+unreachable and the balance is cached. A provider choice the network can't
+serve returns an error, not a cached balance.
 
 ### `get_receive_address`
 
@@ -225,7 +226,7 @@ or destination with the same key returns `idempotency_key_conflict`.
 
 On `sats agent approve`, the shared native transfer workflow syncs,
 requires indexed asset inputs, and excludes unrelated asset-bearing, unknown,
-and dust outputs from BTC funding. It checks the exact asset quantity and
+dust, and unconfirmed-payment outputs from BTC funding. It checks the exact asset quantity and
 recipient, returns all remaining indexed Alkanes to the wallet, rejects extra
 external BTC outputs, and derives input values and fee from the wallet.
 Human review shows the protocol, id, base-unit quantity, recipient, returned
@@ -280,7 +281,7 @@ original recorded contract facts even when the provider changes or is
 unavailable. A changed contract or signer stops approval of that request.
 
 On approval the native executor rechecks the recorded contract facts, syncs, excludes
-dust, asset-bearing and unknown outputs, builds and independently verifies
+dust, asset-bearing, unknown and unconfirmed-payment outputs, builds and independently verifies
 the exact transaction, and simulates that transaction through the
 `metashrew_view` protobuf `simulate` view. A recognized positive frBTC
 prediction is required. The human reviews the signer payment, contract

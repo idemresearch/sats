@@ -89,6 +89,7 @@ pub(crate) fn prepare(
         assets::excluded_for_send(&ctx, services)?
             .ok_or_else(|| anyhow!("wrapping requires an Alkanes indexer"))?,
     );
+    excluded.extend(crate::prepare::unconfirmed_exclusions(&ctx).0);
     let receiver = ctx
         .wallet
         .reveal_next_address(sats_core::bdk_wallet::KeychainKind::External);

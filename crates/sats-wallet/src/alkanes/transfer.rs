@@ -103,8 +103,8 @@ pub(crate) fn prepare(
             .ok_or_else(|| anyhow!("selected asset totals overflow"))?;
     }
 
-    // Everything else that isn't provably clean, and the dust heuristic,
-    // stays out of the BTC funding.
+    // Everything else that isn't provably clean, the dust heuristic, and
+    // unconfirmed payments stay out of the BTC funding.
     let utxos: Vec<(OutPoint, Amount)> = ctx
         .wallet
         .list_unspent()
@@ -114,6 +114,7 @@ pub(crate) fn prepare(
         .into_iter()
         .collect();
     unspendable.extend(scanned.not_clean().map(|o| o.outpoint));
+    unspendable.extend(crate::prepare::unconfirmed_exclusions(&ctx).0);
     let unspendable: Vec<OutPoint> = unspendable.into_iter().collect();
 
     let rate = fee_rate(services, args.fee_rate)?;

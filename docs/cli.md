@@ -152,13 +152,18 @@ Every send, human or agent, takes the same path:
 1. Validate the address for the selected network.
 2. Sync the wallet. An empty wallet stops here with funding guidance.
 3. Exclude 546- and 330-sat outputs, which may carry inscriptions, unless
-   you pass `--allow-dust`. If every output is excluded, stop and say so.
+   you pass `--allow-dust`. Exclude unconfirmed payments too: until a block
+   confirms them their sender can replace them, which would invalidate your
+   send. Your own unconfirmed change stays spendable. If every output is
+   excluded, stop and say so.
 4. Estimate the fee for the configured target (2 blocks by default), unless
    you pass `--fee-rate`.
 5. Build the unsigned PSBT in memory.
 
 A sync failure stops the send. `--allow-dust` applies only to that one command
-and is never available to agents.
+and is never available to agents. No flag lifts the unconfirmed exclusion.
+`sats balance` shows those coins as pending, and a send they would have
+funded fails saying how much is waiting for confirmation.
 
 | Mode | Behavior |
 |---|---|

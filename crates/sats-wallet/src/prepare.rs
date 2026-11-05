@@ -2,8 +2,10 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail};
+use sats_core::bdk_wallet::error::CreateTxError;
 use sats_core::bitcoin::{Address, Amount, FeeRate, OutPoint};
 use sats_core::engine;
+use sats_core::error::PlanError;
 use sats_core::plan::PreparedSpend;
 
 use crate::provider::Services;
@@ -30,9 +32,47 @@ impl<'a> PrepareRequest<'a> {
     }
 }
 
+/// Unconfirmed payments every spend leaves out, and what they total. No
+/// flag lifts this: the sender can still replace them.
+pub(crate) fn unconfirmed_exclusions(ctx: &WalletCtx) -> (Vec<OutPoint>, Amount) {
+    let outpoints = engine::unconfirmed_received(&ctx.wallet);
+    let waiting = outpoints
+        .iter()
+        .filter_map(|outpoint| ctx.wallet.get_utxo(*outpoint))
+        .map(|utxo| utxo.txout.value)
+        .sum();
+    if !outpoints.is_empty() {
+        log::warn!(
+            "{} utxo{} excluded (unconfirmed payment)",
+            outpoints.len(),
+            if outpoints.len() == 1 { "" } else { "s" },
+        );
+    }
+    (outpoints, waiting)
+}
+
+/// Name the coins a shortfall is waiting on, so "insufficient funds" isn't
+/// read against a balance that includes them.
+fn explain_shortfall(err: PlanError, waiting: Amount) -> anyhow::Error {
+    let short = matches!(
+        &err,
+        PlanError::CreateTx(create) if matches!(**create, CreateTxError::CoinSelection(_))
+    );
+    let err = anyhow::Error::from(err);
+    if short && waiting > Amount::ZERO {
+        err.context(format!(
+            "{} sat is waiting for confirmation and can't be spent yet",
+            waiting.to_sat()
+        ))
+    } else {
+        err
+    }
+}
+
 /// The shared preparation pipeline for human sends and approved agent
 /// requests:
-/// validate → sync → check funds → exclude dust → estimate → build. A
+/// validate → sync → check funds → exclude dust and unconfirmed payments →
+/// estimate → build. A
 /// request that can never succeed (bad address) fails before any network
 /// IO. Spending never plans on stale chain state — a failed sync is a hard
 /// error.
@@ -86,7 +126,16 @@ pub fn build(
         }
         unspendable.extend(assets);
     }
+    let (unconfirmed, waiting) = unconfirmed_exclusions(ctx);
+    unspendable.extend(unconfirmed);
     if utxos.iter().all(|(op, _)| unspendable.contains(op)) {
+        if waiting > Amount::ZERO {
+            bail!(
+                "Insufficient confirmed funds: {} sat is waiting for confirmation — try again \
+                 once it confirms",
+                waiting.to_sat()
+            );
+        }
         bail!(
             "Insufficient spendable funds: all {} unspent outputs are excluded by the dust \
              heuristic (546 or 330 sats, possible inscriptions) or as asset carriers — add \
@@ -105,7 +154,7 @@ pub fn build(
             .estimate_fee_rate()
             .context("cannot estimate fee — check the configured fee provider and try again")?,
     };
-    Ok(engine::build_plan(
+    engine::build_plan(
         &mut ctx.wallet,
         &addr,
         Amount::from_sat(req.amount),
@@ -113,5 +162,6 @@ pub fn build(
         &unspendable,
         ctx.net_name,
         unix_now(),
-    )?)
+    )
+    .map_err(|err| explain_shortfall(err, waiting))
 }

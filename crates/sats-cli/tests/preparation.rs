@@ -7,7 +7,10 @@ mod common;
 use std::fs;
 use std::sync::atomic::Ordering;
 
-use common::{ADDRESS, HttpServer, fund_wallet, init_wallet, json_stdout, sats};
+use bdk_wallet::KeychainKind;
+use common::{
+    ADDRESS, HttpServer, fund_wallet, fund_wallet_unconfirmed, init_wallet, json_stdout, sats,
+};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -140,6 +143,62 @@ fn dust_is_excluded_and_the_rest_funds_the_plan() {
     assert_eq!(output["amount_sat"], 5_000);
     assert!(output["fee_sat"].as_u64().unwrap() > 0);
     assert_eq!(fx.fee_calls(), 1);
+}
+
+#[test]
+fn a_wallet_with_only_unconfirmed_payments_says_to_wait_before_fees() {
+    let fx = Fixture::new(&[], false);
+    fund_wallet_unconfirmed(&fx.dir, KeychainKind::External, &[100_000]);
+    fx.dry_run()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "100000 sat is waiting for confirmation",
+        ))
+        .stderr(predicate::str::contains("no unspent outputs").not())
+        .stderr(predicate::str::contains("estimate fee").not());
+    assert_eq!(fx.fee_calls(), 0);
+}
+
+#[test]
+fn allow_dust_does_not_lift_the_confirmation_rule() {
+    let fx = Fixture::new(&[], false);
+    fund_wallet_unconfirmed(&fx.dir, KeychainKind::External, &[100_000]);
+    fx.dry_run()
+        .arg("--allow-dust")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("waiting for confirmation"));
+}
+
+#[test]
+fn unconfirmed_payments_are_left_out_and_confirmed_coins_fund_the_plan() {
+    let fx = Fixture::new(&[10_000], true);
+    fund_wallet_unconfirmed(&fx.dir, KeychainKind::External, &[100_000]);
+    let output = json_stdout(fx.dry_run().assert().success());
+    assert_eq!(output["excluded_utxos"], 1);
+    assert_eq!(output["amount_sat"], 5_000);
+}
+
+#[test]
+fn a_shortfall_covered_only_by_unconfirmed_payments_names_them() {
+    let fx = Fixture::new(&[1_000], true);
+    fund_wallet_unconfirmed(&fx.dir, KeychainKind::External, &[100_000]);
+    fx.dry_run()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "100000 sat is waiting for confirmation",
+        ))
+        .stderr(predicate::str::contains("Insufficient funds"));
+}
+
+#[test]
+fn unconfirmed_change_still_funds_a_send() {
+    let fx = Fixture::new(&[], true);
+    fund_wallet_unconfirmed(&fx.dir, KeychainKind::Internal, &[100_000]);
+    let output = json_stdout(fx.dry_run().assert().success());
+    assert_eq!(output["excluded_utxos"], 0);
 }
 
 #[test]

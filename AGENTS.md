@@ -276,6 +276,10 @@ A workflow two surfaces could need belongs here, not in a command.
 - Planning must not continue on stale chain state after sync failure.
 - The local dust heuristic (546/330 sats) excludes candidates before coin
   selection; only a human's per-invocation `--allow-dust` bypasses it.
+- Every spend path excludes unconfirmed payments
+  (`engine::unconfirmed_received`), whatever the provider, and no flag lifts
+  it: their sender can still replace them. Unconfirmed change stays
+  spendable, matching what `balance` counts as spendable.
 - When the selected provider serves Alkanes, every send excludes outputs
   the indexer says carry alkanes, or can't confirm knowing
   (`sats-wallet::assets`). Other providers retain the local dust heuristic.

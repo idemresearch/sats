@@ -776,7 +776,7 @@ mod tests {
     use bdk_wallet::bitcoin::hashes::Hash;
     use bdk_wallet::bitcoin::{Amount, BlockHash, Psbt};
     use bdk_wallet::chain::{BlockId, ConfirmationBlockTime};
-    use bdk_wallet::test_utils::{insert_checkpoint, receive_output};
+    use bdk_wallet::test_utils::{ReceiveTo, insert_checkpoint, receive_output};
     use sats_core::authz::{GRANT_FORMAT_VERSION, GrantMode, new_grant_id};
     use sats_core::error::SignerError;
     use sats_core::plan::TransactionStatus;
@@ -851,6 +851,34 @@ mod tests {
                 store,
                 mockdata,
             }
+        }
+
+        /// A payment from someone else, still in the mempool.
+        fn receive_unconfirmed(&self, value: u64) {
+            let mut ctx = walletd::open(&self.store, Network::Signet).unwrap();
+            receive_output(
+                &mut ctx.wallet,
+                Amount::from_sat(value),
+                ReceiveTo::Mempool(1),
+            );
+            ctx.persist().unwrap();
+        }
+
+        /// A payment from someone else, confirmed at height 900.
+        fn receive_confirmed(&self, value: u64) {
+            let mut ctx = walletd::open(&self.store, Network::Signet).unwrap();
+            receive_output(
+                &mut ctx.wallet,
+                Amount::from_sat(value),
+                ConfirmationBlockTime {
+                    block_id: BlockId {
+                        height: 900,
+                        hash: BlockHash::all_zeros(),
+                    },
+                    confirmation_time: 100,
+                },
+            );
+            ctx.persist().unwrap();
         }
 
         fn services(&self) -> Services {
@@ -2045,6 +2073,42 @@ mod tests {
 
     /// The whole loop: create → approve → sent, with exactly one signer
     /// construction and one signature.
+    #[test]
+    fn approval_waits_for_unconfirmed_funds_without_signing_and_stays_approvable() {
+        let fx = Fixture::new(&[]);
+        fx.receive_unconfirmed(100_000);
+        let token = fx.grant();
+        let id = fx.create(&token, "pay", 10_000).id;
+        let probe = SignerProbe::default();
+
+        let err = approve(&fx, &id, &probe).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("waiting for confirmation"),
+            "{err:#}"
+        );
+        assert_eq!(probe.counts(), (0, 0));
+        // Provably unsigned, so `failed` is re-approvable once funds confirm.
+        assert_eq!(fx.request(&id).status(), "failed");
+
+        fx.receive_confirmed(100_000);
+        let outcome = approve(&fx, &id, &probe).unwrap();
+        assert!(matches!(outcome, Outcome::Sent { .. }), "{outcome:?}");
+        assert_eq!(probe.counts(), (1, 1));
+    }
+
+    #[test]
+    fn a_wrap_is_never_funded_by_an_unconfirmed_payment_the_indexer_calls_clean() {
+        let fx = Fixture::new(&[]);
+        fx.receive_unconfirmed(100_000);
+        let token = wrap_fixture(&fx);
+        let request = wrap_request(&fx, &token);
+        let probe = SignerProbe::default();
+
+        assert!(approve(&fx, &request.id, &probe).is_err());
+        assert_eq!(probe.counts(), (0, 0));
+        assert_eq!(fx.request(&request.id).status(), "failed");
+    }
+
     #[test]
     fn approve_executes_once_and_settles_to_sent() {
         let fx = Fixture::new(&[100_000]);
