@@ -1,4 +1,4 @@
-//! sats human's side of a relay: link the device, mint agent URLs, and
+//! sats human's side of a relay: link the device, mint connection codes, and
 //! sync the mailbox.
 //!
 //! A relayed filing is decided here exactly as a local one: it goes
@@ -86,7 +86,7 @@ pub fn normalize_url(url: &str) -> Result<String> {
 }
 
 /// Link this device to a relay. An existing device key is kept unless
-/// `new_key`: a new key retires every agent URL minted with the old one.
+/// `new_key`: a new key retires every connection code minted with the old one.
 pub fn link(store: &Store, network: Network, url: &str, new_key: bool) -> Result<RelayLink> {
     sats_core::network::ensure_test_network(network)?;
     let url = normalize_url(url)?;

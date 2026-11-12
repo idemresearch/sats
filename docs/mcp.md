@@ -37,7 +37,7 @@ claude mcp add --transport stdio --scope local sats --env SATS_AGENT_TOKEN=<toke
   re-issue the grant.
 - **Restart ChatGPT desktop** after adding the server. ChatGPT on the web
   and on phones can't launch a local stdio server; connect those through a
-  [relay](relay.md).
+  [relay](relay.md) (preview).
 - **Claude Code uses local scope** and writes no repository `.mcp.json`.
   Run its setup command from the directory where you launch Claude. An
   entry added in another directory is not available in that session.

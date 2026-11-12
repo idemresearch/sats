@@ -1,5 +1,11 @@
 # Relay
 
+> [!NOTE]
+> The relay is a preview. Its protocol and stored formats may change in a
+> later release without migration. Wallet reads aren't relayed, there are no
+> notifications (your device sees a filing only when `sats relay sync`
+> runs), and releases include no relay binary or image.
+
 A relay lets an agent that can't run sats next to your wallet, such as
 ChatGPT on a phone (which reaches MCP servers from OpenAI's servers), file
 requests to it. There are three parts:
@@ -20,8 +26,8 @@ agent ──MCP over HTTPS──▶ relay ◀──signed sync── device (sat
 
 ## Run a relay
 
-The relay is its own binary, `sats-relay`, published as a Docker image built
-from the repository's `Dockerfile`:
+The relay is its own binary, `sats-relay`. Releases don't include it: build
+its Docker image from the repository's `Dockerfile`:
 
 ```sh
 docker build -t sats-relay .

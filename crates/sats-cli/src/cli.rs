@@ -103,6 +103,7 @@ pub enum Command {
         command: AgentCommand,
     },
     /// Link this device to a sats relay and sync relayed agent requests
+    /// (preview)
     #[cfg(feature = "mcp")]
     Relay {
         #[command(subcommand)]
@@ -325,7 +326,7 @@ pub struct GrantArgs {
     /// Without --to, every recipient may be proposed
     #[arg(long = "to", value_name = "ADDRESS")]
     pub to: Vec<String>,
-    /// Print an MCP URL that reaches this wallet through the linked relay
+    /// Print the linked relay's MCP URL and a one-time connection code
     /// (see sats relay link), for agents that can't run sats locally
     #[arg(long)]
     pub relay: bool,
@@ -338,8 +339,8 @@ pub enum RelayCommand {
     Link {
         /// The relay's origin, fx https://relay.example.com
         url: String,
-        /// Replace this device's relay key; every agent URL minted with the
-        /// old key stops working
+        /// Replace this device's relay key; every connection code minted with
+        /// the old key stops working
         #[arg(long)]
         new_key: bool,
     },

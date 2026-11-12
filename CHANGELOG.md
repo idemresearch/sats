@@ -3,6 +3,86 @@
 Notable changes to sats, newest first. Versions follow
 `workspace.package.version` in `Cargo.toml`.
 
+## 0.0.5 (2026-11-12)
+
+0.0.5 adds named wallets and stops building spends on unconfirmed payments.
+It also previews a relay, which lets agents that can't run next to your
+wallet, such as ChatGPT on a phone, file requests to it. Your data directory
+needs moving once: sats refuses a 0.0.4 data directory and prints the
+`mkdir` and `mv` that make it the wallet `main`. sats still runs on test
+networks only.
+
+### Wallets
+
+- Each named wallet has its own seed, in `wallets/<name>/` under the data
+  directory, and is chosen independently of the network. `sats wallet`
+  shows the active one, and `list`, `create`, `import`, and `use` manage
+  them. `--wallet` or `SATS_WALLET` picks one for a single command.
+- The active wallet is `--wallet`, else the saved default, else the only
+  wallet, else `main`. The first wallet you create or import becomes the
+  default.
+- `sats init` adds a network to the active wallet, or creates `main` when
+  there is none. To restore a mnemonic beside an existing wallet, run
+  `sats wallet import <NAME>`; restore no longer needs an empty data
+  directory.
+- Grants, requests, saved transactions, and relay links belong to one
+  wallet on one network. Printed MCP setup commands pin `--wallet` as well
+  as `--network`, so changing the default never moves an agent to another
+  seed.
+- A data directory from 0.0.4 or earlier keeps its seed at the top level.
+  sats refuses it and prints the exact `mkdir` and `mv` that make it the
+  wallet `main`. Nothing is moved for you, and grants, requests, and saved
+  transactions move with the network folders.
+
+### Spending
+
+- Every spend leaves out unconfirmed payments: sends, approved agent
+  requests, frBTC wraps, and the BTC funding of Alkanes transfers. Until a
+  block confirms a payment its sender can replace it, which would
+  invalidate a spend built on it after you approved. No flag lifts this.
+  Your own unconfirmed change stays spendable, matching what `balance`
+  counts as spendable.
+- A send that only unconfirmed payments could fund fails and says how much
+  is waiting for confirmation. An agent request in that position stops
+  before signing and stays `failed`, so you can approve it again once the
+  coins confirm. MCP `get_balance` reports those coins in `pending_sat`.
+
+### Relay (preview)
+
+The relay is a preview. Try it on signet, but expect its protocol and stored
+formats to change in a later release without migration. What it doesn't do
+yet:
+
+- Wallet reads aren't relayed. A relayed agent can file and check requests
+  but can't see your balance or receive addresses.
+- There are no notifications. Your device learns of a filing only when
+  `sats relay sync` runs, so keep `sats relay sync --watch` running while
+  you expect requests.
+- Releases include no relay binary or image. Build the image from the
+  repository's `Dockerfile` and run it behind HTTPS.
+
+What it does:
+
+- `sats relay link <URL>` links this wallet to a relay with a device relay
+  key that is separate from the seed and never unlocks it.
+  `sats agent grant <name> --relay` issues an ordinary grant and prints the
+  relay's MCP URL and a one-time connection code. `sats relay sync` files
+  what agents sent through the relay and posts each request's state back.
+- Agents sign in with OAuth: add the relay's `/mcp` URL as a remote MCP
+  server and paste the connection code on its sign-in page. The code
+  carries no grant token and never appears in a URL.
+- The relay serves `get_grant`, `request_send`, `request_wrap_frbtc`, and
+  `check_request`, with the same names and result shapes as a local server.
+  Your device decides every filing against its own grant, exactly as a
+  local one, and you approve with `sats agent approve` as usual. Approve
+  and dismiss post the new state to the relay as they finish.
+- The relay holds no wallet, seed, or signer. Filings are sealed to your
+  device and results to the agent's connection, so its database holds no
+  grant token, connection code, OAuth token, amount, recipient, or txid.
+  See [Relay](docs/relay.md) and
+  [Security](docs/security.md#the-relay) for what a compromised relay can
+  and can't do.
+
 ## 0.0.4 (2026-10-30)
 
 0.0.4 adds Alkanes and narrows what sats will sign. Agents can propose
